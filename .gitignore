@@ -1,0 +1,53 @@
+# Binaries & Executables
+pixel
+pixel_gui
+bin/pixel
+bin/pixel_gui
+cmd/test_chrome
+cmd/test_research
+test_research.go
+force_publish
+*.exe
+*.test
+
+# Python & Caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Environment, Secrets & Keys
+.env
+.env.*
+!.env.example
+*.key*
+.key_Gemini.txt
+*.pem
+*.pfx
+*.p12
+
+# Memory & State Files (Private user data)
+*.json
+!*.example.json
+*.mp
+
+# Audio, Media & Models
+*.wav
+*.mp3
+*.flac
+*.onnx
+*.onnx.json
+bin/piper/
+bin/whisper.cpp/
+bin/yt-dlp
+
+# Temporary Dumps, Images & Screenshots
+*.png
+*.jpg
+*.jpeg
+*.html
+webcam_temp_*
+
+# Scratch & Temporary Testing Folders
+scratch/
+tmp/

@@ -417,6 +417,13 @@ Consignes absolues pour ton message :
 	if response != "" {
 		// Persist in Short Term Memory (STM) so that the LLM has context of this greeting/question
 		va.stm.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: response})
+		if va.ltm != nil {
+			selfSummary := fmt.Sprintf("Pixel a fait une observation visuelle spontanée à Marcelo : \"%s\"", response)
+			embedding, errEmbed := va.provider.CreateEmbedding(ctx, selfSummary)
+			if errEmbed == nil && len(embedding) > 0 {
+				va.ltm.StoreMemory(ctx, "Personal", "self_expression", "Observation visuelle", selfSummary, []string{"vision", "observation", "spontané"}, embedding, 0.75)
+			}
+		}
 		va.onBroadcast(response)
 		fmt.Printf("[VisionAgent] Curiosité environnementale partagée : '%s'\n", response)
 	}
@@ -537,6 +544,13 @@ RÈGLES ABSOLUES :
 	response = strings.TrimSpace(response)
 	if response != "" {
 		va.stm.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: response})
+		if va.ltm != nil {
+			selfSummary := fmt.Sprintf("Pixel a accueilli Marcelo en disant : \"%s\"", response)
+			embedding, errEmbed := va.provider.CreateEmbedding(ctx, selfSummary)
+			if errEmbed == nil && len(embedding) > 0 {
+				va.ltm.StoreMemory(ctx, "Personal", "self_expression", "Accueil session", selfSummary, []string{"accueil", "salutation", "session"}, embedding, 0.75)
+			}
+		}
 		va.onBroadcast(response)
 		fmt.Printf("[VisionAgent] Salutation de session : '%s'\n", response)
 	}

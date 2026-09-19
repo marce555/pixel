@@ -81,6 +81,36 @@ def main():
         else:
             print("\nAucune tâche de publication en cours dans le gestionnaire de tâches.")
 
+        # Récupérer les brouillons en cache temporaire (drafts)
+        drafts_dirs = [
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "drafts")),
+            "/home/marceloc/Documents/Pixel/drafts",
+            "drafts"
+        ]
+        cached_drafts = []
+        for d_dir in drafts_dirs:
+            if os.path.exists(d_dir) and os.path.isdir(d_dir):
+                for f in sorted(os.listdir(d_dir), reverse=True):
+                    if f.endswith(".json"):
+                        try:
+                            with open(os.path.join(d_dir, f), 'r', encoding='utf-8') as df:
+                                cached_drafts.append(json.load(df))
+                        except Exception:
+                            pass
+                break
+
+        if cached_drafts:
+            print(f"\n📁 Brouillons d'articles dans le cache temporaire ({len(cached_drafts)}) :")
+            for d in cached_drafts[:5]:
+                d_id = d.get("id", "")
+                d_title = d.get("title", "Sans titre")
+                d_status = d.get("status", "inconnu")
+                err_info = f" -> Erreur : {d.get('error_log')[:70]}..." if d.get("error_log") else ""
+                notes = f" [Relecture : {d.get('review_notes')[:50]}...]" if d.get("review_notes") else ""
+                print(f"  - [{d_status.upper()}] {d_title} (ID: {d_id}){notes}{err_info}")
+        else:
+            print("\nAucun brouillon en attente dans le cache temporaire (dossier drafts/ vide).")
+
     except Exception as e:
         print(f"Erreur lors de l'exécution du skill check_published_articles : {e}", file=sys.stderr)
 

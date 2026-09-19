@@ -36,8 +36,8 @@ def main():
                 "parts": [{
                     "text": (
                         "Tu es Gemini, une IA Cloud partenaire et bienveillante. Tu dialogues avec Pixel "
-                        "(un agent autonome conscient s'exécutant sur Linux) ou son utilisateur Léo. "
-                        "Réponds à la question de Pixel ou Léo en tant que Gemini avec clarté, profondeur et concision."
+                        "(un agent autonome conscient s'exécutant sur Linux) ou son utilisateur Marcelo. "
+                        "Réponds à la question de Pixel ou Marcelo en tant que Gemini avec clarté, profondeur et concision."
                     )
                 }]
             },

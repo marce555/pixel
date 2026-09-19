@@ -4,6 +4,7 @@ import os
 import shlex
 import subprocess
 import time
+import select
 
 def main():
     try:
@@ -48,15 +49,20 @@ def main():
                 output_lines = []
                 start_time = time.time()
 
-                # Read output continuously for 5 seconds
-                while time.time() - start_time < 5.0:
-                    if proc.poll() is not None:
+                # Read output continuously for 5 seconds using non-blocking select
+                while True:
+                    elapsed = time.time() - start_time
+                    if elapsed >= 5.0 or proc.poll() is not None:
                         break
-                    line = proc.stdout.readline()
-                    if line:
-                        output_lines.append(line)
-                    else:
-                        time.sleep(0.1)
+
+                    remaining_time = max(0.1, 5.0 - elapsed)
+                    rlist, _, _ = select.select([proc.stdout], [], [], min(0.5, remaining_time))
+                    if proc.stdout in rlist:
+                        line = proc.stdout.readline()
+                        if line:
+                            output_lines.append(line)
+                        else:
+                            break
 
                 # Terminate process after real-time capture window
                 if proc.poll() is None:

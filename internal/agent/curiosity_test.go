@@ -477,6 +477,46 @@ func TestCuriosityAgentProposeToSharePresence(t *testing.T) {
 	}
 }
 
+func TestCameraPresencePreventsTuEsLa(t *testing.T) {
+	ctx := context.Background()
+	stm := memory.NewSTM(8)
+	ltm := memory.NewLTM()
+	coreMem := memory.NewCoreMemory("pixel_core_memory_presence_test.json")
+	defer os.Remove("pixel_core_memory_presence_test.json")
+
+	provider := &mockProvider{}
+	broadcaster := &mockPresenceBroadcaster{hasClients: true}
+	curiosity := NewCuriosityAgent(provider, coreMem, stm, ltm, broadcaster, timeagent.NewTimeAgent(), NewWebAgent(), memory.NewThoughtStream(10), NewSleepManager(stm, ltm, coreMem, nil, nil, provider), nil, nil)
+
+	msg := llm.Message{Role: llm.RoleUser, Content: "Salut"}
+	stm.AddMessage(msg)
+
+	// 1. Quand la caméra indique qu'il n'y a personne (pièce vide) :
+	coreMem.UpdateVolatileState("Dernière vision", "Je vois une pièce vide sans personne.")
+	curiosity.interpellateInterlocuteur(ctx, stm.GetMessages())
+
+	if len(broadcaster.messages) > 0 {
+		t.Fatalf("Pixel ne doit rien dire lorsque la caméra indique une pièce vide, mais a dit : %v", broadcaster.messages)
+	}
+	if !curiosity.interpelled {
+		t.Fatalf("Pixel aurait dû marquer interpelled=true pour ne pas boucler dans le vide")
+	}
+
+	// 2. Quand la caméra indique que l'utilisateur est présent :
+	curiosity.interpelled = false
+	coreMem.UpdateVolatileState("Dernière vision", "Je vois Marcelo concentré sur son écran.")
+	curiosity.interpellateInterlocuteur(ctx, stm.GetMessages())
+
+	if len(broadcaster.messages) != 1 {
+		t.Fatalf("Pixel aurait dû s'adresser à l'utilisateur présent, messages = %d", len(broadcaster.messages))
+	}
+	// Vérifier que le message ne contient pas "Tu es là ?"
+	msgLower := strings.ToLower(broadcaster.messages[0])
+	if strings.Contains(msgLower, "tu es là") || strings.Contains(msgLower, "t'es là") {
+		t.Fatalf("Le message ne doit pas demander 'Tu es là ?', obtenu : %s", broadcaster.messages[0])
+	}
+}
+
 func TestSuperiorAgentMediaFastPath(t *testing.T) {
 	ctx := context.Background()
 	provider := &mockProvider{}

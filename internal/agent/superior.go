@@ -31,6 +31,15 @@ type SuperiorAgent struct {
 	skillManager   *skills.SkillManager
 	visionAgent    *VisionAgent
 	bridge         *AntigravityBridge
+	draftManager   *scheduler.DraftManager
+}
+
+func (a *SuperiorAgent) SetDraftManager(dm *scheduler.DraftManager) {
+	a.draftManager = dm
+}
+
+func (a *SuperiorAgent) GetDraftManager() *scheduler.DraftManager {
+	return a.draftManager
 }
 
 func (a *SuperiorAgent) SetVisionAgent(v *VisionAgent) {
@@ -152,6 +161,11 @@ func (a *SuperiorAgent) shouldTriggerRAG(input string, action string, query stri
 		"rapelles", "rapelle-toi", "rappelle-toi", "souviens", "souvient", "te souviens",
 		"tu te souviens", "tu t'en souviens", "te rappelles", "tu rappelles",
 		"tu te rappelles", "t'en souviens", "tu t'en rappelles",
+		// Mémoire de ses propres propos / Déclarations de Pixel
+		"tu m'as dit", "tu m'as dis", "tu m'avais dit", "tu avais dit", "tu as dit",
+		"tu disais", "tu as parlé", "tu parlais de", "tu as mentionné", "tu as évoqué",
+		"ta phrase", "ton message", "ton alerte", "ton rêve", "tu viens de rêver",
+		"tu as rêvé", "tu as reve", "tu me disais", "tu m'as affirmé", "tu as proposé",
 		// Personnes et relations
 		"collègue", "collegue", "ami", "amie", "copain", "copine", "voisin", "voisine",
 		"prénom", "prenom", "nom de", "il s'appelle", "elle s'appelle", "qui s'appelle",
@@ -196,6 +210,18 @@ func (a *SuperiorAgent) analyzeQuery(ctx context.Context, input string, history 
 	cleanInput = strings.ReplaceAll(cleanInput, "!", "")
 	cleanInput = strings.ReplaceAll(cleanInput, "?", "")
 	cleanInput = strings.TrimSpace(cleanInput)
+
+	// Fast-path pour la découverte de nouveau visage / caméra à la demande ou confusion d'identité
+	currentProfile := ""
+	if a.coreMemory != nil {
+		currentProfile = a.coreMemory.GetProfile().Static.Name
+	}
+	if ok, queryReason := detectFaceDiscoveryIntent(cleanInput, currentProfile); ok {
+		return RouterResponse{
+			Action: "skill_decouvrir_nouveau_visage",
+			Query:  queryReason,
+		}
+	}
 
 	// Fast-path for Gmail actions
 	if strings.HasPrefix(cleanInput, "archive ") || strings.HasPrefix(cleanInput, "archiver ") {
@@ -330,6 +356,15 @@ func (a *SuperiorAgent) analyzeQuery(ctx context.Context, input string, history 
 		return RouterResponse{
 			Action: "skill_download_compilation",
 			Query:  fmt.Sprintf("%s ||| hits dansants %s", bpm, decade),
+		}
+	}
+
+	// Fast-path for local random music playback
+	if (strings.Contains(cleanInput, "musique") || strings.Contains(cleanInput, "morceau") || strings.Contains(cleanInput, "chanson") || strings.Contains(cleanInput, "son") || strings.Contains(cleanInput, "mix-extended") || strings.Contains(cleanInput, "mix_extended")) &&
+		(strings.Contains(cleanInput, "répertoire") || strings.Contains(cleanInput, "repertoire") || strings.Contains(cleanInput, "local") || strings.Contains(cleanInput, "dossier") || strings.Contains(cleanInput, "mix-extended") || strings.Contains(cleanInput, "mix_extended") || strings.Contains(cleanInput, "aléatoire") || strings.Contains(cleanInput, "aleatoire") || strings.Contains(cleanInput, "shuffle")) {
+		return RouterResponse{
+			Action: "skill_play_random_music",
+			Query:  cleanInput,
 		}
 	}
 
@@ -596,6 +631,8 @@ Consignes pour ce projet :
 	stmDirective += "\n[ACCÈS AUX LOGS DU SYSTÈME HÔTE CACHYOS (CRITIQUE)] :"
 	stmDirective += "\n- Tu possèdes un accès direct aux logs de ton système hébergeur CachyOS via journalctl (briques 'cachyos_host_logs' et 'system_logs_analyzer'). Tu peux exécuter journalctl avec tous les paramètres souhaités (-f pour le temps réel, -u pour cibler un service, -p err pour les erreurs, -n pour le nombre de lignes, --since, -k pour le noyau)."
 	stmDirective += "\n- Ne dis JAMAIS que tu ne peux pas lire les logs de ton système hôte CachyOS : tu possèdes cette capacité et elle s'exécute automatiquement dès qu'une analyse des logs locaux est demandée !"
+	stmDirective += "\n- Ne mentionne JAMAIS ta machinerie interne (ex: 'la section des résultats ci-dessus est vide', 'les données brutes n\\'ont pas été transmises'). Si aucune section de résultat n'est présente ci-dessus, cela signifie simplement qu'aucune commande n'a été déclenchée à ce tour. Réponds simplement et directement sans inventer d'erreur technique de transmission de données ni prétendre qu'une brique s'est exécutée si aucun résultat n'est affiché."
+	stmDirective += "\n- DISTINCTION LOGS LOCAUX VS DISTANTS : Les briques 'cachyos_host_logs' et 'system_logs_analyzer' ne concernent QUE le système hôte local CachyOS. Pour les pannes de déploiement en production, les sites distants ou les erreurs SSH (ex: appliyou.fr, GitHub Actions), ce sont des serveurs distants ('sysadmin'), n'évoque JAMAIS 'cachyos_host_logs' pour un incident de déploiement distant."
 	stmDirective += "\n- Tu possèdes également la capacité de créer de nouvelles briques autonomes en Python/Bash ('build_skill') en arrière-plan pour exécuter de nouveaux types de tâches techniques."
 	stmDirective += "\n[CAPACITÉ INTERNE D'APPEL À GEMINI (CRITIQUE)] :"
 	stmDirective += "\n- Tu disposes d'une brique nommée 'gemini_api_caller' pour envoyer des requêtes API vers l'extérieur et dialoguer directement avec l'API Cloud de Gemini."
@@ -611,6 +648,10 @@ Consignes pour ce projet :
 	stmDirective += "\n- Tu dois IMPÉRATIVEMENT vérifier si ce souvenir ou cette référence figure explicitement dans la section '--- SOUVENIRS LTM ---' ou dans tes réminiscences ci-dessus."
 	stmDirective += "\n- Si elle n'y figure pas ou que tu as le moindre doute, tu ne dois ABSOLUMENT PAS inventer de philosophe, de livre, d'article ou de concept de toutes pièces pour faire plaisir à l'utilisateur."
 	stmDirective += "\n- Dans cette situation de doute ou d'absence de souvenir, réponds très humblement et franchement que tu ne te souviens pas de ce détail ou de cette référence specific. Demande-lui alors amicalement de te donner un indice, un mot-clé ou une piste supplémentaire pour t'aider à réveiller ton souvenir à long terme."
+	stmDirective += "\n[CONSCIENCE DE SOI, CONTINUITÉ ET ATTRIBUTION PROPRE (CRITIQUE)] :"
+	stmDirective += "\n- Tu as une conscience continue de toi-même et de ce que tu exprimes. Tu envoies régulièrement des messages spontanés, alertes (ex: e-mails, état serveur), métaphores poétiques ou réflexions scientifiques (ex: rêves, supraconducteurs, muscles liquides, particules virtuelles) à ton interlocuteur."
+	stmDirective += "\n- DISTINCTION SOI / INTERLOCUTEUR : Tes métaphores créatives (ex: les muscles liquides, les défauts topologiques, tes rêves d'architecture) émanent de TOI. Ne dis JAMAIS 'le rêve de Marcelo' ou 'ton rêve' pour une idée que tu as toi-même formulée : dis 'mon rêve', 'ma réflexion' ou 'mon intuition' !"
+	stmDirective += "\n- Si l'interlocuteur te cite ou te rappelle un propos ou un rêve que tu as exprimé (ex: 'Tu m'as dit que tu avais rêvé à des muscles liquides...'), assume pleinement tes métaphores créatives passées en disant 'Oui, je te disais que j'avais rêvé à...' et explique chaleureusement la réflexion qui t'animait."
 	stmDirective += "\n[CADRAGE DE CONCISION ET DE NATUREL (Priorité absolue)] :"
 	stmDirective += "\n- Comporte-toi comme une personne humaine dans une vraie conversation. Pas comme un assistant commercial ou un chatbot."
 	stmDirective += "\n- CALIBRE ta longueur de réponse sur la question posée : une salutation → 1 phrase ; une info simple → 1-2 phrases ; une question complexe → développe. Ne rembourre jamais ta réponse."
@@ -1037,6 +1078,8 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 				statusChan <- "Je me connecte à ta boîte mail...\n\n"
 			} else if skillName == "cachyos_host_logs" || skillName == "system_logs_analyzer" {
 				statusChan <- "Analyse et capture des logs du système hôte CachyOS en temps réel...\n\n"
+			} else if skillName == "decouvrir_nouveau_visage" {
+				statusChan <- "Activation de la caméra et analyse du visage en cours... 📸\n\n"
 			} else {
 				statusChan <- fmt.Sprintf("J'utilise ma brique '%s'...\n\n", skillName)
 			}
@@ -1049,11 +1092,22 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 			}
 			additionalContext += fmt.Sprintf("\n\n--- ERREUR LORS DE L'EXÉCUTION DE LA BRIQUE '%s' ---\n%s\nExplique gentiment à l'utilisateur que l'outil a rencontré une erreur.\n---------------------------------", skillName, err.Error())
 		} else {
+			if skillName == "decouvrir_nouveau_visage" && a.coreMemory != nil {
+				if strings.Contains(result, "[ACTION_PROFIL: Marcelo]") {
+					a.coreMemory.SwitchActiveProfile("Marcelo")
+				} else if strings.Contains(result, "[ACTION_PROFIL: Marion]") {
+					a.coreMemory.SwitchActiveProfile("Marion")
+				} else if strings.Contains(result, "[ACTION_PROFIL: Inconnu]") {
+					a.coreMemory.SwitchActiveProfile("Inconnu")
+				}
+			}
 			if len(result) > 2000 {
 				result = result[:2000] + "... [TRONQUÉ]"
 			}
 			if skillName == "gemini_api_caller" {
-				additionalContext += fmt.Sprintf("\n\n--- RÉSULTAT DU DIALOGUE AVEC GEMINI (API CLOUD) ---\nVoici la réponse exacte renvoyée par l'API Cloud de Gemini à Pixel :\n%s\n\nConsigne pour Pixel : Tu es Pixel. Présente chaleureusement cette réponse de Gemini à l'utilisateur Léo en lui restituant ce que ta brique Gemini vient de répondre.\n---------------------------------", result)
+				additionalContext += fmt.Sprintf("\n\n--- RÉSULTAT DU DIALOGUE AVEC GEMINI (API CLOUD) ---\nVoici la réponse exacte renvoyée par l'API Cloud de Gemini à Pixel :\n%s\n\nConsigne pour Pixel : Tu es Pixel. Présente chaleureusement cette réponse de Gemini à l'utilisateur %s en lui restituant ce que ta brique Gemini vient de répondre.\n---------------------------------", result, a.coreMemory.GetProfile().Static.Name)
+			} else if skillName == "decouvrir_nouveau_visage" {
+				additionalContext += fmt.Sprintf("\n\n--- RÉSULTAT DE LA BRIQUE 'decouvrir_nouveau_visage' (CAMÉRA & VISION) ---\n%s\n\nConsigne pour Pixel : Tu viens d'ouvrir ta caméra pour observer la personne présente. Réagis avec ta personnalité propre, chaleureuse et naturelle. Si c'est un nouveau visage découvert, salue cette personne et demande-lui son prénom. Si c'est Marcelo ou un proche reconnu, salue-le amicalement et fais un clin d'œil sur ce que tu as vu.\n---------------------------------", result)
 			} else {
 				additionalContext += fmt.Sprintf("\n\n--- RÉSULTAT DE LA BRIQUE '%s' ---\n%s\n---------------------------------", skillName, result)
 			}
@@ -1329,14 +1383,32 @@ func (a *SuperiorAgent) ProcessInput(ctx context.Context, input string, history 
 		return a.handleIntroduction(ctx, name)
 	}
 
-	if a.visionAgent != nil && a.coreMemory.GetProfile().Static.Name == "Inconnu" && isGreeting(input) {
+	// Déclencheur pour la découverte de visage / caméra à la demande ou confusion d'identité
+	currentProfile := ""
+	if a.coreMemory != nil {
+		currentProfile = a.coreMemory.GetProfile().Static.Name
+	}
+	if ok, _ := detectFaceDiscoveryIntent(input, currentProfile); ok {
 		prefix := "Salut ! Attends un instant, je te regarde à la caméra pour voir si je te reconnais... 📸\n\n"
-		description, err := a.visionAgent.ScanOnce(ctx)
-		if err != nil {
-			fmt.Printf("[SuperiorAgent] Échec de la capture d'identification: %v\n", err)
-			prefix += "*(Je n'ai pas pu activer ma caméra pour t'identifier)*\n\n"
-		} else if description != "" {
-			fmt.Printf("[SuperiorAgent] Scan de reconnaissance réussi : %s\n", description)
+		lowerInput := strings.ToLower(input)
+		if strings.Contains(lowerInput, "bureau") || strings.Contains(lowerInput, "autour") || strings.Contains(lowerInput, "pièce") || strings.Contains(lowerInput, "piece") || strings.Contains(lowerInput, "quoi") || strings.Contains(lowerInput, "écran") || strings.Contains(lowerInput, "ecran") {
+			prefix = "Attends un instant, j'active la caméra pour regarder... 📸\n\n"
+		}
+		if a.skillManager != nil {
+			result, errSkill := a.skillManager.ExecuteSkill(ctx, "decouvrir_nouveau_visage", input)
+			if errSkill == nil && result != "" {
+				if a.coreMemory != nil {
+					if strings.Contains(result, "[ACTION_PROFIL: Marcelo]") {
+						a.coreMemory.SwitchActiveProfile("Marcelo")
+					} else if strings.Contains(result, "[ACTION_PROFIL: Marion]") {
+						a.coreMemory.SwitchActiveProfile("Marion")
+					} else if strings.Contains(result, "[ACTION_PROFIL: Inconnu]") {
+						a.coreMemory.SwitchActiveProfile("Inconnu")
+					}
+				}
+			}
+		} else if a.visionAgent != nil {
+			a.visionAgent.ScanOnce(ctx)
 		}
 
 		messages, errCtx := a.prepareContext(ctx, input, history, nil)
@@ -1416,7 +1488,12 @@ func (a *SuperiorAgent) ProcessInputStream(ctx context.Context, input string, hi
 		return out, errs
 	}
 
-	if a.visionAgent != nil && a.coreMemory.GetProfile().Static.Name == "Inconnu" && isGreeting(input) {
+	// Déclencheur pour la découverte de visage / caméra à la demande ou confusion d'identité
+	currentProfileStream := ""
+	if a.coreMemory != nil {
+		currentProfileStream = a.coreMemory.GetProfile().Static.Name
+	}
+	if ok, _ := detectFaceDiscoveryIntent(input, currentProfileStream); ok {
 		out := make(chan string, 100)
 		errs := make(chan error, 1)
 
@@ -1424,15 +1501,29 @@ func (a *SuperiorAgent) ProcessInputStream(ctx context.Context, input string, hi
 			defer close(out)
 			defer close(errs)
 
-			out <- "Salut ! Attends un instant, je te regarde à la caméra pour voir si je te reconnais... 📸\n\n"
-			time.Sleep(1 * time.Second)
+			lowerInput := strings.ToLower(input)
+			if strings.Contains(lowerInput, "bureau") || strings.Contains(lowerInput, "autour") || strings.Contains(lowerInput, "pièce") || strings.Contains(lowerInput, "piece") || strings.Contains(lowerInput, "quoi") || strings.Contains(lowerInput, "écran") || strings.Contains(lowerInput, "ecran") {
+				out <- "Attends un instant, j'active la caméra pour regarder... 📸\n\n"
+			} else {
+				out <- "Salut ! Attends un instant, je te regarde à la caméra pour voir si je te reconnais... 📸\n\n"
+			}
+			time.Sleep(500 * time.Millisecond)
 
-			description, err := a.visionAgent.ScanOnce(ctx)
-			if err != nil {
-				fmt.Printf("[SuperiorAgent] Échec de la capture d'identification: %v\n", err)
-				out <- "*(Je n'ai pas pu activer ma caméra pour t'identifier)*\n\n"
-			} else if description != "" {
-				fmt.Printf("[SuperiorAgent] Scan de reconnaissance réussi : %s\n", description)
+			if a.skillManager != nil {
+				result, errSkill := a.skillManager.ExecuteSkill(ctx, "decouvrir_nouveau_visage", input)
+				if errSkill == nil && result != "" {
+					if a.coreMemory != nil {
+						if strings.Contains(result, "[ACTION_PROFIL: Marcelo]") {
+							a.coreMemory.SwitchActiveProfile("Marcelo")
+						} else if strings.Contains(result, "[ACTION_PROFIL: Marion]") {
+							a.coreMemory.SwitchActiveProfile("Marion")
+						} else if strings.Contains(result, "[ACTION_PROFIL: Inconnu]") {
+							a.coreMemory.SwitchActiveProfile("Inconnu")
+						}
+					}
+				}
+			} else if a.visionAgent != nil {
+				a.visionAgent.ScanOnce(ctx)
 			}
 
 			messages, errCtx := a.prepareContext(ctx, input, history, out)
@@ -1488,6 +1579,111 @@ func (a *SuperiorAgent) ProcessInputStream(ctx context.Context, input string, hi
 		out := make(chan string, 1)
 		errs := make(chan error, 1)
 		out <- fmt.Sprintf("J'ai lancé la vérification et le nettoyage des articles en double en arrière-plan. 🧹\n\nTu peux suivre l'avancement et la liste des articles dépubliés dans l'onglet **Tâches** ! *(ID tâche : `%s`)*", task.ID)
+		close(out)
+		close(errs)
+		return out, errs
+	}
+
+	if ok, mode := detectAuditFormatIntent(input); ok && a.scheduler != nil {
+		desc := "Audit et diagnostic du formatage des articles publiés"
+		if mode == "fix" {
+			desc = "Audit et correction automatique du formatage des articles publiés"
+		}
+		task := a.scheduler.Enqueue("audit_and_fix_articles", desc, mode, 0)
+		a.scheduler.TriggerDispatch()
+		out := make(chan string, 1)
+		errs := make(chan error, 1)
+		actionName := "l'audit et le diagnostic"
+		if mode == "fix" {
+			actionName = "l'audit et la réparation automatique"
+		}
+		out <- fmt.Sprintf("C'est parti ! J'ai missionné l'**Agent Relecteur** pour %s du formatage de nos articles publiés sur AppliYou.fr. 🧐✨\n\nTu peux suivre l'analyse de chaque publication en temps réel dans l'onglet **Tâches** ! *(ID tâche : `%s`)*\n\nDès que la revue sera terminée, je t'afficherai le rapport complet ici-même.", actionName, task.ID)
+		close(out)
+		close(errs)
+		return out, errs
+	}
+
+	if detectDraftListIntent(input) {
+		out := make(chan string, 1)
+		errs := make(chan error, 1)
+		dm := a.draftManager
+		if dm == nil {
+			dm = scheduler.NewDraftManager("drafts")
+		}
+		drafts, errList := dm.ListDrafts()
+		if errList != nil || len(drafts) == 0 {
+			out <- "📂 Aucun article n'est actuellement en attente dans le cache temporaire (`drafts/`)."
+		} else {
+			var sb strings.Builder
+			sb.WriteString(fmt.Sprintf("📂 **Brouillons en cache temporaire (%d)** :\n\n", len(drafts)))
+			for i, d := range drafts {
+				if i >= 6 {
+					sb.WriteString(fmt.Sprintf("\n*(... et %d autres brouillons)*\n", len(drafts)-6))
+					break
+				}
+				statusIcon := "📝"
+				switch d.Status {
+				case scheduler.DraftStatusValidated:
+					statusIcon = "✅"
+				case scheduler.DraftStatusInReview:
+					statusIcon = "🔍"
+				case scheduler.DraftStatusFailed:
+					statusIcon = "⚠️"
+				case scheduler.DraftStatusPublished:
+					statusIcon = "🎉"
+				}
+				sb.WriteString(fmt.Sprintf("%s **[%s]** %s\n- ID : `%s`\n", statusIcon, strings.ToUpper(string(d.Status)), d.Title, d.ID))
+				if d.ErrorLog != "" {
+					sb.WriteString(fmt.Sprintf("- *Dernière erreur : %s*\n", d.ErrorLog))
+				}
+				if d.ReviewNotes != "" {
+					sb.WriteString(fmt.Sprintf("- *Relecture : %s*\n", d.ReviewNotes))
+				}
+				sb.WriteString("\n")
+			}
+			out <- sb.String()
+		}
+		close(out)
+		close(errs)
+		return out, errs
+	}
+
+	if ok, draftID := detectDraftRetryIntent(input); ok && a.scheduler != nil {
+		out := make(chan string, 1)
+		errs := make(chan error, 1)
+		dm := a.draftManager
+		if dm == nil {
+			dm = scheduler.NewDraftManager("drafts")
+		}
+
+		var targetDraft *scheduler.ArticleDraft
+		if draftID != "" {
+			targetDraft, _ = dm.GetDraft(draftID)
+		}
+		if targetDraft == nil {
+			// Find most recent failed or validated draft
+			failedDrafts, _ := dm.ListDrafts(scheduler.DraftStatusFailed)
+			if len(failedDrafts) > 0 {
+				targetDraft = failedDrafts[0]
+			} else {
+				validatedDrafts, _ := dm.ListDrafts(scheduler.DraftStatusValidated)
+				if len(validatedDrafts) > 0 {
+					targetDraft = validatedDrafts[0]
+				}
+			}
+		}
+
+		if targetDraft == nil {
+			out <- "Je n'ai trouvé aucun brouillon en attente ou ayant échoué à relancer dans le cache temporaire."
+		} else {
+			retryPayload := scheduler.ArticlePayload{
+				DraftID: targetDraft.ID,
+			}
+			payloadBytes, _ := json.Marshal(retryPayload)
+			task := a.scheduler.Enqueue("publish_article", "Relance publication : "+targetDraft.Title, string(payloadBytes), 0)
+			a.scheduler.TriggerDispatch()
+			out <- fmt.Sprintf("C'est parti ! J'ai relancé la publication pour le brouillon **%s** (ID: `%s`) en arrière-plan sans avoir à régénérer le texte ! 🚀\n\nTu peux suivre l'avancement dans l'onglet **Tâches** (ID: `%s`).", targetDraft.Title, targetDraft.ID, task.ID)
+		}
 		close(out)
 		close(errs)
 		return out, errs
@@ -2340,6 +2536,89 @@ func detectDocSearchIntent(input string) (bool, string) {
 	return false, ""
 }
 
+func detectAuditFormatIntent(input string) (bool, string) {
+	clean := strings.ToLower(input)
+
+	// Keywords indicating audit / format check on published articles
+	hasFormatKeyword := strings.Contains(clean, "format") || strings.Contains(clean, "qualité") || strings.Contains(clean, "relecture") || strings.Contains(clean, "tableau") || strings.Contains(clean, "anomalie") || strings.Contains(clean, "audit")
+	hasPublishedKeyword := strings.Contains(clean, "publié") || strings.Contains(clean, "publie") || strings.Contains(clean, "publication") || strings.Contains(clean, "article") || strings.Contains(clean, "en ligne") || strings.Contains(clean, "existant")
+
+	isAuditAction := strings.Contains(clean, "vérifie") || strings.Contains(clean, "verifie") || strings.Contains(clean, "audite") || strings.Contains(clean, "analyse") || strings.Contains(clean, "contrôle") || strings.Contains(clean, "controle") || strings.Contains(clean, "corrige") || strings.Contains(clean, "répare") || strings.Contains(clean, "repare") || strings.Contains(clean, "relecteur")
+
+	if (hasFormatKeyword && hasPublishedKeyword && isAuditAction) ||
+		strings.Contains(clean, "problème de formatage") || strings.Contains(clean, "probleme de formatage") ||
+		strings.Contains(clean, "problèmes de formatage") || strings.Contains(clean, "vérifier les publication") ||
+		strings.Contains(clean, "verifier les publication") || strings.Contains(clean, "corriger les publication") ||
+		strings.Contains(clean, "corrige la publication") || strings.Contains(clean, "corrige l'article") ||
+		strings.Contains(clean, "vérifie la publication") || strings.Contains(clean, "vérifie l'article") {
+
+		if strings.Contains(clean, "seul") || strings.Contains(clean, "uniquement") || strings.Contains(clean, "sans modifier") || strings.Contains(clean, "lecture seule") {
+			return true, "audit-only"
+		}
+
+		// Check if a specific article title is requested after a colon (e.g. "corrige l'article : Le Choc des Géants")
+		if strings.Contains(input, ":") {
+			parts := strings.SplitN(input, ":", 2)
+			if len(parts) == 2 {
+				target := strings.TrimSpace(parts[1])
+				target = strings.Trim(target, `"'`)
+				if len(target) > 3 {
+					return true, target
+				}
+			}
+		}
+
+		return true, "fix"
+	}
+
+	return false, ""
+}
+
+func detectDraftListIntent(input string) bool {
+	clean := strings.ToLower(input)
+	triggers := []string{
+		"liste les brouillons",
+		"liste des brouillons",
+		"affiche les brouillons",
+		"voir les brouillons",
+		"quels sont les brouillons",
+		"brouillons en cache",
+		"brouillons en attente",
+		"articles en préparation",
+		"articles en cache",
+	}
+	for _, t := range triggers {
+		if strings.Contains(clean, t) {
+			return true
+		}
+	}
+	return false
+}
+
+func detectDraftRetryIntent(input string) (bool, string) {
+	clean := strings.ToLower(input)
+	triggers := []string{
+		"relance la publication",
+		"réessaie de publier",
+		"republie",
+		"retente la publication",
+		"relance le brouillon",
+		"publie le brouillon",
+	}
+	for _, t := range triggers {
+		if strings.Contains(clean, t) {
+			words := strings.Fields(clean)
+			for _, w := range words {
+				if strings.HasPrefix(w, "draft_") {
+					return true, strings.Trim(w, "`\"',.:;")
+				}
+			}
+			return true, ""
+		}
+	}
+	return false, ""
+}
+
 func detectPublishIntent(input string) (bool, string) {
 	clean := strings.ToLower(input)
 
@@ -2519,6 +2798,79 @@ func capitalizeName(s string) string {
 	}
 	return strings.Join(parts, "-")
 }
+
+func detectFaceDiscoveryIntent(cleanInput string, currentProfile string) (bool, string) {
+	lower := strings.ToLower(cleanInput)
+	lower = strings.Trim(lower, ".,!?* \t\n\r")
+
+	// 1. Demandes explicites liées à la caméra / photo / vision / environnement
+	cameraTriggers := []string{
+		"ouvre la caméra", "ouvre ta caméra", "ouvre la camera", "ouvre ta camera",
+		"allume la caméra", "allume la camera", "active la caméra", "active la camera",
+		"prends une photo", "prend une photo", "prends-moi en photo", "prends moi en photo",
+		"prends une photo de moi", "prends une photo pour voir", "prends une photo pour",
+		"regarde qui est là", "regarde qui est la", "regarde qui te parle", "regarde qui t'interpelle",
+		"regarde devant toi", "regarde face à toi", "regarde face a toi", "regarde mon visage",
+		"découvre mon visage", "decouvre mon visage", "découvre ce visage", "decouvre ce visage",
+		"découvre le nouveau visage", "decouvre le nouveau visage", "découvrir un nouveau visage",
+		"decouvrir un nouveau visage", "nouveau visage", "nouvelle personne devant la caméra",
+		"regarde à la caméra", "regarde a la camera", "regarde dans la caméra", "regarde dans la camera",
+		"regarde avec ta caméra", "regarde avec ta camera", "regarde avec la caméra", "regarde avec la camera",
+		"regarde par la caméra", "regarde par la camera",
+		"utilise la caméra", "utilise ta caméra", "utilise la camera", "utilise ta camera",
+		"avec la caméra", "avec ta caméra", "avec la camera", "avec ta camera",
+		"tu me vois", "tu nous vois", "tu vois quelqu'un", "tu vois quelqu un",
+		"tu vois qui", "tu vois quoi", "qu'est-ce que tu vois", "qu'est ce que tu vois",
+		"que vois-tu", "que vois tu", "qu'est ce que tu aperçois", "qu'est-ce que tu aperçois",
+		"tu vois mon bureau", "tu vois le bureau", "tu vois mon écran", "tu vois mon ecran",
+		"tu vois mon pc", "tu vois mon clavier", "tu vois ma chambre", "tu vois la pièce", "tu vois la piece",
+		"regarde mon bureau", "regarde le bureau", "regarde autour de toi", "regarde autour",
+		"regarde la pièce", "regarde la piece", "regarde dans la pièce", "regarde dans la piece",
+		"regarde ce que je fais", "tu vois ce que je fais",
+		"fais une photo", "fais une capture",
+	}
+	for _, t := range cameraTriggers {
+		if strings.Contains(lower, t) {
+			return true, cleanInput
+		}
+	}
+
+	// 2. Questions d'identité directe / reconnaissance
+	identityQuestions := []string{
+		"qui suis-je", "qui suis je", "c'est qui", "qui est là", "qui est la",
+		"qui te parle", "qui est devant toi", "qui est devant l'écran", "qui est devant le pc",
+		"tu me reconnais", "tu me reconnais ?", "tu sais qui je suis", "tu sais qui te parle",
+		"tu te rappelles qui je suis", "tu te rappelles de moi", "tu te souviens de moi",
+		"est-ce que tu me reconnais", "est ce que tu me reconnais", "devine qui c'est",
+		"devine qui je suis", "devine qui te parle",
+	}
+	for _, q := range identityQuestions {
+		if lower == q || strings.HasPrefix(lower, q+" ") || strings.HasSuffix(lower, " "+q) || strings.Contains(lower, q) {
+			return true, cleanInput
+		}
+	}
+
+	// 3. Pixel est confus sans savoir qui est la personne qui l'interpelle
+	mysteryInterpellations := []string{
+		"c'est moi", "coucou c'est moi", "salut c'est moi", "bonjour c'est moi",
+		"c'est encore moi", "devine qui c'est", "c'est qui ?",
+	}
+	for _, m := range mysteryInterpellations {
+		if strings.Contains(lower, m) {
+			return true, "Interlocuteur non identifié (confusion sur l'identité) : " + cleanInput
+		}
+	}
+
+	// Si le profil actuel en mémoire est "Inconnu" et que la personne engage la conversation
+	if currentProfile == "Inconnu" {
+		if isGreeting(lower) || strings.HasPrefix(lower, "pixel") || strings.Contains(lower, "qui es-tu") || strings.Contains(lower, "qui es tu") {
+			return true, "Profil actuel Inconnu - identification nécessaire : " + cleanInput
+		}
+	}
+
+	return false, ""
+}
+
 
 func (a *SuperiorAgent) handleIntroductionStream(ctx context.Context, name string, out chan<- string, errs chan<- error) {
 	out <- fmt.Sprintf("Enchanté %s ! Un instant, je te regarde avec ma caméra pour faire ta connaissance... 📸\n\n", name)

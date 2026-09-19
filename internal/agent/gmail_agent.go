@@ -27,6 +27,7 @@ type GmailAgent struct {
 	llmProvider   llm.Provider
 	coreMemory    *memory.CoreMemory
 	stm           *memory.STM
+	ltm           *memory.LTM
 	thoughtStream *memory.ThoughtStream
 	eventHub      EventBroadcaster
 	mu            sync.Mutex
@@ -34,11 +35,12 @@ type GmailAgent struct {
 	processedUIDs map[string]bool
 }
 
-func NewGmailAgent(provider llm.Provider, coreMemory *memory.CoreMemory, stm *memory.STM, thoughtStream *memory.ThoughtStream, eventHub EventBroadcaster) *GmailAgent {
+func NewGmailAgent(provider llm.Provider, coreMemory *memory.CoreMemory, stm *memory.STM, ltm *memory.LTM, thoughtStream *memory.ThoughtStream, eventHub EventBroadcaster) *GmailAgent {
 	return &GmailAgent{
 		llmProvider:   provider,
 		coreMemory:    coreMemory,
 		stm:           stm,
+		ltm:           ltm,
 		thoughtStream: thoughtStream,
 		eventHub:      eventHub,
 		processedUIDs: make(map[string]bool),
@@ -170,6 +172,13 @@ func (g *GmailAgent) checkEmails(ctx context.Context, settings memory.GmailSetti
 			fmt.Printf("[GmailAgent] Email IMPORTANT détecté ! Envoi de l'alerte: %s\n", alertText)
 			if g.stm != nil {
 				g.stm.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: alertText})
+			}
+			if g.ltm != nil {
+				selfSummary := fmt.Sprintf("Pixel a prévenu Marcelo d'un e-mail : \"%s\" (de %s, sujet: %s)", alertText, email.From, email.Subject)
+				embedding, errEmbed := g.llmProvider.CreateEmbedding(ctx, selfSummary)
+				if errEmbed == nil && len(embedding) > 0 {
+					g.ltm.StoreMemory(ctx, "Personal", "self_expression", "Alerte e-mail : "+email.From, selfSummary, []string{"email", "alerte", "notification", strings.ToLower(email.From)}, embedding, 0.8)
+				}
 			}
 			g.eventHub.Broadcast(alertText)
 		}

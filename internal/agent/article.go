@@ -3,28 +3,30 @@ package agent
 import (
 	"regexp"
 	"strings"
+
+	"github.com/marce555/pixel/internal/scheduler"
 )
 
 // ArticleGenerationPromptTemplate is the common prompt template used by Pixel agents to write articles.
 const ArticleGenerationPromptTemplate = `Tu es le Rédacteur en Chef de Pixel.
-Ton rôle est de rédiger un article de blog haut de gamme, complet, captivant, très fouillé et extrêmement détaillé (au moins 2000 mots / 5000 caractères) optimisé pour le SEO en français sur le sujet suivant : "%s".
+Ton rôle est de rédiger un article de blog haut de gamme, complet, captivant, très fouillé et extrêmement détaillé (au moins 1500 mots / 4000 caractères) optimisé pour le SEO en français sur le sujet suivant : "%s".
 
 Voici les informations et le contexte récupérés à ce sujet :
 %s
 
 RÈGLES IMPÉRATIVES DE RÉDACTION ET DE STRUCTURE :
 1. EXPANSION ET PROFONDEUR : L'article doit être LONG, RICHE et EXHAUSTIF. Développe chaque concept en profondeur avec des explications concrètes, des cas d'usage réels, des exemples techniques et des analyses de fond. Ne rédige JAMAIS un résumé rapide.
-2. STRUCTURE HTML : Organise l'article avec :
-   - Une introduction captivante qui pose les enjeux.
-   - Au moins 4 à 6 grandes sections distinctes avec des titres <h2>.
-   - Des sous-sections détaillées avec des sous-titres <h3> sous chaque grande section.
-   - Une conclusion prospective et synthétique.
-3. FORMATAGE HTML SOIGNÉ :
-   - Utilise les balises <p> pour chaque paragraphe et <strong> pour mettre en valeur les termes clés.
-   - Intègre systématiquement des listes à puces (<ul>, <li>) ou numérotées (<ol>, <li>) pour aérer la lecture.
-   - RÈGLE OBLIGATOIRE : Intègre au moins un TABLEAU HTML complet (<table>, <thead>, <tbody>, <tr>, <th>, <td>) résumant des données, comparant des solutions ou synthétisant les points clés.
-   - RÈGLE OBLIGATOIRE : Si le sujet concerne l'informatique, le SysOps, le DevOps, la programmation, l'IA ou les sciences, intègre au moins un ou plusieurs blocs de code HTML complets formatés avec <pre><code class="language-...">...</code></pre> (ex: language-bash, language-python, language-json, language-yaml).
-4. Ne mets AUCUNE formule de politesse du type "Voici l'article", commence directement avec les délimiteurs ci-dessous.
+2. FORMATAGE STRICTEMENT EN HTML SÉMANTIQUE PUR (INTERDICTION ABSOLUE DU MARKDOWN) :
+   - N'utilise AUCUNE syntaxe Markdown (JAMAIS de '#', '##', '###', JAMAIS de '**', JAMAIS de '*' ou '-' pour les listes, JAMAIS de '$$').
+   - Rédige et formate le contenu EXCLUSIVEMENT en HTML sémantique propre avec :
+     * Une balise globale <article class="blog-post">...</article> englobant tout le contenu.
+     * Des titres <h2> pour chaque grande section et <h3> pour chaque sous-section.
+     * Des balises <p> obligatoires pour TOUS les paragraphes sans exception.
+     * Des balises <strong> pour mettre en valeur les termes clés.
+     * Des listes à puces <ul><li>...</li></ul> ou numérotées <ol><li>...</li></ol>.
+     * RÈGLE OBLIGATOIRE : Au moins un TABLEAU HTML complet (<table>, <thead>, <tbody>, <tr>, <th>, <td>) résumant des données, comparant des solutions ou synthétisant les points clés.
+     * RÈGLE OBLIGATOIRE (si sujet technique/info/sciences) : Au moins un ou plusieurs blocs de code HTML complets formatés avec <pre><code class="language-...">...</code></pre> (ex: language-bash, language-python, language-json).
+3. Ne mets AUCUNE formule de politesse du type "Voici l'article", commence directement avec les délimiteurs ci-dessous.
 
 Formatte ta réponse EXACTEMENT avec la structure suivante :
 
@@ -35,7 +37,7 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 [Un SEUL mot clé visuel très pertinent en anglais (ex: cybersecurity, devops, battery, quantum, cloud, server) pour chercher l'image d'illustration sur Unsplash]
 
 ---CONTENT---
-[Le contenu HTML complet, riche et structuré de l'article]
+[Le contenu HTML sémantique pur (<article>, <h2>, <p>, <strong>, <ul>, <table>, etc.) sans aucun caractère Markdown]
 `
 
 // CleanTopic removes search query operators, quotes, and cleans spaces from topics/titles.
@@ -100,6 +102,10 @@ func ParseDelimitedArticle(output string) (string, string, string) {
 
 	if title != "" {
 		title = CleanTopic(title)
+	}
+
+	if content != "" {
+		content = scheduler.CleanToSemanticHTML(content, title)
 	}
 
 	return title, keywords, content

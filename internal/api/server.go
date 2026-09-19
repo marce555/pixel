@@ -271,6 +271,14 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		bgCtx := s.sleepManager.AcquireBackgroundContext()
 		
 		go func(ctx context.Context) {
+			// Attendre une courte pause de 25 secondes de silence avant de lancer les analyses lourdes
+			// Si l'utilisateur envoie un nouveau message entre-temps, CancelBackgroundTasks() annulera ce contexte immédiatement.
+			select {
+			case <-time.After(25 * time.Second):
+			case <-ctx.Done():
+				return
+			}
+
 			// 1. Indexation en temps réel (contexte annulable)
 			s.sleepManager.IndexExchange(ctx, req.Message, fullReply)
 

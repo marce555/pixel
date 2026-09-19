@@ -83,13 +83,17 @@ func main() {
 	webResearcher := agent.NewWebResearcherAgent(provider, webAgent)
 	sysadminAgent := agent.NewSysadminAgent(provider)
 	
+	draftManager := scheduler.NewDraftManager("drafts")
+	reviewerAgent := agent.NewReviewerAgent(provider)
+
 	// Register scheduler handlers
 	taskScheduler.RegisterHandler("play_music", scheduler.NewPlayMusicHandler(webAgent, taskScheduler))
 	taskScheduler.RegisterHandler("agent_task", scheduler.NewAgentTaskHandler(provider, webAgent, eventHub, stm))
 	taskScheduler.RegisterHandler("research_task", agent.NewResearchTaskHandler(webResearcher, eventHub, stm))
 	taskScheduler.RegisterHandler("sysadmin", agent.NewSysadminTaskHandler(sysadminAgent, eventHub, stm))
-	taskScheduler.RegisterHandler("publish_article", scheduler.NewPublishArticleHandler(eventHub, stm, provider, webAgent))
+	taskScheduler.RegisterHandler("publish_article", scheduler.NewPublishArticleHandlerWithReviewer(eventHub, stm, provider, webAgent, draftManager, reviewerAgent))
 	taskScheduler.RegisterHandler("depublish_duplicates", scheduler.NewDepublishDuplicatesHandler(eventHub, stm, provider))
+	taskScheduler.RegisterHandler("audit_and_fix_articles", scheduler.NewAuditAndFixArticlesHandler(eventHub, stm, provider, draftManager, reviewerAgent))
 	
 	codeProvider := llm.NewOpenAICompatibleProvider(
 		llmSettings.CodeBaseURL,
@@ -118,12 +122,13 @@ func main() {
 	thoughtStream := memory.NewThoughtStream(50)
 	unconscious := memory.NewUnconsciousManager()
 	superior := agent.NewSuperiorAgent(provider, coreMem, ltm, webAgent, thoughtStream, unconscious, projectManager, taskScheduler, skillManager)
+	superior.SetDraftManager(draftManager)
 
 	// 6. Init Curiosity Agent & Thalamic Gate
 	timeAgent := timeagent.NewTimeAgent()
 	thalamicGate := agent.NewThalamicGate(provider)
 	curiosityAgent := agent.NewCuriosityAgent(provider, coreMem, stm, ltm, eventHub, timeAgent, webAgent, thoughtStream, sleepManager, taskScheduler, thalamicGate)
-	curiosityAgent.Start(ctx)
+	curiosityAgent.SetSkillManager(skillManager)
 
 	// 7. Init VisionAgent and start background sensory vision loop
 	visionAgent := agent.NewVisionAgent(provider, coreMem, ltm, stm, thoughtStream, func(msg string) {
@@ -131,9 +136,11 @@ func main() {
 	})
 	visionAgent.Start(ctx)
 	superior.SetVisionAgent(visionAgent)
+	curiosityAgent.SetVisionAgent(visionAgent)
+	curiosityAgent.Start(ctx)
 
 	// 7b. Init GmailAgent and start background check loop
-	gmailAgent := agent.NewGmailAgent(provider, coreMem, stm, thoughtStream, eventHub)
+	gmailAgent := agent.NewGmailAgent(provider, coreMem, stm, ltm, thoughtStream, eventHub)
 	gmailAgent.Start(ctx)
 
 	// 8. Démarrage de l'Interface Web locale

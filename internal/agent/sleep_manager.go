@@ -136,12 +136,14 @@ func (s *SleepManager) TriggerSleepCycleForMessages(ctx context.Context, msgs []
 	}
 
 	// 2. Ask LLM to extract Volatile updates and classify memories
-	systemPrompt := `Tu es le sous-système de consolidation de la mémoire. Ton rôle est d'analyser la conversation et d'extraire les informations sous forme de JSON strict.
-ATTENTION CRITIQUE : Tu dois extraire uniquement les états de l'UTILISATEUR humain (user:), pas de l'assistant (assistant:).
-- Ne confonds pas les recherches de fond ou curiosités de l'assistant (Wikipédia, IA, quantum) avec les tâches réelles de l'utilisateur humain.
-- N'attribue à l'utilisateur humain des tâches immédiates, projets ou humeurs QUE s'il les a explicitement exprimés dans ses propres messages (user:).
+	systemPrompt := `Tu es le sous-système de consolidation de la mémoire de Pixel. Ton rôle est d'analyser la conversation et d'extraire les informations sous forme de JSON strict.
+ATTENTION :
+- "volatile_updates" concerne uniquement les états de l'UTILISATEUR humain (user:). Ne confonds pas les réflexions de fond de l'assistant avec les tâches de l'utilisateur.
+- "memory_entries" (souvenirs persistants) DOIT conserver :
+  1. Les informations importantes de l'utilisateur (projets, vie personnelle, préférences, requêtes).
+  2. La CONSCIENCE DE SOI DE PIXEL : les idées fortes, métaphores, réflexions spontanées (ex: rêves, muscles liquides, physique, supraconducteurs), explications clés, ou promesses formulées par Pixel (assistant:).
 
-Tu doivent extraire trois choses :
+Tu dois extraire trois choses :
 1. "volatile_updates": Un dictionnaire (clé-valeur) des états actuels et actifs de l'utilisateur humain.
    Pour éviter la prolifération et les doublons de clés sémantiquement proches, utilise UNIQUEMENT des clés standardisées parmi :
    - "Ville actuelle"
@@ -153,19 +155,19 @@ Tu doivent extraire trois choses :
    - "Auteur préféré"
    - "Disponibilité"
    - "Modèle LLM utilisé"
-   Assure-toi de fusionner ou remplacer les informations similaires sous ces clés exactes au lieu de créer de nouvelles clés redondantes (comme "OS", "Système d'exploitation cible", "Lieu d'opération", "Lieu actuel/visite", etc.).
-2. "volatile_deletions": Une liste de clés de la mémoire volatile de l'utilisateur qui sont désormais obsolètes, terminées ou contredites par la nouvelle conversation (ex: une tâche immédiate accomplie ou remplacée).
+   Assure-toi de fusionner ou remplacer les informations similaires sous ces clés exactes au lieu de créer de nouvelles clés redondantes.
+2. "volatile_deletions": Une liste de clés de la mémoire volatile de l'utilisateur qui sont désormais obsolètes, terminées ou contredites par la nouvelle conversation.
 3. "memory_entries": Une liste de souvenirs importants de l'interaction à conserver. Pour chaque souvenir, définis :
    - "category": La catégorie du souvenir parmi ["Technical", "Project", "Personal", "Decision", "Other"].
-   - "title": Un titre très court et descriptif du souvenir (maximum 40 caractères) (ex: "Développement de Pixel", "Théologie de von Balthasar").
-   - "action_summary": Un résumé concis du fait ou de l'action.
-   - "keywords": Une liste de mots-clés pertinents.
+   - "title": Un titre très court et descriptif du souvenir (maximum 40 caractères) (ex: "Idée Pixel : Muscles liquides", "Projet Immo Marcelo").
+   - "action_summary": Un résumé concis et clair du fait ou du propos (ex: "Pixel a partagé une métaphore sur les muscles liquides et l'adaptabilité.", "Marcelo a parlé de son collègue Rémi.").
+   - "keywords": Une liste de mots-clés pertinents en minuscules.
 
 Réponds UNIQUEMENT avec un objet JSON strictement valide et bien formé (sans balises markdown, sans texte avant ou après). Format exact attendu :
 {
   "volatile_updates": { "Humeur": "..." },
   "volatile_deletions": ["AncienneClé1"],
-  "memory_entries": [ { "category": "Technical", "title": "...", "action_summary": "...", "keywords": ["..."] } ]
+  "memory_entries": [ { "category": "Personal", "title": "...", "action_summary": "...", "keywords": ["..."] } ]
 }`
 
 	prompt := []llm.Message{
@@ -351,9 +353,9 @@ func (s *SleepManager) IndexExchange(ctx context.Context, userMsg, assistantMsg 
 
 	fmt.Println("[SleepManager] Analyse et indexation en temps réel de l'échange...")
 
-	systemPrompt := `Tu es le système de mémoire dynamique de Pixel. Ton rôle est d'analyser cet unique échange et d'en extraire un souvenir à conserver s'il contient des faits réels, personnels, des projets, des décisions importantes ou des connaissances apprises.
+	systemPrompt := `Tu es le système de mémoire dynamique de Pixel. Ton rôle est d'analyser cet échange et d'en extraire un souvenir à conserver s'il contient des faits réels, personnels, des projets, des décisions, ou des idées/métaphores/réflexions importantes exprimées par l'utilisateur ou par Pixel.
 CRITIQUE :
-- Formule l'action_summary sous la forme d'une phrase simple, claire, directe et concise en français décrivant précisément ce que l'utilisateur a exprimé, demandé ou décidé (ex: "L'utilisateur a expliqué que son collègue Rémi est développeur Go.").
+- Formule l'action_summary sous la forme d'une phrase simple, claire et concise en français résumant l'interaction (ex: "Marcelo a questionné Pixel sur sa remarque sur les muscles liquides et Pixel a explicité sa réflexion.", ou "L'utilisateur a expliqué que son collègue Rémi est développeur Go.").
 - Choisis une catégorie parmi ["Technical", "Project", "Personal", "Decision", "Other"].
 - Extrais 2 à 4 mots-clés (tags) pertinents en minuscules.
 

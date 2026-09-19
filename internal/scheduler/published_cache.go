@@ -23,13 +23,19 @@ func LoadPublishedArticles() ([]string, error) {
 	}
 	var titles []string
 	if err := json.Unmarshal(data, &titles); err != nil {
-		return nil, err
+		return []string{}, err
+	}
+	if titles == nil {
+		titles = []string{}
 	}
 	return titles, nil
 }
 
 // SavePublishedArticles writes the published article titles to the local JSON file.
 func SavePublishedArticles(titles []string) error {
+	if titles == nil {
+		titles = []string{}
+	}
 	data, err := json.MarshalIndent(titles, "", "  ")
 	if err != nil {
 		return err

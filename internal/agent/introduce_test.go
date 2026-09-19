@@ -307,3 +307,60 @@ func TestOnDemandGreetingScan(t *testing.T) {
 		t.Errorf("Expected response to contain webcam snap message, got: %s", res)
 	}
 }
+
+func TestDetectFaceDiscoveryIntent(t *testing.T) {
+	tests := []struct {
+		input          string
+		currentProfile string
+		expectedOk     bool
+	}{
+		// 1. Demandes à la demande caméra / photo
+		{"ouvre la caméra", "Marcelo", true},
+		{"allume la caméra pour voir", "Marcelo", true},
+		{"prends une photo", "Marcelo", true},
+		{"prends-moi en photo", "Marcelo", true},
+		{"regarde qui est là", "Marcelo", true},
+		{"regarde qui te parle", "Marcelo", true},
+		{"découvre mon visage", "Marcelo", true},
+		{"découvre le nouveau visage", "Marcelo", true},
+		{"regarde à la caméra", "Marcelo", true},
+		{"tu vois mon bureau ?", "Marcelo", true},
+		{"tu me vois ?", "Marcelo", true},
+		{"qu'est-ce que tu vois ?", "Marcelo", true},
+		{"regarde ce que je fais", "Marcelo", true},
+		{"regarde la pièce", "Marcelo", true},
+
+		// 2. Questions d'identité directe / reconnaissance
+		{"qui suis-je ?", "Marcelo", true},
+		{"c'est qui ?", "Marcelo", true},
+		{"qui est là ?", "Marcelo", true},
+		{"tu me reconnais ?", "Marcelo", true},
+		{"tu sais qui je suis ?", "Marcelo", true},
+		{"tu te rappelles de moi ?", "Marcelo", true},
+		{"devine qui c'est", "Marcelo", true},
+
+		// 3. Interpellations mystère (confusion)
+		{"c'est moi", "Marcelo", true},
+		{"coucou c'est moi !", "Marcelo", true},
+
+		// 4. Profil Inconnu avec salutation ou appel
+		{"bonjour", "Inconnu", true},
+		{"salut", "Inconnu", true},
+		{"pixel tu es là ?", "Inconnu", true},
+		{"qui es-tu ?", "Inconnu", true},
+
+		// 5. Cas négatifs (pas de découverte de visage)
+		{"quel temps fait-il à Marseille ?", "Marcelo", false},
+		{"mets du rock", "Marcelo", false},
+		{"raconte-moi une histoire", "Marcelo", false},
+	}
+
+	for _, tt := range tests {
+		ok, reason := detectFaceDiscoveryIntent(tt.input, tt.currentProfile)
+		if ok != tt.expectedOk {
+			t.Errorf("detectFaceDiscoveryIntent(%q, %q) = %v (reason: %q), want %v",
+				tt.input, tt.currentProfile, ok, reason, tt.expectedOk)
+		}
+	}
+}
+

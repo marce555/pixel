@@ -28,7 +28,7 @@ func NewOpenAICompatibleProvider(baseURL, apiKey, chatModel, embeddingModel stri
 		ChatModel:      chatModel,
 		EmbeddingModel: embeddingModel,
 		Client: &http.Client{
-			Timeout: 300 * time.Second,
+			Timeout: 900 * time.Second,
 			Transport: &http.Transport{
 				MaxIdleConns:        10,
 				MaxIdleConnsPerHost: 10,
@@ -104,7 +104,7 @@ func (p *OpenAICompatibleProvider) Generate(ctx context.Context, messages []Mess
 	reqBody := chatRequest{
 		Model:     p.ChatModel,
 		Messages:  messages,
-		MaxTokens: 8192,
+		MaxTokens: 2048,
 	}
 	
 	jsonData, err := json.Marshal(reqBody)
@@ -180,7 +180,7 @@ func (p *OpenAICompatibleProvider) GenerateStream(ctx context.Context, messages 
 			Model:     p.ChatModel,
 			Messages:  messages,
 			Stream:    true,
-			MaxTokens: 8192,
+			MaxTokens: 4096,
 		}
 
 		jsonData, err := json.Marshal(reqBody)

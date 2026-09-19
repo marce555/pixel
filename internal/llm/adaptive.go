@@ -32,7 +32,11 @@ func NewAdaptiveProvider(activeMode, cloudAPIKey, cloudBaseURL, cloudModel, loca
 		localBaseURL: localBaseURL,
 		localModel:   localModel,
 	}
-	p.localProvider = NewOpenAICompatibleProvider(localBaseURL, "", localModel, "embed-gemma:300m")
+	localEmbed := "nomic-embed-text-v2-moe-GGUF"
+	if strings.Contains(localBaseURL, "52625") {
+		localEmbed = "embed-gemma:300m"
+	}
+	p.localProvider = NewOpenAICompatibleProvider(localBaseURL, "", localModel, localEmbed)
 	p.cloudProvider = NewOpenAICompatibleProvider(cloudBaseURL, cloudAPIKey, cloudModel, "gemini-embedding-2")
 	return p
 }
@@ -47,9 +51,13 @@ func (p *AdaptiveProvider) UpdateSettings(activeMode, cloudAPIKey, cloudBaseURL,
 	p.localBaseURL = localBaseURL
 	p.localModel = localModel
 
-	p.localProvider = NewOpenAICompatibleProvider(localBaseURL, "", localModel, "embed-gemma:300m")
+	localEmbed := "nomic-embed-text-v2-moe-GGUF"
+	if strings.Contains(localBaseURL, "52625") {
+		localEmbed = "embed-gemma:300m"
+	}
+	p.localProvider = NewOpenAICompatibleProvider(localBaseURL, "", localModel, localEmbed)
 	p.cloudProvider = NewOpenAICompatibleProvider(cloudBaseURL, cloudAPIKey, cloudModel, "gemini-embedding-2")
-	fmt.Printf("[AdaptiveProvider] Config updated: Mode=%s, CloudModel=%s, LocalModel=%s\n", activeMode, cloudModel, localModel)
+	fmt.Printf("[AdaptiveProvider] Config updated: Mode=%s, CloudModel=%s, LocalModel=%s (Embed=%s)\n", activeMode, cloudModel, localModel, localEmbed)
 }
 
 func (p *AdaptiveProvider) GetActiveMode() string {

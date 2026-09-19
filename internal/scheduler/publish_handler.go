@@ -17,11 +17,17 @@ import (
 )
 
 type ArticlePayload struct {
+	DraftID  string `json:"draft_id,omitempty"`
 	Title    string `json:"title"`
 	Category string `json:"category"`
 	Content  string `json:"content"`
 	Keywords string `json:"keywords"`
 	Topic    string `json:"topic,omitempty"`
+}
+
+// ArticleReviewer reviews and validates an article draft before publishing.
+type ArticleReviewer interface {
+	Review(ctx context.Context, draft *ArticleDraft) (reviewedTitle, reviewedKeywords, reviewedContent, reviewNotes string, err error)
 }
 
 const UsedImagesFile = "used_images.json"
@@ -124,8 +130,17 @@ Réponds UNIQUEMENT avec un tableau JSON de 3 requêtes en anglais, format stric
 	return []string{cleanTitle}
 }
 
-// NewPublishArticleHandler creates a TaskHandler to publish articles to the configured admin interface.
+// NewPublishArticleHandler creates a TaskHandler to publish articles to the configured admin interface with default draft caching.
 func NewPublishArticleHandler(broadcaster EventBroadcaster, stm STMWriter, provider llm.Provider, searcher WebSearcher) TaskHandler {
+	return NewPublishArticleHandlerWithReviewer(broadcaster, stm, provider, searcher, nil, nil)
+}
+
+// NewPublishArticleHandlerWithReviewer creates an orchestrated TaskHandler with persistent draft caching, reviewer validation, and resilient publishing.
+func NewPublishArticleHandlerWithReviewer(broadcaster EventBroadcaster, stm STMWriter, provider llm.Provider, searcher WebSearcher, draftManager *DraftManager, reviewer ArticleReviewer) TaskHandler {
+	if draftManager == nil {
+		draftManager = NewDraftManager("drafts")
+	}
+
 	return func(ctx context.Context, task *Task) error {
 		task.AppendLog("Démarrage de la tâche de publication...")
 
@@ -136,8 +151,28 @@ func NewPublishArticleHandler(broadcaster EventBroadcaster, stm STMWriter, provi
 			return fmt.Errorf("invalid payload: %w", err)
 		}
 
-		// Inline generation if content is empty or placeholder
-		if len(strings.TrimSpace(payload.Content)) < 100 {
+		var draft *ArticleDraft
+
+		// 1. Si un ID de brouillon est spécifié, charger l'article directement depuis le cache sans régénération
+		if payload.DraftID != "" {
+			task.AppendLog(fmt.Sprintf("Récupération du brouillon depuis le cache : '%s'...", payload.DraftID))
+			d, errGet := draftManager.GetDraft(payload.DraftID)
+			if errGet != nil {
+				task.AppendLog(fmt.Sprintf("Erreur : impossible de charger le brouillon '%s' : %v", payload.DraftID, errGet))
+				return fmt.Errorf("failed to load draft %s: %w", payload.DraftID, errGet)
+			}
+			draft = d
+			payload.Title = draft.Title
+			payload.Topic = draft.Topic
+			payload.Category = draft.Category
+			payload.Keywords = draft.Keywords
+			payload.Content = draft.GetEffectiveContent()
+			_ = draftManager.IncrementRetryCount(draft.ID)
+			task.AppendLog(fmt.Sprintf("Brouillon '%s' rechargé avec succès (Statut : %s, %d caractères, tentative #%d).", draft.ID, draft.Status, len(payload.Content), draft.RetryCount))
+		}
+
+		// Inline generation if content is empty or placeholder and no draft was loaded
+		if draft == nil && len(strings.TrimSpace(payload.Content)) < 100 {
 			topic := payload.Topic
 			if topic == "" {
 				topic = payload.Title
@@ -158,20 +193,22 @@ func NewPublishArticleHandler(broadcaster EventBroadcaster, stm STMWriter, provi
 
 			task.AppendLog("Rédaction de l'article complet par l'IA de Pixel...")
 			prompt := fmt.Sprintf(`Tu es le Rédacteur en Chef de Pixel.
-Ton rôle est de rédiger un article de blog haut de gamme, complet, captivant, très fouillé et extrêmement détaillé (au moins 2000 mots / 5000 caractères) optimisé pour le SEO en français sur le sujet suivant : "%s".
+Ton rôle est de rédiger un article de blog haut de gamme, complet, captivant, très fouillé et extrêmement détaillé (au moins 1500 mots / 4000 caractères) optimisé pour le SEO en français sur le sujet suivant : "%s".
 
 Voici les informations et le contexte récupérés à ce sujet :
 %s
 
 RÈGLES IMPÉRATIVES DE RÉDACTION ET DE STRUCTURE :
 1. EXPANSION ET PROFONDEUR : L'article doit être LONG, RICHE et EXHAUSTIF. Développe chaque concept en profondeur avec des explications concrètes, des cas d'usage réels, des exemples techniques et des analyses de fond. Ne rédige JAMAIS un résumé rapide.
-2. STRUCTURE HTML : Organise l'article avec :
+2. STRUCTURE HTML SÉMANTIQUE STRICTE : Organise l'article avec :
+   - Une balise racine <article class="blog-article"> enveloppant tout l'article.
    - Une introduction captivante qui pose les enjeux.
    - Au moins 4 à 6 grandes sections distinctes avec des titres <h2>.
    - Des sous-sections détaillées avec des sous-titres <h3> sous chaque grande section.
    - Une conclusion prospective et synthétique.
-3. FORMATAGE HTML SOIGNÉ :
-   - Utilise les balises <p> pour chaque paragraphe et <strong> pour mettre en valeur les termes clés.
+3. FORMATAGE HTML SÉMANTIQUE EXCLUSIF (AUCUN MARKDOWN AUTORISÉ) :
+   - N'UTILISE AUCUNE SYNTAXE MARKDOWN (#, ##, **, *, _, backticks, $$, etc.).
+   - Utilise EXCLUSIVEMENT du code HTML pur : <p> pour chaque paragraphe, <strong> pour mettre en valeur les termes clés, <em> pour l'emphase.
    - Intègre systématiquement des listes à puces (<ul>, <li>) ou numérotées (<ol>, <li>) pour aérer la lecture.
    - RÈGLE OBLIGATOIRE : Intègre au moins un TABLEAU HTML complet (<table>, <thead>, <tbody>, <tr>, <th>, <td>) résumant des données, comparant des solutions ou synthétisant les points clés.
    - RÈGLE OBLIGATOIRE : Si le sujet concerne l'informatique, le SysOps, le DevOps, la programmation, l'IA ou les sciences, intègre au moins un ou plusieurs blocs de code HTML complets formatés avec <pre><code class="language-...">...</code></pre> (ex: language-bash, language-python, language-json, language-yaml).
@@ -186,7 +223,7 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 [Un SEUL mot clé visuel très pertinent en anglais (ex: cybersecurity, devops, battery, quantum, cloud, server) pour chercher l'image d'illustration sur Unsplash]
 
 ---CONTENT---
-[Le contenu HTML complet, riche et structuré de l'article]
+[Le contenu HTML complet, riche et structuré de l'article enveloppé dans <article class="blog-article">]
 `, topic, knowledge)
 
 			messages := []llm.Message{
@@ -228,6 +265,7 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 			if genKeywords != "" {
 				payload.Keywords = genKeywords
 			}
+			genContent = CleanToSemanticHTML(genContent, payload.Title)
 			payload.Content = genContent
 
 			if len(payload.Content) < 1200 {
@@ -239,17 +277,83 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 			task.AppendLog(fmt.Sprintf("Article rédigé avec succès par l'IA (%d caractères). Titre : '%s'.", len(payload.Content), payload.Title))
 		}
 
+		// Sauvegarde immédiate dans le cache temporaire (DraftManager) si pas déjà créé
+		if draft == nil {
+			task.AppendLog("Mise en cache temporaire immédiate de l'article en préparation...")
+			d, errDraft := draftManager.CreateDraft(payload.Title, payload.Topic, payload.Category, payload.Keywords, payload.Content)
+			if errDraft != nil {
+				task.AppendLog(fmt.Sprintf("Avertissement : échec de mise en cache temporaire : %v", errDraft))
+			} else {
+				draft = d
+				task.AppendLog(fmt.Sprintf("Article sécurisé dans le cache temporaire (ID: %s).", draft.ID))
+			}
+		}
+
+		// Phase 2 : Relecture et validation qualité par l'Agent de Relecture
+		if draft != nil && reviewer != nil && draft.Status != DraftStatusValidated {
+			task.AppendLog("Transmission du brouillon à l'Agent de Relecture pour audit du format et du contenu...")
+			_ = draftManager.UpdateDraftStatus(draft.ID, DraftStatusInReview, "")
+
+			revTitle, revKeywords, revContent, revNotes, errRev := reviewer.Review(ctx, draft)
+			if errRev != nil {
+				task.AppendLog(fmt.Sprintf("Avertissement lors de la relecture : %v (maintien du contenu initial)", errRev))
+				_ = draftManager.UpdateReviewedContent(draft.ID, draft.Title, draft.Keywords, draft.RawContent, fmt.Sprintf("Avertissement relecture : %v", errRev))
+			} else {
+				task.AppendLog(fmt.Sprintf("Relecture et validation réussies ! Notes : %s", revNotes))
+				_ = draftManager.UpdateReviewedContent(draft.ID, revTitle, revKeywords, revContent, revNotes)
+				payload.Title = revTitle
+				payload.Keywords = revKeywords
+				payload.Content = revContent
+			}
+		} else if draft != nil && draft.Status != DraftStatusValidated {
+			_ = draftManager.UpdateDraftStatus(draft.ID, DraftStatusValidated, "Validation par défaut sans agent de relecture")
+		}
+
+		// Définition du garde-fou de persistance d'erreur pour ne JAMAIS perdre le brouillon
+		recordFailure := func(reason string, origErr error) error {
+			var errStr string
+			if origErr != nil {
+				errStr = origErr.Error()
+			} else {
+				errStr = reason
+			}
+			failMsg := fmt.Sprintf("⚠️ **[Problème lors de la Publication]**\nL'article **\"%s\"** n'a pas pu être publié sur AppliYou.fr.\n*Raison : %s (%s)*", payload.Title, reason, errStr)
+			if draft != nil {
+				_ = draftManager.UpdateDraftStatus(draft.ID, DraftStatusFailed, fmt.Sprintf("%s: %s", reason, errStr))
+				failMsg += fmt.Sprintf("\n\n💡 *Le contenu complet de l'article est conservé dans le cache temporaire (`%s`). Aucun texte n'est perdu ! Tu peux relancer la publication sans tout réécrire.*", draft.ID)
+			}
+			task.AppendLog(failMsg)
+			if broadcaster != nil {
+				broadcaster.Broadcast(failMsg)
+			}
+			if stm != nil {
+				stm.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: failMsg})
+			}
+			if origErr != nil {
+				return fmt.Errorf("%s: %w", reason, origErr)
+			}
+			return fmt.Errorf("%s", reason)
+		}
+
 		// Ultimate pre-publication anti-duplication check
 		published, errPub := LoadPublishedArticles()
 		if errPub == nil && len(published) > 0 && provider != nil {
 			if matchedTitle, tooSimilar := IsTopicTooSimilar(ctx, provider, payload.Title, published); tooSimilar {
 				msg := fmt.Sprintf("Publication annulée : l'article proposé '%s' est trop similaire à l'article déjà publié '%s'.", payload.Title, matchedTitle)
+				if draft != nil {
+					_ = draftManager.UpdateDraftStatus(draft.ID, DraftStatusFailed, msg)
+				}
 				task.AppendLog(msg)
 				if broadcaster != nil {
 					broadcaster.Broadcast("⚠️ " + msg)
 				}
 				return fmt.Errorf("%s", msg)
 			}
+		}
+
+		// Phase 3 : Passage à l'état de publication
+		if draft != nil {
+			_ = draftManager.UpdateDraftStatus(draft.ID, DraftStatusPublishing, "")
 		}
 
 		// Load configurations
@@ -263,8 +367,7 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 		}
 		password := os.Getenv("PIXEL_PUBLISH_PASS")
 		if password == "" {
-			task.AppendLog("⚠️ PIXEL_PUBLISH_PASS non configuré dans l'environnement.")
-			return fmt.Errorf("PIXEL_PUBLISH_PASS non configuré")
+			return recordFailure("PIXEL_PUBLISH_PASS non configuré dans l'environnement", nil)
 		}
 		createURL := os.Getenv("PIXEL_PUBLISH_CREATE_URL")
 		if createURL == "" {
@@ -302,14 +405,7 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 		)
 		if err != nil {
 			task.AppendLog(fmt.Sprintf("Erreur lors de la tentative de connexion : %v", err))
-			failMsg := fmt.Sprintf("⚠️ **[Problème lors de la Publication]**\nL'article **\"%s\"** n'a pas pu être publié sur AppliYou.fr.\n*Raison : Échec de la connexion à l'espace d'administration (%v)*", payload.Title, err)
-			if broadcaster != nil {
-				broadcaster.Broadcast(failMsg)
-			}
-			if stm != nil {
-				stm.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: failMsg})
-			}
-			return fmt.Errorf("login failed: %w", err)
+			return recordFailure("Échec de la connexion à l'espace d'administration", err)
 		}
 		task.AppendLog("Connexion réussie.")
 
@@ -322,14 +418,7 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 		)
 		if err != nil {
 			task.AppendLog(fmt.Sprintf("Erreur lors de la navigation vers l'administration : %v", err))
-			failMsg := fmt.Sprintf("⚠️ **[Problème lors de la Publication]**\nL'article **\"%s\"** n'a pas pu être publié sur AppliYou.fr.\n*Raison : Échec de navigation vers la page d'administration (%v)*", payload.Title, err)
-			if broadcaster != nil {
-				broadcaster.Broadcast(failMsg)
-			}
-			if stm != nil {
-				stm.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: failMsg})
-			}
-			return fmt.Errorf("navigation failed: %w", err)
+			return recordFailure("Échec de navigation vers la page d'administration", err)
 		}
 
 		// 3. Click the create article link/button if we are on list page
@@ -658,14 +747,7 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 		)
 		if err != nil || !submitted {
 			task.AppendLog("Échec de la soumission du formulaire.")
-			failMsg := fmt.Sprintf("⚠️ **[Problème lors de la Publication]**\nL'article **\"%s\"** n'a pas pu être publié sur AppliYou.fr.\n*Raison : Le formulaire d'édition n'a pas pu être soumis sur le serveur (%v)*", payload.Title, err)
-			if broadcaster != nil {
-				broadcaster.Broadcast(failMsg)
-			}
-			if stm != nil {
-				stm.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: failMsg})
-			}
-			return fmt.Errorf("failed to submit article: %w", err)
+			return recordFailure("Le formulaire d'édition n'a pas pu être soumis sur le serveur", err)
 		}
 
 		// Wait dynamically for redirect (up to 90 seconds, since translations take time)
@@ -691,194 +773,189 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 
 		var redirectURL string
 		err = chromedp.Run(chromeCtx, chromedp.Location(&redirectURL))
-		if err == nil {
-			if !redirectSuccess {
-				task.AppendLog(fmt.Sprintf("Avertissement : Délai d'attente de redirection dépassé. URL actuelle : %s", redirectURL))
-			} else {
-				task.AppendLog(fmt.Sprintf("Redirection réussie vers : %s", redirectURL))
-			}
-			
-			// If we landed on the list page instead of the edit page, find the edit link of the first article and navigate to it!
-			if !strings.Contains(redirectURL, "/edit") {
-				task.AppendLog("Redirection hors page d'édition. Recherche du premier article dans la liste pour l'éditer...")
-				var navigatedToEdit bool
-				err = chromedp.Run(chromeCtx,
-					chromedp.Evaluate(`(function() {
-						const link = document.querySelector('table tbody tr a[href*="/edit"]');
-						if (link) {
-							window.location.href = link.href;
-							return true;
-						}
-						return false;
-					})()`, &navigatedToEdit),
-					chromedp.Sleep(4*time.Second),
-					chromedp.Location(&redirectURL),
-				)
-				if err == nil && navigatedToEdit && strings.Contains(redirectURL, "/edit") {
-					task.AppendLog(fmt.Sprintf("Navigation manuelle réussie vers l'édition : %s", redirectURL))
-				} else {
-					task.AppendLog(fmt.Sprintf("Échec de la navigation vers la page d'édition. URL actuelle : %s", redirectURL))
-				}
-			}
+		if err != nil || (!redirectSuccess && (strings.Contains(redirectURL, "/create") || strings.Contains(redirectURL, "/new"))) {
+			return recordFailure(fmt.Sprintf("Échec de la soumission du formulaire de création (la page est restée sur %s)", redirectURL), err)
 		}
 
-		if err == nil && strings.Contains(redirectURL, "/edit") {
-			// 1. Click "Améliorer avec l'IA"
-			task.AppendLog("Lancement de l'amélioration de l'article avec l'IA du site...")
-			err = chromedp.Run(chromeCtx,
-				chromedp.WaitVisible(`#enhanceBtn`, chromedp.ByID),
-				chromedp.Click(`#enhanceBtn`, chromedp.ByID),
-			)
-			if err != nil {
-				task.AppendLog(fmt.Sprintf("Avertissement : échec du clic sur le bouton d'amélioration IA : %v", err))
-			} else {
-				// Wait for the AI enhancement process to start (classList does NOT contain 'hidden')
-				task.AppendLog("Attente du démarrage de l'amélioration par l'IA...")
-				var started bool
-				for i := 0; i < 15; i++ { // check up to 15 seconds for it to start
-					err = chromedp.Run(chromeCtx,
-						chromedp.Evaluate(`(function() {
-							const progress = document.getElementById('aiProgress');
-							return progress ? !progress.classList.contains('hidden') : false;
-						})()`, &started),
-					)
-					if err == nil && started {
-						break
-					}
-					chromedp.Run(chromeCtx, chromedp.Sleep(500*time.Millisecond))
-				}
-
-				// Wait for the AI enhancement process to finish (classList contains 'hidden')
-				task.AppendLog("Attente de la fin de l'amélioration par l'IA...")
-				var finished bool
-				for i := 0; i < 180; i++ { // check up to 3 minutes for it to finish
-					err = chromedp.Run(chromeCtx,
-						chromedp.Evaluate(`(function() {
-							const progress = document.getElementById('aiProgress');
-							return progress ? progress.classList.contains('hidden') : true;
-						})()`, &finished),
-					)
-					if err == nil && finished {
-						break
-					}
-					chromedp.Run(chromeCtx, chromedp.Sleep(1*time.Second))
-				}
-				if !finished {
-					task.AppendLog("Avertissement : l'amélioration IA a expiré ou a échoué.")
-				} else {
-					task.AppendLog("Article amélioré avec succès par l'IA !")
-				}
-			}
-
-			// 2. Click "Enregistrer" to save the enhanced article (ensuring is_draft is unchecked)
-			task.AppendLog("Enregistrement de l'article amélioré (décochage brouillon)...")
-			var saved bool
+		if !strings.Contains(redirectURL, "/edit") {
+			task.AppendLog("Redirection hors page d'édition. Recherche du premier article dans la liste pour l'éditer...")
+			var navigatedToEdit bool
 			err = chromedp.Run(chromeCtx,
 				chromedp.Evaluate(`(function() {
-					const draftInputs = document.querySelectorAll('input[name="is_draft"], input[id*="draft"]');
-					draftInputs.forEach(cb => {
-						cb.checked = false;
-						cb.removeAttribute('checked');
-						cb.dispatchEvent(new Event('change', { bubbles: true }));
-					});
-					const buttons = Array.from(document.querySelectorAll('button, input[type="submit"]'));
-					for (const b of buttons) {
-						const text = (b.innerText || b.textContent || b.value || '').toLowerCase();
-						if (text.includes('enregistrer') || text.includes('sauvegarder') || text.includes('save') || text.includes('créer') || text.includes('creer')) {
-							b.click();
-							return true;
-						}
-					}
-					return false;
-				})()`, &saved),
-				chromedp.Sleep(4*time.Second), // Wait for save and reload
-			)
-			if err != nil || !saved {
-				task.AppendLog("Avertissement : échec de l'enregistrement de l'article amélioré.")
-			} else {
-				task.AppendLog("Article enregistré avec succès.")
-			}
-
-			// 3. Attente stricte pour permettre aux traductions de se terminer en arrière-plan
-			task.AppendLog("Attente de 3 minutes pour permettre les traductions côté serveur...")
-			chromedp.Run(chromeCtx, chromedp.Sleep(3*time.Minute))
-
-			// 4. Publication finale (Décocher brouillon et Enregistrer/Soumettre)
-			task.AppendLog("Désactivation définitive de l'option brouillon et publication finale...")
-			var published bool
-			err = chromedp.Run(chromeCtx,
-				chromedp.Evaluate(`(function() {
-					window.confirm = function() { return true; }; // Override native confirm dialog
-					window.alert = function() { return true; };
-
-					const draftInputs = document.querySelectorAll('input[name="is_draft"], input[id*="draft"], input[name*="brouillon"]');
-					draftInputs.forEach(cb => {
-						cb.checked = false;
-						cb.removeAttribute('checked');
-						cb.value = "false";
-						cb.dispatchEvent(new Event('change', { bubbles: true }));
-					});
-					const selects = document.querySelectorAll('select[name="status"], select[name*="state"]');
-					selects.forEach(select => {
-						const opts = Array.from(select.options);
-						const pub = opts.find(o => o.text.toLowerCase().includes('publi') || o.value.toLowerCase().includes('publi') || o.value.toLowerCase().includes('published'));
-						if (pub) {
-							select.value = pub.value;
-							select.dispatchEvent(new Event('change', { bubbles: true }));
-						}
-					});
-					
-					const buttons = Array.from(document.querySelectorAll('button, input[type="submit"], a.btn'));
-					for (const b of buttons) {
-						const text = (b.innerText || b.textContent || b.value || '').toLowerCase();
-						if ((text.includes('publier') && !text.includes('dépublier')) || text.includes('enregistrer') || text.includes('sauvegarder') || text.includes('save') || text.includes('créer') || text.includes('creer')) {
-							b.click();
-							return true;
-						}
-					}
-					const form = document.querySelector('form');
-					if (form) {
-						form.submit();
+					const link = document.querySelector('table tbody tr a[href*="/edit"]');
+					if (link) {
+						window.location.href = link.href;
 						return true;
 					}
 					return false;
-				})()`, &published),
-				chromedp.Sleep(1*time.Second),
-			)
-
-			// 4b. Validation automatique des fenêtres/boutons de confirmation modales (ex: Confirmer la publication)
-			task.AppendLog("Recherche et clic automatique sur tout bouton de confirmation / validation (popup modal)...")
-			var modalConfirmed bool
-			errConfirm := chromedp.Run(chromeCtx,
-				chromedp.Evaluate(`(function() {
-					window.confirm = function() { return true; };
-					const allButtons = Array.from(document.querySelectorAll('button, input[type="button"], input[type="submit"], a.btn, .modal button, .swal2-confirm, [class*="modal"] button, [class*="popup"] button, [class*="dialog"] button, [id*="confirm"] button'));
-					for (const btn of allButtons) {
-						const style = window.getComputedStyle(btn);
-						if (style.display === 'none' || style.visibility === 'hidden') continue;
-						const text = (btn.innerText || btn.textContent || btn.value || '').toLowerCase();
-						if (text.includes('confirmer') || text.includes('valider') || text.includes('oui') || text === 'ok' || text.includes('publier maintenant') || text.includes('valider la publication') || text.includes('confirmer la publication')) {
-							btn.click();
-							return true;
-						}
-					}
-					return false;
-				})()`, &modalConfirmed),
+				})()`, &navigatedToEdit),
 				chromedp.Sleep(4*time.Second),
+				chromedp.Location(&redirectURL),
 			)
-			if errConfirm == nil && modalConfirmed {
-				task.AppendLog("Bouton de confirmation / validation de la publication cliqué avec succès !")
-			}
-			
-			if err != nil || !published {
-				task.AppendLog("Avertissement : échec de l'enregistrement final pour la publication.")
+			if err == nil && navigatedToEdit && strings.Contains(redirectURL, "/edit") {
+				task.AppendLog(fmt.Sprintf("Navigation manuelle réussie vers l'édition : %s", redirectURL))
 			} else {
-				task.AppendLog("Article publié avec succès via l'interface !")
+				task.AppendLog(fmt.Sprintf("Échec de la navigation vers la page d'édition. URL actuelle : %s", redirectURL))
 			}
-		} else {
-			task.AppendLog("Remarque : redirection hors page d'édition ou erreur de récupération de l'URL.")
 		}
 
+		if !strings.Contains(redirectURL, "/edit") {
+			return recordFailure(fmt.Sprintf("Impossible d'accéder à la page d'édition de l'article (URL actuelle : %s)", redirectURL), nil)
+		}
+
+		// 1. Click "Améliorer avec l'IA"
+		task.AppendLog("Lancement de l'amélioration de l'article avec l'IA du site...")
+		err = chromedp.Run(chromeCtx,
+			chromedp.WaitVisible(`#enhanceBtn`, chromedp.ByID),
+			chromedp.Click(`#enhanceBtn`, chromedp.ByID),
+		)
+		if err != nil {
+			task.AppendLog(fmt.Sprintf("Avertissement : échec du clic sur le bouton d'amélioration IA : %v", err))
+		} else {
+			// Wait for the AI enhancement process to start (classList does NOT contain 'hidden')
+			task.AppendLog("Attente du démarrage de l'amélioration par l'IA...")
+			var started bool
+			for i := 0; i < 15; i++ { // check up to 15 seconds for it to start
+				err = chromedp.Run(chromeCtx,
+					chromedp.Evaluate(`(function() {
+						const progress = document.getElementById('aiProgress');
+						return progress ? !progress.classList.contains('hidden') : false;
+					})()`, &started),
+				)
+				if err == nil && started {
+					break
+				}
+				chromedp.Run(chromeCtx, chromedp.Sleep(500*time.Millisecond))
+			}
+
+			// Wait for the AI enhancement process to finish (classList contains 'hidden')
+			task.AppendLog("Attente de la fin de l'amélioration par l'IA...")
+			var finished bool
+			for i := 0; i < 180; i++ { // check up to 3 minutes for it to finish
+				err = chromedp.Run(chromeCtx,
+					chromedp.Evaluate(`(function() {
+						const progress = document.getElementById('aiProgress');
+						return progress ? progress.classList.contains('hidden') : true;
+					})()`, &finished),
+				)
+				if err == nil && finished {
+					break
+				}
+				chromedp.Run(chromeCtx, chromedp.Sleep(1*time.Second))
+			}
+			if !finished {
+				task.AppendLog("Avertissement : l'amélioration IA a expiré ou a échoué.")
+			} else {
+				task.AppendLog("Article amélioré avec succès par l'IA !")
+			}
+		}
+
+		// 2. Click "Enregistrer" to save the enhanced article (ensuring is_draft is unchecked)
+		task.AppendLog("Enregistrement de l'article amélioré (décochage brouillon)...")
+		var saved bool
+		err = chromedp.Run(chromeCtx,
+			chromedp.Evaluate(`(function() {
+				const draftInputs = document.querySelectorAll('input[name="is_draft"], input[id*="draft"]');
+				draftInputs.forEach(cb => {
+					cb.checked = false;
+					cb.removeAttribute('checked');
+					cb.dispatchEvent(new Event('change', { bubbles: true }));
+				});
+				const buttons = Array.from(document.querySelectorAll('button, input[type="submit"]'));
+				for (const b of buttons) {
+					const text = (b.innerText || b.textContent || b.value || '').toLowerCase();
+					if (text.includes('enregistrer') || text.includes('sauvegarder') || text.includes('save') || text.includes('créer') || text.includes('creer')) {
+						b.click();
+						return true;
+					}
+				}
+				return false;
+			})()`, &saved),
+			chromedp.Sleep(4*time.Second), // Wait for save and reload
+		)
+		if err != nil || !saved {
+			task.AppendLog("Avertissement : échec de l'enregistrement de l'article amélioré.")
+		} else {
+			task.AppendLog("Article enregistré avec succès.")
+		}
+
+		// 3. Attente stricte pour permettre aux traductions de se terminer en arrière-plan
+		task.AppendLog("Attente de 3 minutes pour permettre les traductions côté serveur...")
+		chromedp.Run(chromeCtx, chromedp.Sleep(3*time.Minute))
+
+		// 4. Publication finale (Décocher brouillon et Enregistrer/Soumettre)
+		task.AppendLog("Désactivation définitive de l'option brouillon et publication finale...")
+		var finalPublished bool
+		err = chromedp.Run(chromeCtx,
+			chromedp.Evaluate(`(function() {
+				window.confirm = function() { return true; }; // Override native confirm dialog
+				window.alert = function() { return true; };
+
+				const draftInputs = document.querySelectorAll('input[name="is_draft"], input[id*="draft"], input[name*="brouillon"]');
+				draftInputs.forEach(cb => {
+					cb.checked = false;
+					cb.removeAttribute('checked');
+					cb.value = "false";
+					cb.dispatchEvent(new Event('change', { bubbles: true }));
+				});
+				const selects = document.querySelectorAll('select[name="status"], select[name*="state"]');
+				selects.forEach(select => {
+					const opts = Array.from(select.options);
+					const pub = opts.find(o => o.text.toLowerCase().includes('publi') || o.value.toLowerCase().includes('publi') || o.value.toLowerCase().includes('published'));
+					if (pub) {
+						select.value = pub.value;
+						select.dispatchEvent(new Event('change', { bubbles: true }));
+					}
+				});
+				
+				const buttons = Array.from(document.querySelectorAll('button, input[type="submit"], a.btn'));
+				for (const b of buttons) {
+					const text = (b.innerText || b.textContent || b.value || '').toLowerCase();
+					if ((text.includes('publier') && !text.includes('dépublier')) || text.includes('enregistrer') || text.includes('sauvegarder') || text.includes('save') || text.includes('créer') || text.includes('creer')) {
+						b.click();
+						return true;
+					}
+				}
+				const form = document.querySelector('form');
+				if (form) {
+					form.submit();
+					return true;
+				}
+				return false;
+			})()`, &finalPublished),
+			chromedp.Sleep(1*time.Second),
+		)
+
+		// 4b. Validation automatique des fenêtres/boutons de confirmation modales (ex: Confirmer la publication)
+		task.AppendLog("Recherche et clic automatique sur tout bouton de confirmation / validation (popup modal)...")
+		var modalConfirmed bool
+		errConfirm := chromedp.Run(chromeCtx,
+			chromedp.Evaluate(`(function() {
+				window.confirm = function() { return true; };
+				const allButtons = Array.from(document.querySelectorAll('button, input[type="button"], input[type="submit"], a.btn, .modal button, .swal2-confirm, [class*="modal"] button, [class*="popup"] button, [class*="dialog"] button, [id*="confirm"] button'));
+				for (const btn of allButtons) {
+					const style = window.getComputedStyle(btn);
+					if (style.display === 'none' || style.visibility === 'hidden') continue;
+					const text = (btn.innerText || btn.textContent || btn.value || '').toLowerCase();
+					if (text.includes('confirmer') || text.includes('valider') || text.includes('oui') || text === 'ok' || text.includes('publier maintenant') || text.includes('valider la publication') || text.includes('confirmer la publication')) {
+						btn.click();
+						return true;
+					}
+				}
+				return false;
+			})()`, &modalConfirmed),
+			chromedp.Sleep(4*time.Second),
+		)
+		if errConfirm == nil && modalConfirmed {
+			task.AppendLog("Bouton de confirmation / validation de la publication cliqué avec succès !")
+		}
+		
+		if err != nil || !finalPublished {
+			task.AppendLog("Avertissement : échec de l'enregistrement final pour la publication.")
+			return recordFailure("Échec de l'enregistrement ou de la validation de la publication finale", err)
+		}
+
+		task.AppendLog("Article publié avec succès via l'interface !")
 		task.AppendLog("Article publié avec succès sur le site !")
 
 		if err := AddPublishedArticle(payload.Title); err != nil {
@@ -887,12 +964,20 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 			task.AppendLog("Cache des articles publiés mis à jour.")
 		}
 
+		if draft != nil {
+			_ = draftManager.UpdateDraftStatus(draft.ID, DraftStatusPublished, "")
+		}
+
 		formattedResponse := fmt.Sprintf(`📢 **[Publication Réussie]**
 *J'ai partagé ma nouvelle découverte avec le monde en publiant l'article : "%s" !*
 ---
 📂 **Catégorie** : %s
 📝 **Description** : %s
 `, payload.Title, payload.Category, payload.Title)
+
+		if draft != nil {
+			formattedResponse += fmt.Sprintf("\n📦 **Cache Brouillon** : Archivé avec succès (`%s`)\n", draft.ID)
+		}
 
 		broadcaster.Broadcast(formattedResponse)
 		stm.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: formattedResponse})

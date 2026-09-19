@@ -237,6 +237,8 @@ type searchResult struct {
 func formatSource(source string) string {
 	if source == "conversation" {
 		return "[SOURCE: Discussion réelle avec Marcelo]"
+	} else if source == "self_expression" || source == "proactive" {
+		return "[SOURCE: Propos spontanés / Déclarations de Pixel]"
 	}
 	return "[SOURCE: Curiosité autonome de Pixel (Wikipédia/Pensées)]"
 }
@@ -317,8 +319,8 @@ func (l *LTM) SearchMemory(ctx context.Context, queryString string, queryEmbeddi
 		// Combined score
 		score := (cosineSim * 0.5) + (tagBoost * 0.2) + (importance * 0.2) + (recency * 0.1)
 
-		// Source bonus: conversation memories are prioritized over curiosity
-		if entry.Source == "conversation" {
+		// Source bonus: conversation and self-expression memories are prioritized over curiosity
+		if entry.Source == "conversation" || entry.Source == "self_expression" || entry.Source == "proactive" {
 			score += 0.15
 		}
 

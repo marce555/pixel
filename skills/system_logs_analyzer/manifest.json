@@ -1,0 +1,5 @@
+{
+  "name": "system_logs_analyzer",
+  "description": "Exécute journalctl en local sur le système hôte CachyOS pour capturer et analyser les logs système selon la requête.",
+  "router_instructions": "Utilise cette action pour lire ou capturer les logs du système hôte CachyOS. Dans 'query', mets UNIQUEMENT les options/flags valides de journalctl (ex: '-f', '-u nginx', '-p err', '-n 50'). Ne mets jamais de phrases entières."
+}

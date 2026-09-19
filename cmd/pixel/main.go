@@ -143,6 +143,10 @@ func main() {
 	gmailAgent := agent.NewGmailAgent(provider, coreMem, stm, ltm, thoughtStream, eventHub)
 	gmailAgent.Start(ctx)
 
+	// 7c. Init ServerMonitorAgent and start background hourly monitoring loop on appliyou.fr
+	serverMonitorAgent := agent.NewServerMonitorAgent(provider, coreMem, stm, ltm, thoughtStream, eventHub, skillManager)
+	serverMonitorAgent.Start(ctx)
+
 	// 8. Démarrage de l'Interface Web locale
 	fmt.Println("Le Cerveau de Pixel tourne. Lancement de l'interface graphique...")
 	webServer := api.NewServer(superior, coreMem, stm, sleepManager, profiler, projectAgent, projectManager, eventHub, taskScheduler, adaptiveProvider)

@@ -1,0 +1,5 @@
+{
+  "name": "auto_save_drafts",
+  "description": "Fonctionnalité pour sauvegarder automatiquement le texte d'un article en cours dans un fichier local.",
+  "router_instructions": "Utilise cette action si l'utilisateur demande de sauvegarder ou enregistrer un article. Mets tout le contexte du message utilisateur dans la variable query."
+}

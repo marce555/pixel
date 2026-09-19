@@ -1,0 +1,5 @@
+{
+  "name": "decouvrir_nouveau_visage",
+  "description": "Active la webcam (/dev/video0), capture un instantané et analyse le visage de la personne présente via le modèle de vision multimodal. Compare les traits physiques avec les profils connus en mémoire (Marcelo, etc.) et découvre s'il s'agit d'un nouveau visage ou d'une personne déjà enregistrée.",
+  "router_instructions": "Utilise cette action lorsque l'utilisateur demande d'ouvrir la caméra, de prendre une photo, de regarder ce qu'il y a / ce qu'il fait / son bureau, de regarder qui est là, de voir/découvrir un nouveau visage ou d'identifier qui lui parle (ex: 'tu vois mon bureau ?', 'tu me vois ?', 'qu'est-ce que tu vois ?', 'qui suis-je ?', 'regarde qui te parle', 'prends une photo', 'ouvre la caméra', 'tu me reconnais ?'), OU BIEN lorsque Pixel est confus sans savoir qui est la personne qui l'interpelle. Mets dans query les détails de la demande."
+}

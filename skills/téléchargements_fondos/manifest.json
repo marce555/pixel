@@ -1,0 +1,5 @@
+{
+  "name": "téléchargements_fondos",
+  "description": "Lister les plus gros fichiers du dossier Téléchargements",
+  "router_instructions": "Utilise cette action si l'utilisateur demande les fichiers les plus gros dans Téléchargements."
+}

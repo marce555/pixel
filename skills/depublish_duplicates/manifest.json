@@ -1,0 +1,5 @@
+{
+  "name": "depublish_duplicates",
+  "description": "Scanne tous les articles publiés sur AppliYou.fr, identifie les doublons ou sujets redondants, et dépublie automatiquement les versions en double.",
+  "router_instructions": "Utilise cette action si l'utilisateur demande de vérifier, nettoyer, dépublier ou supprimer les articles en double ou les doublons sur AppliYou.fr. Mets 'cleanup' dans query."
+}

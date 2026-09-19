@@ -1,0 +1,5 @@
+{
+  "name": "cachyos_host_logs",
+  "description": "Exécute journalctl sur la machine hôte locale CachyOS pour capturer et analyser les logs système en temps réel ou filtrer selon des paramètres.",
+  "router_instructions": "Utilise OBLIGATOIREMENT cette action dès que l'utilisateur parle des logs de son système hôte CachyOS, de la machine locale ou de journalctl en local. (Ne pas utiliser 'sysadmin' qui est réservé aux serveurs SSH distants). Dans 'query', mets UNIQUEMENT les options journalctl (ex: '-f', '-u nginx', '-p err', '-n 50'). Ne mets jamais de phrases."
+}

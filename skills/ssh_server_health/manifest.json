@@ -1,0 +1,5 @@
+{
+  "name": "ssh_server_health",
+  "description": "Vérifie la santé d'un serveur distant via SSH (uptime, CPU, mémoire, espace disque).",
+  "router_instructions": "Utilise cette action si l'utilisateur demande la santé, l'état ou les ressources globales d'un serveur distant. Dans 'query', met UNIQUEMENT l'identifiant de connexion SSH sous la forme 'utilisateur@adresse_ip' (ex: root@192.168.1.10). RÈGLE CRITIQUE : L'adresse IP ou le nom d'hôte du serveur est OBLIGATOIRE. Ne mets JAMAIS juste un nom d'utilisateur seul ('root'). Si l'utilisateur ne fournit pas l'adresse IP du serveur, choisis plutôt l'action 'none' et demande-lui l'adresse IP du serveur."
+}

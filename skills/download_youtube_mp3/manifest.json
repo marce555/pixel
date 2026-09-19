@@ -1,0 +1,6 @@
+{
+  "name": "download_youtube_mp3",
+  "description": "Télécharge un fichier MP3 de haute qualité (320kbps) depuis YouTube en recherchant par titre.",
+  "test_query": "hello adele",
+  "router_instructions": "Utilise cette action si l'utilisateur demande de télécharger une chanson ou un titre mp3 de YouTube par son titre. Mets le titre/artiste recherché dans query."
+}

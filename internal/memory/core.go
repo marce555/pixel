@@ -44,18 +44,25 @@ type GmailSettings struct {
 	CheckIntervalMins int    `json:"check_interval_mins"`
 }
 
+type ServerMonitorSettings struct {
+	Enabled           bool   `json:"enabled"`
+	Target            string `json:"target"`
+	CheckIntervalMins int    `json:"check_interval_mins"`
+}
+
 // CoreMemory represents the identity and deep knowledge about the interlocutor.
 type CoreMemory struct {
-	mu              sync.RWMutex
-	filePath        string
-	Profile         UserProfileCore            `json:"user_profile_core"`
-	Interlocutors   map[string]UserProfileCore `json:"interlocutors,omitempty"`
-	AgentPersona    string                     `json:"agent_persona"`
-	AutoCorrections []string                   `json:"auto_corrections,omitempty"`
-	LateralVector   []float32                  `json:"lateral_vector,omitempty"`
-	GmailSettings   GmailSettings              `json:"gmail_settings,omitempty"`
-	LLMSettings     LLMSettings                `json:"llm_settings,omitempty"`
-	DynamicGoals    []DynamicGoal              `json:"dynamic_goals,omitempty"`
+	mu                    sync.RWMutex
+	filePath              string
+	Profile               UserProfileCore            `json:"user_profile_core"`
+	Interlocutors         map[string]UserProfileCore `json:"interlocutors,omitempty"`
+	AgentPersona          string                     `json:"agent_persona"`
+	AutoCorrections       []string                   `json:"auto_corrections,omitempty"`
+	LateralVector         []float32                  `json:"lateral_vector,omitempty"`
+	GmailSettings         GmailSettings              `json:"gmail_settings,omitempty"`
+	ServerMonitorSettings ServerMonitorSettings      `json:"server_monitor_settings,omitempty"`
+	LLMSettings           LLMSettings                `json:"llm_settings,omitempty"`
+	DynamicGoals          []DynamicGoal              `json:"dynamic_goals,omitempty"`
 }
 
 func NewCoreMemory(filePath string) *CoreMemory {
@@ -378,6 +385,26 @@ func (cm *CoreMemory) GetGmailSettings() GmailSettings {
 func (cm *CoreMemory) UpdateGmailSettings(settings GmailSettings) {
 	cm.mu.Lock()
 	cm.GmailSettings = settings
+	cm.mu.Unlock()
+	cm.Save()
+}
+
+func (cm *CoreMemory) GetServerMonitorSettings() ServerMonitorSettings {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	s := cm.ServerMonitorSettings
+	if s.Target == "" {
+		s.Target = "root@appliyou.fr"
+	}
+	if s.CheckIntervalMins <= 0 {
+		s.CheckIntervalMins = 60
+	}
+	return s
+}
+
+func (cm *CoreMemory) UpdateServerMonitorSettings(settings ServerMonitorSettings) {
+	cm.mu.Lock()
+	cm.ServerMonitorSettings = settings
 	cm.mu.Unlock()
 	cm.Save()
 }

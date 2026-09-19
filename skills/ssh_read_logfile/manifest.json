@@ -1,0 +1,5 @@
+{
+  "name": "ssh_read_logfile",
+  "description": "Lit les dernières lignes d'un fichier de log spécifique sur un serveur distant via SSH.",
+  "router_instructions": "Utilise cette action si l'utilisateur demande à lire un fichier de log spécifique (ex: /var/log/syslog, /var/log/nginx/error.log) sur un serveur distant. Dans 'query', met l'identifiant de connexion SUIVI du chemin absolu du fichier (ex: 'root@192.168.1.10 /var/log/auth.log -n 50')."
+}

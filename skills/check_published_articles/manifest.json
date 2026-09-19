@@ -1,0 +1,5 @@
+{
+  "name": "check_published_articles",
+  "description": "Vérifie la liste réelle des articles publiés sur AppliYou.fr et l'état des tâches de publication en cours ou récentes dans Pixel.",
+  "router_instructions": "Utilise cette action si l'utilisateur demande de vérifier, consulter, ou lister ses publications, ses articles publiés, le statut d'une publication ou s'il demande si un article a été publié sur AppliYou.fr."
+}

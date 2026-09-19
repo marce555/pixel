@@ -1,0 +1,5 @@
+{
+  "name": "ssh_journalctl_logs",
+  "description": "Exécute journalctl via SSH sur un serveur distant pour lire les logs système.",
+  "router_instructions": "Utilise cette action si l'utilisateur demande à lire les logs système, les logs d'un service systemd (comme nginx, docker, apache) ou les erreurs d'un serveur distant. Dans 'query', met l'identifiant 'utilisateur@serveur' SUIVI des options journalctl voulues (ex: 'root@192.168.1.10 -u nginx -n 50' ou 'root@serveur.com -p err -n 20')."
+}

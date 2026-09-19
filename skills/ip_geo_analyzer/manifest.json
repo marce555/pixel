@@ -1,0 +1,5 @@
+{
+  "name": "ip_geo_analyzer",
+  "description": "Géolocalise des adresses IP via ip-api.com et fournit la provenance géographique des clients et connexions réseau.",
+  "router_instructions": "Utilise cette action si l'utilisateur demande de géolocaliser des adresses IP ou d'analyser la provenance géographique de clients, de visiteurs ou d'adresses IP. Mets les IP ou 'clients' dans query."
+}

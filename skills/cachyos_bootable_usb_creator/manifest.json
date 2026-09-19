@@ -1,0 +1,5 @@
+{
+  "name": "cachyos_bootable_usb_creator",
+  "description": "Détecte les clés USB amovibles, installe le chargeur Ventoy (compatible UEFI & Legacy BIOS Dell XPS) et copie les ISO d'installation Windows/Linux.",
+  "router_instructions": "Utilise cette action si l'utilisateur demande de préparer une clé USB bootable, de télécharger Windows, d'installer Windows 10/11/12 ou une ISO sur une clé USB."
+}

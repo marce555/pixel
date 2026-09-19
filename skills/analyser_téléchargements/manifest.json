@@ -1,0 +1,5 @@
+{
+  "name": "analyser_téléchargements",
+  "description": "outil qui analyse les fichiers téléchargés et génère un rapport d'analyse",
+  "router_instructions": "Utilise cette action si l'utilisateur demande analyser fichier.télécharger_fichier"
+}

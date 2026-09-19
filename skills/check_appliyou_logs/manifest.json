@@ -1,0 +1,5 @@
+{
+  "name": "check_appliyou_logs",
+  "description": "Vérifie les logs et l'état de santé du serveur distant appliyou.fr via SSH pour détecter d'éventuelles pannes ou anomalies.",
+  "router_instructions": "Utilise cette action si l'utilisateur demande de vérifier les logs, les erreurs ou l'état de santé du serveur appliyou.fr ou du site appliyou (ex: 'vérifie les logs d'appliyou', 'check le serveur appliyou.fr', 'est-ce qu'appliyou fonctionne bien ?'). Dans 'query', laisse vide ou précise un service comme 'apache2' ou 'systemd'."
+}

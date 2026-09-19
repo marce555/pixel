@@ -1,0 +1,5 @@
+{
+  "name": "ram_consumer_skill",
+  "description": "Analyse la consommation de la RAM du système",
+  "router_instructions": "Utilise cette action uniquement si l'utilisateur demande explicitement la consommation de la RAM (mémoire vive). Ne l'utilise pas pour l'espace disque."
+}

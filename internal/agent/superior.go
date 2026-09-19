@@ -285,6 +285,19 @@ func (a *SuperiorAgent) analyzeQuery(ctx context.Context, input string, history 
 		}
 	}
 
+	// Fast-path for checking appliyou.fr server logs
+	if strings.Contains(cleanInput, "logs d'appliyou") || strings.Contains(cleanInput, "logs de appliyou") ||
+		strings.Contains(cleanInput, "logs d appliyou") || strings.Contains(cleanInput, "logs appliyou") ||
+		strings.Contains(cleanInput, "serveur appliyou") || strings.Contains(cleanInput, "appliyoufr") ||
+		strings.Contains(cleanInput, "état d'appliyou") || strings.Contains(cleanInput, "etat d'appliyou") ||
+		strings.Contains(cleanInput, "santé d'appliyou") || strings.Contains(cleanInput, "sante d'appliyou") ||
+		strings.Contains(cleanInput, "check appliyou") || strings.Contains(cleanInput, "check le serveur appliyou") {
+		return RouterResponse{
+			Action: "skill_check_appliyou_logs",
+			Query:  "",
+		}
+	}
+
 	// Fast-path for media controls to bypass NPU (instant, robust, offline-safe)
 	cleanInput = strings.ReplaceAll(cleanInput, ".", "")
 	cleanInput = strings.ReplaceAll(cleanInput, "!", "")
@@ -1076,6 +1089,8 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 		if statusChan != nil {
 			if skillName == "check_gmail_emails" {
 				statusChan <- "Je me connecte à ta boîte mail...\n\n"
+			} else if skillName == "check_appliyou_logs" {
+				statusChan <- "Connexion SSH et vérification des logs d'appliyou.fr en cours...\n\n"
 			} else if skillName == "cachyos_host_logs" || skillName == "system_logs_analyzer" {
 				statusChan <- "Analyse et capture des logs du système hôte CachyOS en temps réel...\n\n"
 			} else if skillName == "decouvrir_nouveau_visage" {

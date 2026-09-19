@@ -1,0 +1,5 @@
+{
+  "name": "cachyos_document_search",
+  "description": "Recherche et trouve rapidement des documents (PDF, Markdown, Office, textes, code, configurations, images) sur l'ordinateur CachyOS de l'utilisateur.",
+  "router_instructions": "Utilise cette action si l'utilisateur demande de chercher, trouver ou localiser des documents, fichiers, notes, PDF ou dossiers sur son PC / ordinateur / système CachyOS."
+}

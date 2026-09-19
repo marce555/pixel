@@ -1,0 +1,5 @@
+{
+  "name": "disk_space_analyzer",
+  "description": "Analyse l'espace disque d'un répertoire spécifique.",
+  "router_instructions": "Utilise cette action si l'utilisateur demande de vérifier ou analyser l'espace disque. Mets le chemin du dossier (ou 'df -h' pour général) dans query."
+}

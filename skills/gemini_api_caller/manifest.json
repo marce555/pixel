@@ -1,0 +1,5 @@
+{
+  "name": "gemini_api_caller",
+  "description": "Envoie une requête à l'API Cloud de Gemini pour tout sujet et affiche sa réponse.",
+  "router_instructions": "Utilise cette action TOUTES les fois où l'utilisateur demande explicitement ou implicitement d'interagir avec Gemini, de lui poser une question, de lui demander son avis ou de vérifier une information sur N'IMPORTE QUEL SUJET (science, actualité, philosophie, technique, etc.). Mets la question ou le sujet extrait dans query."
+}

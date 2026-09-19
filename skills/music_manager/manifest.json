@@ -1,0 +1,5 @@
+{
+  "name": "music_manager",
+  "description": "Scanne et gère la bibliothèque de musique locale de l'utilisateur, et vérifie la présence de morceaux ou de hits Billboard.",
+  "router_instructions": "Utilise cette action si l'utilisateur demande d'analyser son dossier de musique, de vérifier la présence d'une chanson spécifique, ou de lister les morceaux manquants ou présents (ex: 'est-ce que j'ai la chanson X', 'analyse ma musique', 'combien de fichiers audio j'ai'). Mets la demande simplifiée (ou 'scan' / 'manquants' / le nom de l'artiste/chanson à chercher) dans la query."
+}

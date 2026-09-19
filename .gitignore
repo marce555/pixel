@@ -1,5 +1,5 @@
 # Binaries & Executables
-pixel
+/pixel
 pixel_gui
 bin/pixel
 bin/pixel_gui
@@ -29,6 +29,7 @@ __pycache__/
 # Memory & State Files (Private user data)
 *.json
 !*.example.json
+!skills/**/manifest.json
 *.mp
 
 # Audio, Media & Models

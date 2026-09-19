@@ -1,0 +1,6 @@
+{
+  "name": "play_random_music",
+  "description": "Lance la musique locale en lecture aléatoire sans répétition (shuffle) depuis ~/Musique/MIX-EXTENDED ou tout répertoire spécifié via mpv en arrière-plan.",
+  "test_query": "~/Musique/MIX-EXTENDED",
+  "router_instructions": "Utilise cette action si l'utilisateur demande de lancer/jouer la musique de son répertoire local (ex: ~/Musique/MIX-EXTENDED, dossier Musique, ou n'importe quel dossier de musique locale) de façon aléatoire / shuffle sans répétition. Mets le chemin du dossier ou la demande dans query."
+}

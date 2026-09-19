@@ -1,0 +1,5 @@
+{
+  "name": "ssh_top_processes",
+  "description": "Liste les processus qui consomment le plus de mémoire et de CPU sur un serveur distant via SSH.",
+  "router_instructions": "Utilise cette action si l'utilisateur demande de lister les processus, de voir ce qui consomme de la mémoire/CPU, ou ce qui ralentit un serveur distant. Dans 'query', met UNIQUEMENT l'identifiant de connexion (ex: 'root@192.168.1.10')."
+}

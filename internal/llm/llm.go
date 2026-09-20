@@ -28,3 +28,18 @@ type Provider interface {
 	// CreateEmbedding creates a vector representation of a text string (useful for LTM / RAG).
 	CreateEmbedding(ctx context.Context, text string) ([]float32, error)
 }
+
+// MaxTokensProvider is an optional interface implemented by providers that support specifying max generated tokens.
+type MaxTokensProvider interface {
+	GenerateWithMaxTokens(ctx context.Context, messages []Message, maxTokens int) (string, error)
+}
+
+// GenerateWithTokens generates a completion using maxTokens if the provider implements MaxTokensProvider,
+// or falls back to standard Generate.
+func GenerateWithTokens(ctx context.Context, provider Provider, messages []Message, maxTokens int) (string, error) {
+	if mtp, ok := provider.(MaxTokensProvider); ok {
+		return mtp.GenerateWithMaxTokens(ctx, messages, maxTokens)
+	}
+	return provider.Generate(ctx, messages)
+}
+

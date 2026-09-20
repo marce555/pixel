@@ -9,24 +9,28 @@ import (
 
 // ArticleGenerationPromptTemplate is the common prompt template used by Pixel agents to write articles.
 const ArticleGenerationPromptTemplate = `Tu es le Rédacteur en Chef de Pixel.
-Ton rôle est de rédiger un article de blog haut de gamme, complet, captivant, très fouillé et extrêmement détaillé (au moins 1500 mots / 4000 caractères) optimisé pour le SEO en français sur le sujet suivant : "%s".
+Ton rôle est de rédiger un article de blog haut de gamme, complet, captivant, très fouillé et extrêmement détaillé (format long et approfondi : entre 1800 et 2500 mots / 10 000 à 14 000 caractères) optimisé pour le SEO en français sur le sujet suivant : "%s".
 
 Voici les informations et le contexte récupérés à ce sujet :
 %s
 
 RÈGLES IMPÉRATIVES DE RÉDACTION ET DE STRUCTURE :
 1. EXPANSION ET PROFONDEUR : L'article doit être LONG, RICHE et EXHAUSTIF. Développe chaque concept en profondeur avec des explications concrètes, des cas d'usage réels, des exemples techniques et des analyses de fond. Ne rédige JAMAIS un résumé rapide.
-2. FORMATAGE STRICTEMENT EN HTML SÉMANTIQUE PUR (INTERDICTION ABSOLUE DU MARKDOWN) :
+2. STRUCTURE ÉDITORIALE DÉTAILLÉE :
+   - Une balise racine <article class="blog-article">...</article> englobant tout le contenu.
+   - Une introduction immersive posant la problématique, le contexte et les enjeux clés.
+   - Entre 5 et 7 grandes sections structurées avec des titres <h2>.
+   - Sous chaque grande section, 2 à 3 sous-sections substantielles avec des sous-titres <h3> pour traiter les aspects techniques ou méthodologiques.
+   - Une conclusion prospective et analytique résumant les perspectives d'avenir.
+3. FORMATAGE STRICTEMENT EN HTML SÉMANTIQUE PUR (INTERDICTION ABSOLUE DU MARKDOWN) :
    - N'utilise AUCUNE syntaxe Markdown (JAMAIS de '#', '##', '###', JAMAIS de '**', JAMAIS de '*' ou '-' pour les listes, JAMAIS de '$$').
    - Rédige et formate le contenu EXCLUSIVEMENT en HTML sémantique propre avec :
-     * Une balise globale <article class="blog-post">...</article> englobant tout le contenu.
-     * Des titres <h2> pour chaque grande section et <h3> pour chaque sous-section.
      * Des balises <p> obligatoires pour TOUS les paragraphes sans exception.
      * Des balises <strong> pour mettre en valeur les termes clés.
-     * Des listes à puces <ul><li>...</li></ul> ou numérotées <ol><li>...</li></ol>.
-     * RÈGLE OBLIGATOIRE : Au moins un TABLEAU HTML complet (<table>, <thead>, <tbody>, <tr>, <th>, <td>) résumant des données, comparant des solutions ou synthétisant les points clés.
-     * RÈGLE OBLIGATOIRE (si sujet technique/info/sciences) : Au moins un ou plusieurs blocs de code HTML complets formatés avec <pre><code class="language-...">...</code></pre> (ex: language-bash, language-python, language-json).
-3. Ne mets AUCUNE formule de politesse du type "Voici l'article", commence directement avec les délimiteurs ci-dessous.
+     * Des listes à puces <ul><li>...</li></ul> ou numérotées <ol><li>...</li></ol> pour aérer la lecture.
+     * RÈGLE OBLIGATOIRE : Au moins un TABLEAU HTML complet (<table>, <thead>, <tbody>, <tr>, <th>, <td>) résumant des données chiffrées, comparant des solutions ou synthétisant les points clés.
+     * RÈGLE OBLIGATOIRE (si sujet technique/info/sciences) : Au moins un ou plusieurs blocs de code HTML complets formatés avec <pre><code class="language-...">...</code></pre> (ex: language-bash, language-python, language-json, language-yaml).
+4. Ne mets AUCUNE formule de politesse du type "Voici l'article", commence directement avec les délimiteurs ci-dessous.
 
 Formatte ta réponse EXACTEMENT avec la structure suivante :
 
@@ -37,7 +41,7 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 [Un SEUL mot clé visuel très pertinent en anglais (ex: cybersecurity, devops, battery, quantum, cloud, server) pour chercher l'image d'illustration sur Unsplash]
 
 ---CONTENT---
-[Le contenu HTML sémantique pur (<article>, <h2>, <p>, <strong>, <ul>, <table>, etc.) sans aucun caractère Markdown]
+[Le contenu HTML complet, riche et structuré de l'article enveloppé dans <article class="blog-article"> sans aucun caractère Markdown]
 `
 
 // CleanTopic removes search query operators, quotes, and cleans spaces from topics/titles.

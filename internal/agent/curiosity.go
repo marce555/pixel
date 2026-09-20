@@ -671,7 +671,7 @@ Réponds UNIQUEMENT avec la phrase, rien d'autre.`, topic, knowledge)
 				}
 
 				var payloadMap map[string]string
-				result, err := c.llmProvider.Generate(ctx, messages)
+				result, err := llm.GenerateWithTokens(ctx, c.llmProvider, messages, 3500)
 				if err == nil {
 					title, keywords, content := ParseDelimitedArticle(result)
 					if title == "" {

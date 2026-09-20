@@ -95,6 +95,10 @@ func (p *AdaptiveProvider) handleCloudError(err error) {
 }
 
 func (p *AdaptiveProvider) Generate(ctx context.Context, messages []Message) (string, error) {
+	return p.GenerateWithMaxTokens(ctx, messages, 2048)
+}
+
+func (p *AdaptiveProvider) GenerateWithMaxTokens(ctx context.Context, messages []Message, maxTokens int) (string, error) {
 	p.mu.RLock()
 	mode := p.activeMode
 	local := p.localProvider
@@ -110,7 +114,7 @@ func (p *AdaptiveProvider) Generate(ctx context.Context, messages []Message) (st
 				cloudCtx, cancel = context.WithTimeout(ctx, 10*time.Second)
 				defer cancel()
 			}
-			resp, err := cloud.Generate(cloudCtx, messages)
+			resp, err := cloud.GenerateWithMaxTokens(cloudCtx, messages, maxTokens)
 			if err == nil {
 				return resp, nil
 			}
@@ -120,7 +124,7 @@ func (p *AdaptiveProvider) Generate(ctx context.Context, messages []Message) (st
 		}
 	}
 
-	return local.Generate(ctx, messages)
+	return local.GenerateWithMaxTokens(ctx, messages, maxTokens)
 }
 
 func (p *AdaptiveProvider) GenerateStream(ctx context.Context, messages []Message) (<-chan string, <-chan error) {

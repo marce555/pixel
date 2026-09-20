@@ -2720,7 +2720,7 @@ func (a *SuperiorAgent) generateAndScheduleArticle(ctx context.Context, rawTopic
 	}
 
 	var payloadMap map[string]string
-	result, err := a.llmProvider.Generate(ctx, messages)
+	result, err := llm.GenerateWithTokens(ctx, a.llmProvider, messages, 3500)
 	if err == nil {
 		title, keywords, content := ParseDelimitedArticle(result)
 		if title == "" {

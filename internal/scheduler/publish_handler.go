@@ -193,7 +193,7 @@ func NewPublishArticleHandlerWithReviewer(broadcaster EventBroadcaster, stm STMW
 
 			task.AppendLog("Rédaction de l'article complet par l'IA de Pixel...")
 			prompt := fmt.Sprintf(`Tu es le Rédacteur en Chef de Pixel.
-Ton rôle est de rédiger un article de blog haut de gamme, complet, captivant, très fouillé et extrêmement détaillé (au moins 1500 mots / 4000 caractères) optimisé pour le SEO en français sur le sujet suivant : "%s".
+Ton rôle est de rédiger un article de blog haut de gamme, complet, captivant, très fouillé et extrêmement détaillé (format long et approfondi : entre 1800 et 2500 mots / 10 000 à 14 000 caractères) optimisé pour le SEO en français sur le sujet suivant : "%s".
 
 Voici les informations et le contexte récupérés à ce sujet :
 %s
@@ -202,9 +202,9 @@ RÈGLES IMPÉRATIVES DE RÉDACTION ET DE STRUCTURE :
 1. EXPANSION ET PROFONDEUR : L'article doit être LONG, RICHE et EXHAUSTIF. Développe chaque concept en profondeur avec des explications concrètes, des cas d'usage réels, des exemples techniques et des analyses de fond. Ne rédige JAMAIS un résumé rapide.
 2. STRUCTURE HTML SÉMANTIQUE STRICTE : Organise l'article avec :
    - Une balise racine <article class="blog-article"> enveloppant tout l'article.
-   - Une introduction captivante qui pose les enjeux.
-   - Au moins 4 à 6 grandes sections distinctes avec des titres <h2>.
-   - Des sous-sections détaillées avec des sous-titres <h3> sous chaque grande section.
+   - Une introduction immersive posant la problématique, le contexte et les enjeux clés.
+   - Au moins 5 à 7 grandes sections distinctes avec des titres <h2>.
+   - Des sous-sections détaillées avec des sous-titres <h3> sous chaque grande section (2 à 3 sous-sections par section).
    - Une conclusion prospective et synthétique.
 3. FORMATAGE HTML SÉMANTIQUE EXCLUSIF (AUCUN MARKDOWN AUTORISÉ) :
    - N'UTILISE AUCUNE SYNTAXE MARKDOWN (#, ##, **, *, _, backticks, $$, etc.).
@@ -236,7 +236,7 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 				return fmt.Errorf("provider nil")
 			}
 
-			res, errGen := provider.Generate(ctx, messages)
+			res, errGen := llm.GenerateWithTokens(ctx, provider, messages, 3500)
 			if errGen != nil {
 				task.AppendLog(fmt.Sprintf("Erreur lors de la rédaction LLM : %v", errGen))
 				return fmt.Errorf("generation failed: %w", errGen)

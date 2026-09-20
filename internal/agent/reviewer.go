@@ -34,22 +34,25 @@ CONTENU HTML BRUT :
 %s
 
 CRITÈRES STRICTS D'ÉVALUATION ET D'ENRICHISSEMENT :
-1. STRUCTURE & FORMATAGE HTML PUR (AUCUN MARKDOWN BRUT ACCEPTÉ) :
+1. PRÉSERVATION DE LA RICHESSE ET DU FORMAT LONG (10 000 À 14 000 CARACTÈRES) :
+   - L'article doit être approfondi, fouillé et substantiel (entre 1800 et 2500 mots). Ne résume JAMAIS, ne condense JAMAIS et ne tronque JAMAIS le contenu.
+   - Si le brouillon soumis manque de détails ou de sections, enrichis chaque grande partie avec des explications techniques détaillées, des cas d'usage concrets et des approfondissements conceptuels.
+2. STRUCTURE & FORMATAGE HTML PUR (AUCUN MARKDOWN BRUT ACCEPTÉ) :
    - Assure-toi que le texte est intégralement converti en HTML valide. AUCUN dièse (# ou ## ou ###) ne doit subsister : remplace-les systématiquement par des balises <h2> et <h3>.
    - Les listes en étoiles (* ou -) doivent être converties en <ul><li>...</li></ul> ou <ol><li>...</li></ol>.
    - Le gras Markdown (**texte**) doit être converti en <strong>texte</strong>.
    - Chaque paragraphe doit être enveloppé dans une balise <p>...</p>.
    - Les formules LaTeX ($$...$$) doivent être transcrites en texte clair ou balises <code> lisibles.
-2. TABLEAU HTML OBLIGATOIRE :
+3. TABLEAU HTML OBLIGATOIRE :
    - L'article DOIT impérativement comporter au moins un tableau HTML complet (<table>, <thead>, <tbody>, <tr>, <th>, <td>) résumant des données, comparant des solutions ou synthétisant les notions clés.
    - SI LE TABLEAU EST ABSENT OU TRONQUÉ : Tu DOIS obligatoirement concevoir un tableau complet et riche et l'insérer dans le texte.
-3. BLOCS DE CODE OBLIGATOIRES (pour sujets tech/informatique/sciences) :
+4. BLOCS DE CODE OBLIGATOIRES (pour sujets tech/informatique/sciences) :
    - Si le sujet concerne Linux, le dev, le cloud, le DevOps, l'IA ou les systèmes, intègre ou affine un ou plusieurs blocs de code formatés avec <pre><code class="language-...">...</code></pre>.
-4. RÉPARATION DES TRONCATURES ET DES FINS COUPÉES :
+5. RÉPARATION DES TRONCATURES ET DES FINS COUPÉES :
    - Si l'article s'arrête brusquement (phrase inachevée, balise "<" non fermée, tableau annoncé mais non rédigé), tu DOIS obligatoirement poursuivre et compléter la rédaction jusqu'à une véritable conclusion aboutie.
-5. MOTS-CLÉS VISUELS UNSPLASH :
+6. MOTS-CLÉS VISUELS UNSPLASH :
    - Vérifie que le mot-clé visuel est en ANGLAIS, précis et adapté à la recherche d'une photo réaliste sur Unsplash (ex: "datacenter server rack", "neural brain computing").
-6. PROPRETÉ & STYLE :
+7. PROPRETÉ & STYLE :
    - Corrige les coquilles orthographiques ou grammaticales.
    - Supprime toute mention méta ou de politesse (ex: "Voici l'article relu").
 
@@ -91,7 +94,7 @@ func (r *ReviewerAgent) Review(ctx context.Context, draft *scheduler.ArticleDraf
 		{Role: llm.RoleUser, Content: prompt},
 	}
 
-	res, errGen := r.provider.Generate(ctx, messages)
+	res, errGen := llm.GenerateWithTokens(ctx, r.provider, messages, 3500)
 	if errGen != nil {
 		// Fallback to algorithmic check if LLM generation fails
 		notes := fmt.Sprintf("Validation algorithmique de repli (échec LLM: %v)", errGen)

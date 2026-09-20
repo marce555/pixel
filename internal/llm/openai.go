@@ -101,10 +101,17 @@ func parseAPIError(statusCode int, bodyBytes []byte) error {
 }
 
 func (p *OpenAICompatibleProvider) Generate(ctx context.Context, messages []Message) (string, error) {
+	return p.GenerateWithMaxTokens(ctx, messages, 2048)
+}
+
+func (p *OpenAICompatibleProvider) GenerateWithMaxTokens(ctx context.Context, messages []Message, maxTokens int) (string, error) {
+	if maxTokens <= 0 {
+		maxTokens = 2048
+	}
 	reqBody := chatRequest{
 		Model:     p.ChatModel,
 		Messages:  messages,
-		MaxTokens: 2048,
+		MaxTokens: maxTokens,
 	}
 	
 	jsonData, err := json.Marshal(reqBody)

@@ -45,6 +45,7 @@ func loadEnv() {
 func main() {
 	loadEnv()
 	fmt.Println("Initialisation de Pixel, le compagnon conscient...")
+	resourceagent.AddLiveLog("Système", "Initialisation du Cerveau de Pixel...")
 	ctx := context.Background()
 
 	// 1. Init Memory Subsystem
@@ -121,14 +122,20 @@ func main() {
 
 	thoughtStream := memory.NewThoughtStream(50)
 	unconscious := memory.NewUnconsciousManager()
+	selfAwareness := agent.NewSelfAwarenessAgent(provider, coreMem, ltm, thoughtStream, projectManager, unconscious, "pixel_self_knowledge.json")
+
 	superior := agent.NewSuperiorAgent(provider, coreMem, ltm, webAgent, thoughtStream, unconscious, projectManager, taskScheduler, skillManager)
 	superior.SetDraftManager(draftManager)
+	superior.SetSelfAwareness(selfAwareness)
+
+	sleepManager.SetSelfAwareness(selfAwareness)
 
 	// 6. Init Curiosity Agent & Thalamic Gate
 	timeAgent := timeagent.NewTimeAgent()
 	thalamicGate := agent.NewThalamicGate(provider)
 	curiosityAgent := agent.NewCuriosityAgent(provider, coreMem, stm, ltm, eventHub, timeAgent, webAgent, thoughtStream, sleepManager, taskScheduler, thalamicGate)
 	curiosityAgent.SetSkillManager(skillManager)
+	curiosityAgent.SetSelfAwareness(selfAwareness)
 
 	// 7. Init VisionAgent and start background sensory vision loop
 	visionAgent := agent.NewVisionAgent(provider, coreMem, ltm, stm, thoughtStream, func(msg string) {

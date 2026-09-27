@@ -468,7 +468,10 @@ document.addEventListener('DOMContentLoaded', () => {
                         }
                         continue;
                     }
-                    html += `&bull; <em>${k}</em>: ${v}<br>`;
+                    html += `<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:3px;">
+                        <span>&bull; <em>${k}</em>: ${v}</span>
+                        <button onclick="window.deleteVolatileKey('${k.replace(/'/g, "\\'")}')" style="background:none; border:none; color:#ef4444; cursor:pointer; font-size:14px; padding:0 4px; line-height:1;" title="Supprimer cet état">&times;</button>
+                    </div>`;
                 }
             }
             if (data.dynamic_goals && data.dynamic_goals.length > 0) {
@@ -476,7 +479,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (activeGoals.length > 0) {
                     html += `<br><br><strong>🎯 Objectifs cognitifs :</strong><br>`;
                     for (const goal of activeGoals) {
-                        html += `&bull; ${goal.description} <em>(Priorité: ${goal.priority.toFixed(1)})</em><br>`;
+                        html += `<div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:6px; background:rgba(255,255,255,0.04); padding:4px 6px; border-radius:4px;">
+                            <span style="font-size:12px;">&bull; ${goal.description} <em>(Prio: ${goal.priority.toFixed(1)})</em></span>
+                            <div style="display:flex; gap:4px; margin-left:6px; flex-shrink:0;">
+                                <button onclick="window.resolveGoal('${goal.id}', 'completed')" style="background:rgba(34,197,94,0.2); border:1px solid #22c55e; color:#22c55e; border-radius:3px; cursor:pointer; font-size:11px; padding:1px 5px;" title="Marquer comme terminé">✓</button>
+                                <button onclick="window.deleteGoal('${goal.id}')" style="background:rgba(239,68,68,0.2); border:1px solid #ef4444; color:#ef4444; border-radius:3px; cursor:pointer; font-size:11px; padding:1px 5px;" title="Supprimer l'objectif">&times;</button>
+                            </div>
+                        </div>`;
                     }
                 }
             }
@@ -485,6 +494,37 @@ document.addEventListener('DOMContentLoaded', () => {
             console.error("Impossible de lire la Core Memory", e);
         }
     }
+
+    window.deleteVolatileKey = async function(key) {
+        try {
+            await fetch(`/api/core_memory/volatile?key=${encodeURIComponent(key)}`, { method: 'DELETE' });
+            fetchCoreMemory();
+        } catch (e) {
+            console.error("Erreur suppression clé volatile", e);
+        }
+    };
+
+    window.resolveGoal = async function(id, status) {
+        try {
+            await fetch('/api/core_memory/goal', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id, status })
+            });
+            fetchCoreMemory();
+        } catch (e) {
+            console.error("Erreur résolution objectif", e);
+        }
+    };
+
+    window.deleteGoal = async function(id) {
+        try {
+            await fetch(`/api/core_memory/goal?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
+            fetchCoreMemory();
+        } catch (e) {
+            console.error("Erreur suppression objectif", e);
+        }
+    };
 
     async function fetchLTMLearnings() {
         try {
@@ -1525,12 +1565,10 @@ class VoiceController {
             let silenceStart = null;
             let speechStartTime = null;
             let speechDetected = false;
+            let noiseFloor = 6.0;
             this.isSilenceDetectionActive = true;
             
-            // Délai de silence avant arrêt : 1.2s en manuel (réactif), 2s en mains-libres (confortable)
-            const silenceDelay = this.handsfreeEnabled ? 2000 : 1200;
-            // Parole minimum avant de considérer un silence comme "fin de phrase"
-            const minSpeechMs = 400;
+            const minSpeechMs = 250;
             
             const checkVolume = () => {
                 if (!this.isSilenceDetectionActive || !this.isListening) return;
@@ -1542,21 +1580,37 @@ class VoiceController {
                     sum += dataArray[i];
                 }
                 const averageVolume = sum / bufferLength;
+
+                // Estimation dynamique du bruit de fond ambiant
+                if (!speechDetected) {
+                    noiseFloor = noiseFloor * 0.90 + Math.min(averageVolume, 10.0) * 0.10;
+                }
                 
-                const threshold = 8; // Sensibilité augmentée (était 12) — capte mieux les voix douces
+                // Seuil ultra-sensible adapté aux voix douces et micros intégrés : max(3.0, noiseFloor * 1.35)
+                const dynamicThreshold = Math.max(3.0, noiseFloor * 1.35);
                 
-                if (averageVolume > threshold) {
+                if (averageVolume > dynamicThreshold) {
                     if (!speechDetected) speechStartTime = Date.now();
                     speechDetected = true;
                     silenceStart = null;
+                    
+                    // Interruption Barge-in : Si l'utilisateur commence à parler pendant que Pixel diffuse du son TTS
+                    if (this.isSpeakingSession || this.isSpeakingSentence || this.currentAudio) {
+                        console.log("[VoiceController] Interruption Barge-in : Utilisateur prend la parole, arrêt du TTS.");
+                        this.stopSpeaking();
+                    }
                 } else if (speechDetected) {
                     if (silenceStart === null) {
                         silenceStart = Date.now();
                     } else {
                         const silenceDuration = Date.now() - silenceStart;
                         const speechDuration = silenceStart - (speechStartTime || silenceStart);
+                        
+                        // Délai adaptatif : 1.0s si la phrase est longue, 1.3s en mains-libres
+                        const silenceDelay = speechDuration > 2000 ? 1000 : (this.handsfreeEnabled ? 1300 : 1000);
+                        
                         if (silenceDuration > silenceDelay && speechDuration > minSpeechMs) {
-                            console.log(`[VoiceController] Fin de parole (${speechDuration}ms discours, ${silenceDuration}ms silence) → transcription`);
+                            console.log(`[VoiceController] Dynamic VAD : Fin de parole (${speechDuration}ms discours, ${silenceDuration}ms silence, threshold ${dynamicThreshold.toFixed(1)}) → transcription`);
                             this.stopListening();
                             return;
                         }

@@ -111,6 +111,9 @@ func (s *Server) Start(port string) error {
 
 	http.HandleFunc("/api/chat", s.handleChat)
 	http.HandleFunc("/api/core_memory", s.handleCoreMemory)
+	http.HandleFunc("/api/core_memory/goal", s.handleCoreMemoryGoal)
+	http.HandleFunc("/api/core_memory/volatile", s.handleCoreMemoryVolatile)
+	http.HandleFunc("/api/core_memory/reload", s.handleCoreMemoryReload)
 	http.HandleFunc("/api/force_sleep", s.handleForceSleep)
 	http.HandleFunc("/api/llm_settings", s.handleLLMSettings)
 	http.HandleFunc("/api/gmail_settings", s.handleGmailSettings)
@@ -326,6 +329,78 @@ func (s *Server) handleCoreMemory(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(data)
+}
+
+func (s *Server) handleCoreMemoryGoal(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		var req struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+			Action string `json:"action"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Bad request", http.StatusBadRequest)
+			return
+		}
+		if req.Action == "delete" {
+			s.coreMem.RemoveDynamicGoal(req.ID)
+		} else {
+			status := req.Status
+			if status == "" {
+				status = "completed"
+			}
+			s.coreMem.SetDynamicGoalStatus(req.ID, status)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status": "ok"}`))
+		return
+	} else if r.Method == http.MethodDelete {
+		id := r.URL.Query().Get("id")
+		if id == "" {
+			var req struct {
+				ID string `json:"id"`
+			}
+			json.NewDecoder(r.Body).Decode(&req)
+			id = req.ID
+		}
+		if id != "" {
+			s.coreMem.RemoveDynamicGoal(id)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status": "ok"}`))
+		return
+	}
+	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+}
+
+func (s *Server) handleCoreMemoryVolatile(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodDelete || r.Method == http.MethodPost {
+		key := r.URL.Query().Get("key")
+		if key == "" {
+			var req struct {
+				Key string `json:"key"`
+			}
+			json.NewDecoder(r.Body).Decode(&req)
+			key = req.Key
+		}
+		if key != "" {
+			s.coreMem.RemoveVolatileState(key)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status": "ok"}`))
+		return
+	}
+	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+}
+
+func (s *Server) handleCoreMemoryReload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.coreMem.Reload()
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"status": "ok"}`))
 }
 
 func (s *Server) handleForceSleep(w http.ResponseWriter, r *http.Request) {

@@ -22,11 +22,18 @@ type SleepManager struct {
 	resourceAgent *resourceagent.ResourceAgent
 	profiler      *ProfilingAgent
 	llmProvider   llm.Provider
+	selfAwareness *SelfAwarenessAgent
 
 	mu        sync.RWMutex
 	busyCount int
 	bgCtx     context.Context
 	bgCancel  context.CancelFunc
+}
+
+func (s *SleepManager) SetSelfAwareness(sa *SelfAwarenessAgent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.selfAwareness = sa
 }
 
 type ConsolidationResult struct {
@@ -156,7 +163,7 @@ Tu dois extraire trois choses :
    - "Disponibilité"
    - "Modèle LLM utilisé"
    Assure-toi de fusionner ou remplacer les informations similaires sous ces clés exactes au lieu de créer de nouvelles clés redondantes.
-2. "volatile_deletions": Une liste de clés de la mémoire volatile de l'utilisateur qui sont désormais obsolètes, terminées ou contredites par la nouvelle conversation.
+2. "volatile_deletions": Une liste de clés de la mémoire volatile de l'utilisateur qui sont désormais obsolètes, terminées ou contredites par la nouvelle conversation (ex: si une tâche ou un problème est déclaré résolu ou terminé, inclus OBLIGATOIREMENT "Tâche immédiate" dans volatile_deletions).
 3. "memory_entries": Une liste de souvenirs importants de l'interaction à conserver. Pour chaque souvenir, définis :
    - "category": La catégorie du souvenir parmi ["Technical", "Project", "Personal", "Decision", "Other"].
    - "title": Un titre très court et descriptif du souvenir (maximum 40 caractères) (ex: "Idée Pixel : Muscles liquides", "Projet Immo Marcelo").
@@ -325,6 +332,16 @@ Réponds UNIQUEMENT avec un JSON valide, sans commentaires, de ce format :
 			importance = 0.5
 		}
 		s.ltm.StoreMemory(ctx, entry.Category, "conversation", title, entry.ActionSummary, entry.Keywords, embedding, importance)
+		if s.selfAwareness != nil {
+			_ = s.selfAwareness.RecordLearning(ctx, SelfLearningEvent{
+				Topic:      title,
+				Summary:    entry.ActionSummary,
+				Source:     "sleep_consolidation",
+				Category:   entry.Category,
+				Importance: importance,
+				Tags:       entry.Keywords,
+			})
+		}
 	}
 
 	// 5. Apply importance decay to all memories
@@ -358,6 +375,7 @@ CRITIQUE :
 - Formule l'action_summary sous la forme d'une phrase simple, claire et concise en français résumant l'interaction (ex: "Marcelo a questionné Pixel sur sa remarque sur les muscles liquides et Pixel a explicité sa réflexion.", ou "L'utilisateur a expliqué que son collègue Rémi est développeur Go.").
 - Choisis une catégorie parmi ["Technical", "Project", "Personal", "Decision", "Other"].
 - Extrais 2 à 4 mots-clés (tags) pertinents en minuscules.
+- Si l'utilisateur signale qu'un incident, problème technique ou tâche est résolu ou clos, ne dis JAMAIS qu'il est "préoccupé" par ce problème. Résume fidèlement que l'incident est résolu et clos.
 
 Réponds UNIQUEMENT avec un objet JSON strictement valide du format suivant :
 {
@@ -437,6 +455,16 @@ Réponds UNIQUEMENT avec un objet JSON strictement valide du format suivant :
 
 	// Sauvegarder dans la LTM
 	s.ltm.StoreMemory(ctx, result.Category, "conversation", title, result.ActionSummary, result.Tags, embedding, importance)
+	if s.selfAwareness != nil {
+		_ = s.selfAwareness.RecordLearning(ctx, SelfLearningEvent{
+			Topic:      title,
+			Summary:    result.ActionSummary,
+			Source:     "conversation",
+			Category:   result.Category,
+			Importance: importance,
+			Tags:       result.Tags,
+		})
+	}
 	fmt.Printf("[SleepManager] Souvenir indexé en temps réel [%s] : %s\n", result.Category, result.ActionSummary)
 }
 
@@ -695,8 +723,8 @@ CONVERSATION RÉCENTE :
 
 Instructions pour ton analyse :
 1. Analyse si la conversation fait naître de nouveaux centres d'intérêt, questionnements philosophiques, scientifiques ou techniques (ex: libre arbitre, théologie relationnelle, etc.) ou s'il y a des projets complexes que Pixel aimerait creuser de son propre chef. Crée alors un nouvel objectif avec "status": "active" et une priorité proportionnelle à l'importance du sujet (entre 0.0 et 1.0).
-2. Si un sujet déjà présent dans la liste a été rejeté ou déclaré non pertinent par l'utilisateur (ex: l'utilisateur dit qu'il ne trouve pas pertinent d'aller plus loin dans le libre arbitre), tu dois mettre à jour son statut à "archived" ou réduire sa priorité.
-3. Si un objectif a été pleinement accompli (ex: Pixel a écrit l'article ou recherché le sujet et l'utilisateur est satisfait), passe son statut à "completed".
+2. Si un sujet, problème technique, panne (ex: incident SSH, serveur, déploiement, bug) ou tâche antérieure a été résolu, réparé ou déclaré clos/non pertinent par l'utilisateur, tu DOIS impérativement passer son statut à "completed" ou "archived", et ne JAMAIS le laisser "active".
+3. Si un objectif a été pleinement accompli (ex: Pixel a écrit l'article, l'incident est réglé ou le sujet a été investigué), passe son statut à "completed". Ne laisse jamais un incident résolu en statut "active".
 4. Limite la liste à un maximum de 4 objectifs actifs simultanés pour éviter l'éparpillement.
 
 Réponds UNIQUEMENT avec un JSON valide, sans formatage markdown additionnel, sous cette forme exacte :

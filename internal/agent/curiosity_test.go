@@ -11,6 +11,7 @@ import (
 
 	"github.com/marce555/pixel/internal/llm"
 	"github.com/marce555/pixel/internal/memory"
+	"github.com/marce555/pixel/internal/resourceagent"
 	"github.com/marce555/pixel/internal/scheduler"
 	"github.com/marce555/pixel/internal/timeagent"
 )
@@ -656,24 +657,28 @@ func TestSuperiorAgentProcessInputStreamStatus(t *testing.T) {
 		}
 	}
 
-	// Verify we got the status message first, followed by the stream response
-	if len(chunks) < 2 {
-		t.Fatalf("Expected at least 2 chunks, got %d: %v", len(chunks), chunks)
-	}
-
-	foundStatus := false
+	// Verify that the status announcement is NOT sent to the conversation chat stream (no pollution)
 	for _, chunk := range chunks {
-		if strings.Contains(chunk, "Recherche musicale en cours") {
-			foundStatus = true
+		if strings.Contains(chunk, "Recherche musicale") {
+			t.Errorf("Status announcement should not appear in chat chunks, got: %q", chunk)
 		}
 	}
 
-	if !foundStatus {
-		t.Errorf("Expected status message in chunks, but got: %v", chunks)
+	if len(chunks) == 0 || chunks[len(chunks)-1] != "Bonne écoute !" {
+		t.Errorf("Expected stream chunk to be 'Bonne écoute !', got: %v", chunks)
 	}
 
-	if chunks[len(chunks)-1] != "Bonne écoute !" {
-		t.Errorf("Expected last chunk to be 'Bonne écoute !', got: %q", chunks[len(chunks)-1])
+	// Verify that the status was recorded in the real-time live logs (Flux en temps réel)
+	liveLogs := resourceagent.GetLiveLogs()
+	foundLiveLog := false
+	for _, l := range liveLogs {
+		if strings.Contains(l, "Média") && strings.Contains(l, "pink floyd") {
+			foundLiveLog = true
+			break
+		}
+	}
+	if !foundLiveLog {
+		t.Errorf("Expected live log to contain media action in real-time flux, got: %v", liveLogs)
 	}
 }
 

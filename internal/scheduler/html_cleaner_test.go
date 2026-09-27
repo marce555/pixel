@@ -105,4 +105,12 @@ def calculate_bayes(p, l):
 	if !strings.Contains(html, "<tbody>") {
 		t.Errorf("expected <tbody> tag in repaired table")
 	}
+
+	// Must NOT hallucinate cognitive science terms in unrelated topics
+	if strings.Contains(html, "Traitement Prédictif") || strings.Contains(html, "Réalité Monitoring") {
+		t.Errorf("expected no cognitive science hallucination in fallback table")
+	}
+	if !strings.Contains(html, "Références et Sources Documentaires") {
+		t.Errorf("expected references and documentary sources section")
+	}
 }

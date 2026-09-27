@@ -148,6 +148,7 @@ class TTSDownloadThread(QThread):
 
 class RecordReaderThread(QThread):
     finished_signal = pyqtSignal(str) # Emits wav_path
+    speech_started_signal = pyqtSignal() # Emits when speech begins for barge-in
     
     def __init__(self, is_handsfree=False):
         super().__init__()
@@ -168,10 +169,10 @@ class RecordReaderThread(QThread):
         import struct
         import math
         
-        # Start parec subprocess streaming to stdout
+        # Start parec subprocess streaming to stdout with real-time unbuffered default source capture
         try:
             self.process = subprocess.Popen(
-                ["parec", "--channels=1", "--rate=16000", "--format=s16le"],
+                ["parec", "-d", "@DEFAULT_SOURCE@", "--channels=1", "--rate=16000", "--format=s16le", "--latency-msec=50"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL
             )
@@ -180,16 +181,14 @@ class RecordReaderThread(QThread):
             self.finished_signal.emit("")
             return
             
+        # Dynamic adaptive noise floor VAD with DC offset removal
         audio_data = bytearray()
+        noise_floor = 3000.0
         speech_detected = False
         speech_start_time = None
         silence_start_time = None
         start_time = time.time()
-        
-        # 1.0s for manual, 1.8s for handsfree
-        silence_delay = 1.8 if self.is_handsfree else 1.0
-        threshold = 450.0
-        min_speech_ms = 300
+        min_speech_ms = 250
         
         while not self.should_stop:
             # Read a small chunk (1024 bytes = 512 samples = ~32ms of audio)
@@ -199,22 +198,30 @@ class RecordReaderThread(QThread):
                 
             audio_data.extend(chunk)
             
-            # Analyze volume
+            # Analyze AC volume (with DC offset removal)
             num_samples = len(chunk) // 2
             if num_samples > 0:
                 try:
                     samples = struct.unpack(f"{num_samples}h", chunk)
-                    rms = math.sqrt(sum(s*s for s in samples) / num_samples)
+                    mean = sum(samples) / num_samples
+                    ac_rms = math.sqrt(sum((s - mean)**2 for s in samples) / num_samples)
                 except Exception:
-                    rms = 0
+                    ac_rms = 0
                 
                 now = time.time()
                 
+                # Adapt background noise floor dynamically during non-speech
+                if not speech_detected:
+                    noise_floor = noise_floor * 0.94 + ac_rms * 0.06
+                
+                threshold = max(600.0, noise_floor * 1.4)
+                
                 # Check for speech detection
-                if rms > threshold:
+                if ac_rms > threshold:
                     if not speech_detected:
                         speech_start_time = now
                         speech_detected = True
+                        self.speech_started_signal.emit()
                     silence_start_time = None
                 elif speech_detected:
                     if silence_start_time is None:
@@ -222,8 +229,10 @@ class RecordReaderThread(QThread):
                     else:
                         silence_dur = now - silence_start_time
                         speech_dur = (silence_start_time - speech_start_time) * 1000
-                        if silence_dur > silence_delay and speech_dur > min_speech_ms:
-                            print(f"[GUI] Silence détecté ({int(speech_dur)}ms parole, {int(silence_dur*1000)}ms silence) -> Envoi automatique")
+                        adaptive_delay = 1.0 if speech_dur > 2000 else (1.3 if self.is_handsfree else 1.0)
+                        
+                        if silence_dur > adaptive_delay and speech_dur > min_speech_ms:
+                            print(f"[GUI] Dynamic VAD : Fin de parole ({int(speech_dur)}ms parole, {int(silence_dur*1000)}ms silence) -> Transcription")
                             break
                             
             # Max duration safety (15s)
@@ -1630,6 +1639,7 @@ class MainWindow(QMainWindow):
         # Start QThread-based recording with real-time silence detection
         self.record_thread = RecordReaderThread(is_handsfree=self.continuous_voice)
         self.record_thread.finished_signal.connect(self.handle_record_finished, Qt.ConnectionType.QueuedConnection)
+        self.record_thread.speech_started_signal.connect(self.stop_speaking, Qt.ConnectionType.QueuedConnection)
         self.record_thread.start()
 
     def stop_microphone_recording(self):
@@ -1673,26 +1683,23 @@ class MainWindow(QMainWindow):
             has_send_keyword = text.lower().rstrip('.,!?* ').endswith(('envoi', 'envoyer', 'envoie'))
             
             if self.continuous_voice:
-                # Check if it starts with the wake word "Pixel"
+                # Si la phrase commence par "Pixel", on retire le mot-clé pour garder uniquement la question
                 match = re.match(r'^pixel([\s,:\-\.\!\?]+|$)(.*)', text, re.IGNORECASE)
-                if match:
+                if match and match.group(2).strip():
                     cleaned_text = match.group(2).strip()
-                    # Strip trailing send keywords
-                    cleaned_text = re.sub(r'[\s,:\-\.\!\?]*(envoi|envoyer|envoie)[\s,:\-\.\!\?]*$', '', cleaned_text, flags=re.IGNORECASE).strip()
-                    
-                    if cleaned_text:
-                        self.input_field.setText(cleaned_text)
-                        self.send_chat_message()
-                    else:
-                        # Only the wake word was spoken, reset and listen again
-                        self.input_field.setText("")
-                        self.input_field.setPlaceholderText("Pixel : Oui ? Je vous écoute...")
-                        if not self.is_recording:
-                            QTimer.singleShot(600, self.start_microphone_recording)
                 else:
-                    # Ignore background noise/music lyrics
+                    cleaned_text = text.strip()
+                
+                # Nettoyer les mots-clés d'envoi éventuels en fin de phrase
+                cleaned_text = re.sub(r'[\s,:\-\.\!\?]*(envoi|envoyer|envoie)[\s,:\-\.\!\?]*$', '', cleaned_text, flags=re.IGNORECASE).strip()
+                
+                if cleaned_text and cleaned_text.lower() != "pixel":
+                    self.input_field.setText(cleaned_text)
+                    self.send_chat_message()
+                else:
+                    # Si seul "Pixel" a été dit, inviter à parler
                     self.input_field.setText("")
-                    self.input_field.setPlaceholderText("[Ignoré (Mot-clé absent)] Pixel reste à l'écoute...")
+                    self.input_field.setPlaceholderText("Pixel : Oui ? Je vous écoute...")
                     if not self.is_recording:
                         QTimer.singleShot(600, self.start_microphone_recording)
             else:

@@ -1,8 +1,12 @@
 package resourceagent
 
 import (
+	"fmt"
+	"io"
 	"io/ioutil"
+	"log"
 	"net/http"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -24,7 +28,69 @@ var (
 	internetCacheMu      sync.Mutex
 	lastInternetCheck    time.Time
 	cachedInternetActive bool
+
+	liveLogsMu sync.Mutex
+	liveLogs   []string
 )
+
+type liveLogWriter struct {
+	out io.Writer
+}
+
+func (w *liveLogWriter) Write(p []byte) (n int, err error) {
+	n, err = w.out.Write(p)
+	raw := string(p)
+	msg := strings.TrimSpace(raw)
+	if len(msg) > 0 {
+		tag := "Système"
+		cleanMsg := msg
+		if idx := strings.Index(msg, "] "); idx != -1 && strings.Contains(msg[:idx], "[") {
+			tagIdx := strings.LastIndex(msg[:idx+1], "[")
+			tag = msg[tagIdx+1 : idx]
+			cleanMsg = strings.TrimSpace(msg[idx+2:])
+		}
+		recordLiveLog(tag, cleanMsg)
+	}
+	return n, err
+}
+
+func init() {
+	log.SetOutput(&liveLogWriter{out: os.Stderr})
+}
+
+func recordLiveLog(tag, cleanMsg string) {
+	cleanMsg = strings.ReplaceAll(cleanMsg, "\n", " ")
+	liveLogsMu.Lock()
+	defer liveLogsMu.Unlock()
+	timestamp := time.Now().Format("15:04:05")
+	formatted := fmt.Sprintf("[%s] [%s] %s", timestamp, tag, cleanMsg)
+	
+	// Éviter les doublons consécutifs identiques
+	if len(liveLogs) > 0 && liveLogs[len(liveLogs)-1] == formatted {
+		return
+	}
+
+	liveLogs = append(liveLogs, formatted)
+	if len(liveLogs) > 30 {
+		liveLogs = liveLogs[len(liveLogs)-30:]
+	}
+}
+
+// AddLiveLog enregistre un message dans le flux temps réel (systemd et tampon mémoire)
+func AddLiveLog(tag, message string) {
+	cleanMsg := strings.TrimSpace(message)
+	entry := fmt.Sprintf("[%s] %s", tag, cleanMsg)
+	log.Println(entry)
+}
+
+// GetLiveLogs retourne une copie des derniers logs en direct en mémoire
+func GetLiveLogs() []string {
+	liveLogsMu.Lock()
+	defer liveLogsMu.Unlock()
+	cp := make([]string, len(liveLogs))
+	copy(cp, liveLogs)
+	return cp
+}
 
 func GetSystemStatus() SystemStatus {
 	numCPUs := runtime.NumCPU()
@@ -147,10 +213,19 @@ func getLoadAvg() float64 {
 }
 
 func getSystemdLogs() string {
-	cmd := exec.Command("journalctl", "--user", "-u", "pixel.service", "-n", "8", "--no-pager")
+	liveLogsMu.Lock()
+	if len(liveLogs) > 0 {
+		cp := strings.Join(liveLogs, "\n")
+		liveLogsMu.Unlock()
+		return cp
+	}
+	liveLogsMu.Unlock()
+
+	cmd := exec.Command("journalctl", "--user", "-u", "pixel.service", "-n", "15", "--no-pager")
 	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return "Impossible de lire les logs systemd : " + err.Error()
+	outStr := strings.TrimSpace(string(output))
+	if err != nil || len(outStr) == 0 || outStr == "-- No entries --" || strings.Contains(outStr, "No entries") {
+		return "En attente d'événements..."
 	}
 	logStr := string(output)
 	logStr = strings.ReplaceAll(logStr, "cachyos-x8664", "machine-hote")

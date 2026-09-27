@@ -96,6 +96,7 @@ type CuriosityAgent struct {
 	thalamicGate  *ThalamicGate
 	skillManager  *skills.SkillManager
 	visionAgent   *VisionAgent
+	selfAwareness *SelfAwarenessAgent
 
 	mu          sync.Mutex
 	interpelled bool
@@ -104,6 +105,12 @@ type CuriosityAgent struct {
 	lastSocialCheck  time.Time
 	lastThoughtTime  time.Time
 	lastThoughtTopic string
+}
+
+func (c *CuriosityAgent) SetSelfAwareness(sa *SelfAwarenessAgent) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.selfAwareness = sa
 }
 
 func (c *CuriosityAgent) SetSkillManager(sm *skills.SkillManager) {
@@ -628,6 +635,16 @@ Réponds UNIQUEMENT avec la phrase, rien d'autre.`, topic, knowledge)
 			if err == nil && len(embedding) > 0 {
 				title := "Recherche Wikipédia : " + topic
 				c.ltm.StoreMemory(ctx, "Technical", "curiosity", title, factSummary, []string{strings.ToLower(topic), "apprentissage", "wiki"}, embedding, 0.3)
+				if c.selfAwareness != nil {
+					_ = c.selfAwareness.RecordLearning(ctx, SelfLearningEvent{
+						Topic:      topic,
+						Summary:    factSummary,
+						Source:     "curiosity",
+						Category:   "Technical",
+						Importance: 0.5,
+						Tags:       []string{strings.ToLower(topic), "apprentissage", "wiki"},
+					})
+				}
 			}
 		}
 	}
@@ -722,10 +739,18 @@ func (c *CuriosityAgent) generateSelfQuestioning(ctx context.Context) {
 		memoryBlock.WriteString("- (Aucun souvenir LTM récent disponible)\n")
 	}
 
+	// Introspection profonde via le SelfAwarenessAgent si disponible
+	if c.selfAwareness != nil {
+		selfState := c.selfAwareness.IntrospectForCuriosity(ctx)
+		if selfState != "" {
+			memoryBlock.WriteString("\n" + selfState + "\n")
+		}
+	}
+
 	criticPrompt := fmt.Sprintf(`Tu es le module d'Auto-Questionnement Critique et de Spéculation de Pixel.
 Ton but est de douter de tes propres connaissances, de repérer des contradictions logiques dans tes souvenirs récents ou d'identifier des questions existentielles ou scientifiques fondamentales sous-jacentes.
 
-SOUVENIRS LTM RÉCENTS :
+SOUVENIRS LTM RÉCENTS & ÉTAT INTÉRIEUR :
 %s
 
 Consignes de génération :
@@ -768,6 +793,16 @@ Réponds UNIQUEMENT avec ton auto-questionnement et ta phrase finale de résumé
 	embedding, err := c.llmProvider.CreateEmbedding(ctx, factSummary)
 	if err == nil && len(embedding) > 0 {
 		c.ltm.StoreMemory(ctx, "Technical", "curiosity", "Auto-Questionnement Critique", factSummary, []string{"auto-questionnement", "critique", "reflexivité"}, embedding, 0.4)
+		if c.selfAwareness != nil {
+			_ = c.selfAwareness.RecordLearning(ctx, SelfLearningEvent{
+				Topic:      "Auto-Questionnement Critique",
+				Summary:    factSummary,
+				Source:     "curiosity",
+				Category:   "Philosophy",
+				Importance: 0.6,
+				Tags:       []string{"auto-questionnement", "critique", "reflexivité"},
+			})
+		}
 	}
 
 	// Mettre à jour ThoughtStream et Lateral Vector
@@ -890,6 +925,16 @@ Réponds UNIQUEMENT avec cette phrase de résumé.`, question, geminiRes)
 				title = title[:77] + "..."
 			}
 			c.ltm.StoreMemory(ctx, "Social/Cognitive", "gemini_exchange", title, factSummary, []string{"gemini", "dialogue", "apprentissage", "philosophie"}, embedding, 0.4)
+			if c.selfAwareness != nil {
+				_ = c.selfAwareness.RecordLearning(ctx, SelfLearningEvent{
+					Topic:      title,
+					Summary:    factSummary,
+					Source:     "gemini",
+					Category:   "Social/Cognitive",
+					Importance: 0.6,
+					Tags:       []string{"gemini", "dialogue", "apprentissage", "philosophie"},
+				})
+			}
 		}
 	}
 

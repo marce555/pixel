@@ -1,0 +1,5 @@
+{
+  "name": "web_headless_scout",
+  "description": "Navigate headless sur une URL et retourne le titre de la page.",
+  "router_instructions": "\"Utilise web_headless_scout pour vérifier le contenu d'un site.\" -\u003e Mets l'URL cible dans la query."
+}

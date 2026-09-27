@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 )
 
@@ -265,6 +266,17 @@ func (cm *CoreMemory) UpdateVolatileState(key, value string) {
 		cm.Profile.Volatile = make(map[string]string)
 	}
 	cm.Profile.Volatile[key] = value
+
+	if cm.Profile.Static.Name != "" && cm.Interlocutors != nil {
+		if inter, ok := cm.Interlocutors[cm.Profile.Static.Name]; ok {
+			if inter.Volatile == nil {
+				inter.Volatile = make(map[string]string)
+			}
+			inter.Volatile[key] = value
+			cm.Interlocutors[cm.Profile.Static.Name] = inter
+		}
+	}
+
 	cm.mu.Unlock()
 	cm.Save()
 }
@@ -274,6 +286,16 @@ func (cm *CoreMemory) RemoveVolatileState(key string) {
 	if cm.Profile.Volatile != nil {
 		delete(cm.Profile.Volatile, key)
 	}
+
+	if cm.Profile.Static.Name != "" && cm.Interlocutors != nil {
+		if inter, ok := cm.Interlocutors[cm.Profile.Static.Name]; ok {
+			if inter.Volatile != nil {
+				delete(inter.Volatile, key)
+				cm.Interlocutors[cm.Profile.Static.Name] = inter
+			}
+		}
+	}
+
 	cm.mu.Unlock()
 	cm.Save()
 }
@@ -427,4 +449,85 @@ func (cm *CoreMemory) UpdateDynamicGoals(goals []DynamicGoal) {
 	cm.mu.Unlock()
 	cm.Save()
 }
+
+// SetDynamicGoalStatus updates the status of a dynamic goal by ID.
+func (cm *CoreMemory) SetDynamicGoalStatus(id string, status string) bool {
+	cm.mu.Lock()
+	updated := false
+	for i := range cm.DynamicGoals {
+		if cm.DynamicGoals[i].ID == id {
+			cm.DynamicGoals[i].Status = status
+			updated = true
+			break
+		}
+	}
+	cm.mu.Unlock()
+	if updated {
+		cm.Save()
+	}
+	return updated
+}
+
+// RemoveDynamicGoal removes a dynamic goal by ID.
+func (cm *CoreMemory) RemoveDynamicGoal(id string) bool {
+	cm.mu.Lock()
+	idx := -1
+	for i := range cm.DynamicGoals {
+		if cm.DynamicGoals[i].ID == id {
+			idx = i
+			break
+		}
+	}
+	if idx != -1 {
+		cm.DynamicGoals = append(cm.DynamicGoals[:idx], cm.DynamicGoals[idx+1:]...)
+	}
+	cm.mu.Unlock()
+	if idx != -1 {
+		cm.Save()
+		return true
+	}
+	return false
+}
+
+// ResolveDynamicGoalsByKeywords searches active dynamic goals containing any of the keywords
+// and marks them as "completed". Returns the list of completed goal IDs.
+func (cm *CoreMemory) ResolveDynamicGoalsByKeywords(keywords []string) []string {
+	if len(keywords) == 0 {
+		return nil
+	}
+	cm.mu.Lock()
+	var resolvedIDs []string
+	for i := range cm.DynamicGoals {
+		if cm.DynamicGoals[i].Status != "active" {
+			continue
+		}
+		descLower := strings.ToLower(cm.DynamicGoals[i].Description)
+		idLower := strings.ToLower(cm.DynamicGoals[i].ID)
+		sourceLower := strings.ToLower(cm.DynamicGoals[i].Source)
+
+		for _, kw := range keywords {
+			kwLower := strings.ToLower(strings.TrimSpace(kw))
+			if kwLower == "" {
+				continue
+			}
+			if strings.Contains(descLower, kwLower) || strings.Contains(idLower, kwLower) || strings.Contains(sourceLower, kwLower) {
+				cm.DynamicGoals[i].Status = "completed"
+				resolvedIDs = append(resolvedIDs, cm.DynamicGoals[i].ID)
+				fmt.Printf("[CoreMemory] Objectif cognitif marqué comme complété : %s (%s)\n", cm.DynamicGoals[i].ID, cm.DynamicGoals[i].Description)
+				break
+			}
+		}
+	}
+	cm.mu.Unlock()
+	if len(resolvedIDs) > 0 {
+		cm.Save()
+	}
+	return resolvedIDs
+}
+
+// Reload forces reloading the core memory from disk.
+func (cm *CoreMemory) Reload() {
+	cm.Load()
+}
+
 

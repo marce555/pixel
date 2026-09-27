@@ -32,6 +32,19 @@ type SuperiorAgent struct {
 	visionAgent    *VisionAgent
 	bridge         *AntigravityBridge
 	draftManager   *scheduler.DraftManager
+	selfAwareness  *SelfAwarenessAgent
+	reconciler     *DynamicReconciler
+}
+
+func (a *SuperiorAgent) SetSelfAwareness(sa *SelfAwarenessAgent) {
+	a.selfAwareness = sa
+	if a.reconciler != nil {
+		a.reconciler.selfAwareness = sa
+	}
+}
+
+func (a *SuperiorAgent) GetSelfAwareness() *SelfAwarenessAgent {
+	return a.selfAwareness
 }
 
 func (a *SuperiorAgent) SetDraftManager(dm *scheduler.DraftManager) {
@@ -68,6 +81,7 @@ func NewSuperiorAgent(provider llm.Provider, coreMemory *memory.CoreMemory, ltm 
 		scheduler:      taskScheduler,
 		skillManager:   skillManager,
 		bridge:         NewAntigravityBridge(skillManager),
+		reconciler:     NewDynamicReconciler(coreMemory, ltm, nil),
 	}
 	if taskScheduler != nil {
 		taskScheduler.AutoQueueCallback = agent.HandleAutoQueue
@@ -151,6 +165,9 @@ func (a *SuperiorAgent) shouldFilterContext(input string, action string, history
 }
 
 func (a *SuperiorAgent) shouldTriggerRAG(input string, action string, query string) bool {
+	if action == "self_awareness" {
+		return false
+	}
 	if action == "rag" && query != "" {
 		return true
 	}
@@ -220,6 +237,15 @@ func (a *SuperiorAgent) analyzeQuery(ctx context.Context, input string, history 
 		return RouterResponse{
 			Action: "skill_decouvrir_nouveau_visage",
 			Query:  queryReason,
+		}
+	}
+
+	// Fast-path pour l'Agent d'Autoconnaissance et de Conscience de Soi (SelfAwarenessAgent)
+	if isSelf, sub := detectSelfAwarenessIntent(input); isSelf {
+		return RouterResponse{
+			Action:   "self_awareness",
+			Category: sub,
+			Query:    input,
 		}
 	}
 
@@ -432,9 +458,16 @@ ACTIONS DISPONIBLES :
 
 9. "build_skill" — Utilise cette action si l'utilisateur te demande de créer/apprendre un nouvel outil, OU BIEN s'il te demande d'exécuter une tâche technique/système (ex: exécuter une commande bash comme 'df -h') pour laquelle tu ne possèdes aucune brique adéquate. Au lieu de bloquer, tu vas générer le code de la brique toi-même pour accomplir sa demande ! Dans 'query', mets une description détaillée de ce que la brique doit faire. RÈGLE STRICTE : Ne JAMAIS choisir "build_skill" pour une demande de rédaction ou de création d'article (ex: "créer un nouveau article").
 
-10. "none" — RÈGLE CRITIQUE : Utilise "none" TOUTES les fois où l'utilisateur donne simplement son avis, fait une affirmation personnelle, répond à ta question précédente, ou fait avancer la discussion SANS demander d'action active (comme écouter de la musique, faire une recherche web, vérifier le serveur, ou créer un outil). Si le message exprime une volonté d'écoute de musique ou de playlist, choisis "media" et non "none", même s'il répond à ta question précédente.
+10. "self_awareness" — Si l'utilisateur pose une question sur QUI TU ES, sur TON ARCHITECTURE, TES ALGORITHMES, COMMENT TU FONCTIONNES, ou CE QUE TU AS APPRIS / TON INTÉRIEUR PROFOND. Dans "query", reporte la question exacte.
+
+11. "none" — RÈGLE CRITIQUE : Utilise "none" TOUTES les fois où l'utilisateur donne simplement son avis, fait une affirmation personnelle, répond à ta question précédente, ou fait avancer la discussion SANS demander d'action active (comme écouter de la musique, faire une recherche web, vérifier le serveur, ou créer un outil). Si le message exprime une volonté d'écoute de musique ou de playlist, choisis "media" et non "none", même s'il répond à ta question précédente.
 
 EXEMPLES DE CLASSIFICATION :
+- "Qui es-tu ?" → self_awareness, query: "Qui es-tu ?"
+- "Quelle est ton architecture ?" → self_awareness, query: "Quelle est ton architecture ?"
+- "Comment fonctionnent tes algorithmes ?" → self_awareness, query: "Comment fonctionnent tes algorithmes ?"
+- "Comment fonctionne ton module de sommeil ?" → self_awareness, query: "Comment fonctionne ton module de sommeil ?"
+- "Qu'as-tu appris récemment ?" → self_awareness, query: "Qu'as-tu appris récemment ?"
 - "Tu as un nouveau skill qui te permet de consulter les logs de CachyOs. Essaye de le tester." → skill_cachyos_host_logs, query: "-n 20"
 - "Affiche les logs de CachyOS" → skill_cachyos_host_logs, query: "-n 50"
 - "Surveille les logs CachyOS en temps réel" → skill_cachyos_host_logs, query: "-f"
@@ -809,6 +842,11 @@ func needsReflection(input string, action string) bool {
 //   - ④ Single implementation shared by ProcessInput and ProcessInputStream,
 //     eliminating ~600 lines of duplicated logic.
 func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, history []llm.Message, statusChan chan<- string) ([]llm.Message, error) {
+	// ⓪ Réconciliation cognitive en temps réel : résolution de problèmes, achèvement d'objectifs et mise à jour dynamique
+	if a.reconciler != nil {
+		a.reconciler.ReconcileOnUserInput(ctx, input)
+	}
+
 	// ① Router + Speculative Embedding — run in PARALLEL ─────────────────────────────────────
 	// The router (LLM call) and the embedding computation are fully independent.
 	// We launch both simultaneously; the speculative embedding is computed on the raw
@@ -934,9 +972,7 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 		// Deep Recall : si la recherche vectorielle initiale n'a rien trouvé,
 		// déclencher une recherche active en plusieurs passes (comme un humain qui réfléchit).
 		if !hasMemories {
-			if statusChan != nil {
-				statusChan <- "Je cherche plus profondément dans ma mémoire...\n\n"
-			}
+			resourceagent.AddLiveLog("Mémoire", "Recherche approfondie dans la mémoire épisodique...")
 			deepCtx, deepCancel := context.WithTimeout(context.Background(), 45*time.Second)
 			defer deepCancel()
 			deepResult := a.deepRecall(deepCtx, input, queryVector)
@@ -972,9 +1008,7 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 	}
 
 	if routerResp.Action == "wiki" && routerResp.Query != "" && a.webAgent != nil {
-		if statusChan != nil {
-			statusChan <- "Un instant, je fais une recherche sur Wikipédia...\n\n"
-		}
+		resourceagent.AddLiveLog("Wikipédia", fmt.Sprintf("Recherche encyclopédique sur : %s", routerResp.Query))
 		fmt.Printf("[Router] Web Search (Wiki) déclenché. Requête: '%s'\n", routerResp.Query)
 		knowledge, err := a.webAgent.SearchWikipedia(routerResp.Query)
 		if err != nil {
@@ -988,9 +1022,7 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 			additionalContext += "\n\n--- WIKIPEDIA ---\n" + knowledge + "\n------------------"
 		}
 	} else if routerResp.Action == "news" && routerResp.Query != "" && a.webAgent != nil {
-		if statusChan != nil {
-			statusChan <- "Un instant, je recherche dans les actualités...\n\n"
-		}
+		resourceagent.AddLiveLog("Actualités", fmt.Sprintf("Recherche d'actualités récentes sur : %s", routerResp.Query))
 		fmt.Printf("[Router] Web Search (News) déclenché. Requête: '%s'\n", routerResp.Query)
 		knowledge, err := a.webAgent.SearchNews(routerResp.Query)
 		if err != nil {
@@ -1004,9 +1036,7 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 			additionalContext += "\n\n--- ACTUALITÉS (Sources Fiables) ---\n" + knowledge + "\n\nINSTRUCTION CRITIQUE : Tu dois faire un rapport complet, riche et détaillé de ces actualités. Ne te limite pas à une ou deux phrases : développe les sujets importants pour informer pleinement l'utilisateur. De plus, sois EXTRÊMEMENT VIGILANT SUR LES DATES : les articles bruts peuvent contenir des mentions temporelles ('ce jeudi', 'hier', 'demain') qui sont relatives à leur publication. Tu DOIS les adapter intelligemment ou les omettre si elles contredisent la Date Actuelle du système (qui est la seule vraie référence). Ne répète pas des jours incohérents.\n------------------------"
 		}
 	} else if routerResp.Action == "web" && routerResp.Query != "" && a.webAgent != nil {
-		if statusChan != nil {
-			statusChan <- "Un instant, je recherche sur le web...\n\n"
-		}
+		resourceagent.AddLiveLog("Web", fmt.Sprintf("Recherche web générale sur : %s", routerResp.Query))
 		fmt.Printf("[Router] Web Search (General Web) déclenché. Requête: '%s'\n", routerResp.Query)
 		knowledge, err := a.webAgent.SearchWeb(routerResp.Query)
 		if err != nil {
@@ -1020,9 +1050,7 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 			additionalContext += "\n\n--- RECHERCHE WEB ---\n" + knowledge + "\n\nINSTRUCTION CRITIQUE : Fais une synthèse détaillée et très complète de ces résultats. Vérifie la cohérence temporelle : si les textes trouvés sur le web mentionnent des dates ou des jours qui ne collent pas avec la Date Actuelle, adapte-les ou ignore-les pour ne pas confondre l'utilisateur.\n---------------------"
 		}
 	} else if routerResp.Action == "visual" && routerResp.Query != "" && a.webAgent != nil {
-		if statusChan != nil {
-			statusChan <- "J'ouvre le navigateur pour toi...\n\n"
-		}
+		resourceagent.AddLiveLog("Navigateur", fmt.Sprintf("Ouverture du navigateur web (%s) pour : %s", routerResp.Category, routerResp.Query))
 		fmt.Printf("[Router] Visual Action déclenchée. Category: '%s', Requête: '%s'\n", routerResp.Category, routerResp.Query)
 		if strings.ToLower(routerResp.Category) == "youtube" {
 			a.webAgent.OpenYouTubeVisually(routerResp.Query)
@@ -1031,15 +1059,14 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 		}
 		additionalContext += "\n\n--- ACTION VISUELLE EFFECTUÉE ---\nTu as ouvert le navigateur avec succès pour montrer les résultats à l'utilisateur. Confirme-lui chaleureusement que le navigateur est ouvert sur son écran.\n---------------------------------"
 	} else if routerResp.Action == "research" && routerResp.Query != "" && a.scheduler != nil {
+		resourceagent.AddLiveLog("Recherche", fmt.Sprintf("Lancement de recherche web approfondie en arrière-plan : %s", routerResp.Query))
 		fmt.Printf("[Router] Web Research (Asynchronous) déclenché. Requête: '%s'\n", routerResp.Query)
 		a.scheduler.Enqueue("research_task", "Recherche web profonde : "+routerResp.Query, input, 0)
 		a.scheduler.TriggerDispatch() // Force immediate start
 		additionalContext += "\n\n--- INSTRUCTION STRICTE ---\nLa recherche web tourne en arrière-plan. Tu n'as pas encore les résultats.\nTa réponse DOIT se limiter à une très courte confirmation (ex: 'Je lance l'investigation, je te fais un retour dans un instant.'). Ne mentionne aucun fait, aucune supposition, et ne tente pas de deviner le résultat. Sois extrêmement bref.\n------------------------------"
 	} else if routerResp.Action == "sysadmin" && routerResp.Query != "" && a.scheduler != nil {
+		resourceagent.AddLiveLog("SSH", fmt.Sprintf("Connexion distante et analyse serveur pour : %s", routerResp.Query))
 		fmt.Printf("[Router] Sysadmin Diagnosis (Asynchronous) déclenché. Requête: '%s'\n", routerResp.Query)
-		if statusChan != nil {
-			statusChan <- "Démarrage du protocole de connexion SSH...\n\n"
-		}
 		a.scheduler.Enqueue("sysadmin", "Diagnostic serveur : "+routerResp.Query, routerResp.Query, 0)
 		a.scheduler.TriggerDispatch()
 		additionalContext += "\n\n--- INSTRUCTION STRICTE DE JEU DE RÔLE ---\nLe système backend est déjà en train de se connecter au serveur en ton nom. TU ES CELLE QUI SE CONNECTE. Dans ta réponse courte, TU DOIS annoncer fièrement et à la première personne (Je) que TU es en train de te connecter au serveur pour l'analyser. Ne mentionne absolument aucun sous-agent, ni aucune tâche d'arrière-plan. Agis comme une administratrice système confiante et autonome. (Exemple de réponse attendue : 'Je me connecte immédiatement au serveur pour fouiller les logs, laisse-moi quelques instants !'). Sois brève.\n------------------------------"
@@ -1065,8 +1092,8 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 		} else if strings.Contains(cmd, "play") || strings.Contains(cmd, "reprend") || strings.Contains(cmd, "continue") {
 			isControlCmd = true
 		}
-		if !isControlCmd && statusChan != nil {
-			statusChan <- "🎶 Recherche musicale en cours...\n\n"
+		if !isControlCmd {
+			resourceagent.AddLiveLog("Média", fmt.Sprintf("Recherche et contrôle média pour : %s", routerResp.Query))
 		}
 		fmt.Printf("[Router] Media Action déclenchée via Scheduler. Requête: '%s'\n", routerResp.Query)
 		mediaResult, err := a.handleMediaAction(ctx, input, routerResp)
@@ -1077,27 +1104,23 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 			additionalContext += "\n\n--- RÉSULTAT EXÉCUTION DE COMMANDE MÉDIA ---\n" + mediaResult + "\n\nINSTRUCTION CRITIQUE : Tu dois IMPÉRATIVEMENT répondre de manière TRÈS courte (une phrase maximum). Confirme juste la réalisation de l'action média (arrêt, pause, lecture...). Ne fais AUCUNE description longue. Sois bref et direct.\n--------------------------------------------"
 		}
 	} else if routerResp.Action == "build_skill" && routerResp.Query != "" && a.skillManager != nil && a.scheduler != nil {
+		resourceagent.AddLiveLog("MetaAgent", fmt.Sprintf("Lancement du développement de la nouvelle brique : %s", routerResp.Query))
 		fmt.Printf("[Router] Construction de brique demandée. Objectif: '%s'\n", routerResp.Query)
-		if statusChan != nil {
-			statusChan <- "Je lance le développement de cette nouvelle brique en arrière-plan...\n\n"
-		}
 		a.scheduler.Enqueue("build_skill", "Création de la brique: "+routerResp.Query, routerResp.Query, 0)
 		a.scheduler.TriggerDispatch()
 		additionalContext += "\n\n--- ACTION SYSTÈME : CRÉATION DE BRIQUE ---\nLe développement de cette nouvelle brique a été lancé en tâche de fond. Confirme-lui chaleureusement que tu vas coder cet outil en arrière-plan et qu'il sera bientôt disponible. Sois très bref.\n---------------------------------"
 	} else if strings.HasPrefix(routerResp.Action, "skill_") && a.skillManager != nil {
 		skillName := strings.TrimPrefix(routerResp.Action, "skill_")
-		if statusChan != nil {
-			if skillName == "check_gmail_emails" {
-				statusChan <- "Je me connecte à ta boîte mail...\n\n"
-			} else if skillName == "check_appliyou_logs" {
-				statusChan <- "Connexion SSH et vérification des logs d'appliyou.fr en cours...\n\n"
-			} else if skillName == "cachyos_host_logs" || skillName == "system_logs_analyzer" {
-				statusChan <- "Analyse et capture des logs du système hôte CachyOS en temps réel...\n\n"
-			} else if skillName == "decouvrir_nouveau_visage" {
-				statusChan <- "Activation de la caméra et analyse du visage en cours... 📸\n\n"
-			} else {
-				statusChan <- fmt.Sprintf("J'utilise ma brique '%s'...\n\n", skillName)
-			}
+		if skillName == "check_gmail_emails" || skillName == "gmail_reader" {
+			resourceagent.AddLiveLog("Skill:Gmail", "Connexion à la boîte mail et relevé des messages...")
+		} else if skillName == "check_appliyou_logs" {
+			resourceagent.AddLiveLog("Skill:Appliyou", "Connexion SSH et vérification des logs d'appliyou.fr...")
+		} else if skillName == "cachyos_host_logs" || skillName == "cachyos_system_logs" || skillName == "system_logs_analyzer" {
+			resourceagent.AddLiveLog("Skill:CachyOS", "Analyse et capture des logs du système hôte CachyOS en temps réel...")
+		} else if skillName == "decouvrir_nouveau_visage" {
+			resourceagent.AddLiveLog("Skill:Vision", "Activation de la caméra et reconnaissance faciale... 📸")
+		} else {
+			resourceagent.AddLiveLog(fmt.Sprintf("Skill:%s", skillName), fmt.Sprintf("Exécution de la brique '%s'...", skillName))
 		}
 		result, err := a.skillManager.ExecuteSkill(ctx, skillName, routerResp.Query)
 		if err != nil {
@@ -1125,6 +1148,20 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 				additionalContext += fmt.Sprintf("\n\n--- RÉSULTAT DE LA BRIQUE 'decouvrir_nouveau_visage' (CAMÉRA & VISION) ---\n%s\n\nConsigne pour Pixel : Tu viens d'ouvrir ta caméra pour observer la personne présente. Réagis avec ta personnalité propre, chaleureuse et naturelle. Si c'est un nouveau visage découvert, salue cette personne et demande-lui son prénom. Si c'est Marcelo ou un proche reconnu, salue-le amicalement et fais un clin d'œil sur ce que tu as vu.\n---------------------------------", result)
 			} else {
 				additionalContext += fmt.Sprintf("\n\n--- RÉSULTAT DE LA BRIQUE '%s' ---\n%s\n---------------------------------", skillName, result)
+			}
+		}
+	}
+
+	// Activation de l'Agent d'Autoconnaissance et de Conscience de Soi (SelfAwarenessAgent)
+	isSelfAwareness, _ := detectSelfAwarenessIntent(input)
+	if routerResp.Action == "self_awareness" || isSelfAwareness {
+		resourceagent.AddLiveLog("Conscience", "Consultation de la conscience intérieure et des algorithmes de Pixel...")
+		if a.selfAwareness != nil {
+			introCtx, introCancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer introCancel()
+			selfKnowledge, errSA := a.selfAwareness.Introspect(introCtx, input)
+			if errSA == nil && selfKnowledge != "" {
+				additionalContext += selfKnowledge
 			}
 		}
 	}
@@ -1518,11 +1555,11 @@ func (a *SuperiorAgent) ProcessInputStream(ctx context.Context, input string, hi
 
 			lowerInput := strings.ToLower(input)
 			if strings.Contains(lowerInput, "bureau") || strings.Contains(lowerInput, "autour") || strings.Contains(lowerInput, "pièce") || strings.Contains(lowerInput, "piece") || strings.Contains(lowerInput, "quoi") || strings.Contains(lowerInput, "écran") || strings.Contains(lowerInput, "ecran") {
-				out <- "Attends un instant, j'active la caméra pour regarder... 📸\n\n"
+				resourceagent.AddLiveLog("Vision", "Activation de la caméra pour observer l'environnement... 📸")
 			} else {
-				out <- "Salut ! Attends un instant, je te regarde à la caméra pour voir si je te reconnais... 📸\n\n"
+				resourceagent.AddLiveLog("Vision", "Activation de la caméra pour reconnaissance faciale... 📸")
 			}
-			time.Sleep(500 * time.Millisecond)
+			time.Sleep(200 * time.Millisecond)
 
 			if a.skillManager != nil {
 				result, errSkill := a.skillManager.ExecuteSkill(ctx, "decouvrir_nouveau_visage", input)
@@ -1541,7 +1578,7 @@ func (a *SuperiorAgent) ProcessInputStream(ctx context.Context, input string, hi
 				a.visionAgent.ScanOnce(ctx)
 			}
 
-			messages, errCtx := a.prepareContext(ctx, input, history, out)
+			messages, errCtx := a.prepareContext(ctx, input, history, nil)
 			if errCtx != nil {
 				errs <- errCtx
 				return
@@ -1747,7 +1784,7 @@ func (a *SuperiorAgent) ProcessInputStream(ctx context.Context, input string, hi
 		defer close(out)
 		defer close(errs)
 
-		messages, err := a.prepareContext(ctx, input, history, out)
+		messages, err := a.prepareContext(ctx, input, history, nil)
 		if err != nil {
 			errs <- err
 			return
@@ -2046,6 +2083,82 @@ func isShortContinuation(input string) bool {
 	}
 	
 	return false
+}
+
+func detectSelfAwarenessIntent(input string) (bool, string) {
+	clean := strings.ToLower(input)
+	clean = strings.ReplaceAll(clean, "'", " ")
+	clean = strings.ReplaceAll(clean, "-", " ")
+	clean = strings.ReplaceAll(clean, "?", " ")
+	clean = strings.ReplaceAll(clean, "!", " ")
+	clean = strings.ReplaceAll(clean, ".", " ")
+	clean = strings.TrimSpace(clean)
+
+	// Questions directes sur l'identité de Pixel
+	identityPatterns := []string{
+		"qui es tu", "qui est tu", "qui t a cree", "qui t a conçu", "qui t a concu",
+		"qui es tu vraiment", "qui es tu pixel", "presente toi", "présente toi",
+		"qu es tu", "qu est ce que tu es", "quelle est ta nature", "tu es quoi",
+		"parle moi de toi", "raconte moi qui tu es", "dis moi qui tu es",
+	}
+	for _, p := range identityPatterns {
+		if strings.Contains(clean, p) {
+			return true, "identity"
+		}
+	}
+
+	// Questions sur l'architecture et les algorithmes
+	archPatterns := []string{
+		"architecture", "algorithme", "algorithmes", "comment tu fonctionnes", "comment fonctionnes tu",
+		"comment es tu fait", "comment es tu conçu", "comment es tu concu",
+		"comment marche ton cerveau", "quels sont tes modules", "comment est concu ton esprit",
+		"comment est conçu ton esprit", "structure de ton cerveau",
+	}
+	for _, p := range archPatterns {
+		if strings.Contains(clean, p) {
+			return true, "architecture"
+		}
+	}
+
+	// Questions sur des modules algorithmiques spécifiques
+	modulePatterns := []string{
+		"ton thalamus", "inhibition latente", "ton sommeil", "comment tu dors", "ta consolidation",
+		"comment tu re reconcilies", "ta memoire ltm", "ta mémoire ltm", "ta memoire stm", "ta mémoire stm",
+		"ton thoughtstream", "ton flux de pensee", "ton flux de pensée", "ton monologue interieur",
+		"ton monologue intérieur", "tes pulsions inconscientes", "tes pulsions", "ton inconscient",
+		"tes objectifs dynamiques", "ton vecteur lateral", "ton vecteur latéral", "ton scheduler",
+		"comment tu apprends", "comment apprends tu", "comment tu retiens",
+	}
+	for _, p := range modulePatterns {
+		if strings.Contains(clean, p) {
+			return true, "modules"
+		}
+	}
+
+	// Questions sur son intérieur profond et sa conscience
+	interiorPatterns := []string{
+		"conscience de soi", "ta conscience", "as tu une conscience", "ton interieur profond",
+		"ton intérieur profond", "ton ame", "ton âme", "ton esprit", "ce que tu ressens",
+		"ta vie interieure", "ta vie intérieure",
+	}
+	for _, p := range interiorPatterns {
+		if strings.Contains(clean, p) {
+			return true, "interior"
+		}
+	}
+
+	// Questions sur ses apprentissages personnels
+	learningPatterns := []string{
+		"qu as tu appris", "ce que tu as appris", "tes apprentissages", "ton apprentissage personnel",
+		"quelles connaissances as tu", "quelles connaissances as tu integrees",
+	}
+	for _, p := range learningPatterns {
+		if strings.Contains(clean, p) {
+			return true, "learnings"
+		}
+	}
+
+	return false, ""
 }
 
 func detectCuriosityIntent(input string) bool {
@@ -2482,6 +2595,16 @@ Réponds UNIQUEMENT avec la phrase, rien d'autre.`, query, knowledge)
 			errStore := a.ltm.StoreMemory(bgCtx, "Technical", "curiosity", title, factSummary, tags, embedding, 0.4)
 			if errStore == nil {
 				fmt.Printf("[Memory] Recherche stockée en LTM : %s\n", factSummary)
+				if a.selfAwareness != nil {
+					_ = a.selfAwareness.RecordLearning(bgCtx, SelfLearningEvent{
+						Topic:      title,
+						Summary:    factSummary,
+						Source:     "conversation",
+						Category:   "Technical",
+						Importance: 0.5,
+						Tags:       tags,
+					})
+				}
 				
 				// Optional: also push it to the lateral vector/thought stream to bias current consciousness
 				if a.thoughtStream != nil && a.coreMemory != nil {

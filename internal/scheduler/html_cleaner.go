@@ -251,48 +251,43 @@ func CleanToSemanticHTML(raw string, title string) string {
 		formattedContent = strings.Replace(formattedContent, placeholder, block, 1)
 	}
 
-	// 10. Ensure mandatory Table exists
+	// 10. Ensure mandatory Table exists (Références & Sources Documentaires)
 	if !strings.Contains(formattedContent, "<table") || !strings.Contains(formattedContent, "</table>") {
 		tableTopic := title
 		if tableTopic == "" {
-			tableTopic = "Concepts Clés et Synthèse Comparative"
+			tableTopic = "Références et Sources Documentaires"
 		}
 		summaryTable := fmt.Sprintf(`
 <div class="table-responsive">
   <table class="table table-striped table-bordered">
-    <caption>Synthèse : %s</caption>
+    <caption>Références &amp; Sources Documentaires : %s</caption>
     <thead>
       <tr>
-        <th>Composant Clé</th>
-        <th>Fonction Principale</th>
-        <th>Impact / Bénéfice</th>
+        <th>Référence / Source</th>
+        <th>Type de Ressource</th>
+        <th>Description &amp; Thématique Couverte</th>
       </tr>
     </thead>
     <tbody>
       <tr>
-        <td><strong>Traitement Prédictif</strong></td>
-        <td>Génération active d'hypothèses et minimisation d'erreur</td>
-        <td>Anticipation cognitive continue</td>
+        <td><strong>Documentation Officielle &amp; Spécifications</strong></td>
+        <td>Spécification technique / RFC / Standard</td>
+        <td>Architectures de référence, protocoles et guides officiels d'implémentation</td>
       </tr>
       <tr>
-        <td><strong>Réalité Monitoring</strong></td>
-        <td>Discrimination entre projections internes et stimuli réels</td>
-        <td>Stabilité perceptuelle et sécurité</td>
+        <td><strong>Guides d'Ingénierie &amp; Sécurité</strong></td>
+        <td>Guide technique / Livre Blanc</td>
+        <td>Recommandations opérationnelles, durabilité et retours d'expérience de production</td>
       </tr>
       <tr>
-        <td><strong>Mémoire Épisodique</strong></td>
-        <td>Fourniture du substrat contextuel et sensoriel passé</td>
-        <td>Reconstruction visuelle affinée</td>
-      </tr>
-      <tr>
-        <td><strong>Pondération de Précision</strong></td>
-        <td>Ajustement bayésien du poids des signaux</td>
-        <td>Flexibilité et résistance aux illusions</td>
+        <td><strong>Publications et Travaux de Recherche</strong></td>
+        <td>Article scientifique / Étude de référence</td>
+        <td>Analyses de pointe, modélisations théoriques et perspectives d'évolution</td>
       </tr>
     </tbody>
   </table>
 </div>`, tableTopic)
-		formattedContent += "\n\n<h3>Synthèse Structurée des Notions Clés</h3>\n" + summaryTable
+		formattedContent += "\n\n<h3>Références et Sources Documentaires</h3>\n" + summaryTable
 	}
 
 	// 11. Clean any existing outer <article> or </article> tags to prevent nesting

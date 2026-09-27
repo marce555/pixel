@@ -5,24 +5,29 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
 type VoiceManager struct {
-	binDir      string
-	piperPath   string
-	modelPath   string
-	modelUrl    string
-	configUrl   string
-	piperUrl    string
-	asrEndpoint string
+	binDir           string
+	piperPath        string
+	modelPath        string
+	modelUrl         string
+	configUrl        string
+	piperUrl         string
+	asrEndpoint      string
+	whisperServerCmd *exec.Cmd
+	serverMu         sync.Mutex
 }
 
 func NewVoiceManager() (*VoiceManager, error) {
@@ -40,10 +45,10 @@ func NewVoiceManager() (*VoiceManager, error) {
 		modelUrl:    "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/fr/fr_FR/siwis/medium/fr_FR-siwis-medium.onnx",
 		configUrl:   "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/fr/fr_FR/siwis/medium/fr_FR-siwis-medium.onnx.json",
 		piperUrl:    "https://github.com/rhasspy/piper/releases/download/v1.2.0/piper_amd64.tar.gz",
-		asrEndpoint: "http://127.0.0.1:52625/v1/audio/transcriptions",
+		asrEndpoint: "http://127.0.0.1:8089/inference",
 	}
 
-	// S'assurer de la présence des binaires en tâche de fond
+	// S'assurer de la présence des binaires et lancer whisper-server en tâche de fond
 	go func() {
 		err := vm.ensureAssets()
 		if err != nil {
@@ -51,6 +56,8 @@ func NewVoiceManager() (*VoiceManager, error) {
 		} else {
 			fmt.Println("[VoiceManager] Moteur Piper et modèle de voix prêts.")
 		}
+		// Démarrer whisper-server persistant GPU si disponible
+		vm.EnsureWhisperServer(context.Background())
 	}()
 
 	return vm, nil
@@ -66,7 +73,7 @@ func (vm *VoiceManager) ConvertWebMToWav(webmPath, wavPath string) error {
 	// - equalizer f=3000 : boost de 4dB sur les fréquences de parole pour micro laptop à signal faible
 	// - volume=3.0 : gain renforcé pour les micros intégrés à faible sensibilité
 	cmd := exec.Command("ffmpeg", "-y", "-i", webmPath, "-ar", "16000", "-af",
-		"aformat=channel_layouts=mono,highpass=f=80,lowpass=f=10000,equalizer=f=3000:width_type=o:width=2:g=4,volume=3.0",
+		"aformat=channel_layouts=mono,highpass=f=80,lowpass=f=8000,volume=1.2",
 		"-c:a", "pcm_s16le", wavPath)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -84,11 +91,157 @@ func (vm *VoiceManager) ConvertWebMToWav(webmPath, wavPath string) error {
 	return nil
 }
 
-// TranscribeAudio exécute localement le binaire de transcription whisper-cli sur le CPU.
-func (vm *VoiceManager) TranscribeAudio(ctx context.Context, wavPath string) (string, error) {
-	modelsDir := filepath.Join(vm.binDir, "whisper.cpp", "models")
+// EnsureWhisperServer s'assure que le serveur GPU whisper-server tourne sur le port 8089.
+func (vm *VoiceManager) EnsureWhisperServer(ctx context.Context) error {
+	vm.serverMu.Lock()
+	defer vm.serverMu.Unlock()
 
-	// Hiérarchie de modèles : medium-q5_0 (GPU, meilleure qualité) > small-q5_1 (CPU) > base (fallback)
+	// Vérifier si le serveur répond déjà
+	client := http.Client{Timeout: 500 * time.Millisecond}
+	resp, err := client.Get("http://127.0.0.1:8089/inference")
+	if err == nil {
+		resp.Body.Close()
+		return nil // Déjà actif !
+	}
+
+	serverPath := filepath.Join(vm.binDir, "whisper.cpp", "build", "bin", "whisper-server")
+	if _, err := os.Stat(serverPath); os.IsNotExist(err) {
+		return fmt.Errorf("whisper-server introuvable à %s", serverPath)
+	}
+
+	modelsDir := filepath.Join(vm.binDir, "whisper.cpp", "models")
+	modelPath := filepath.Join(modelsDir, "ggml-medium-q5_0.bin")
+	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
+		modelPath = filepath.Join(modelsDir, "ggml-base.bin")
+	}
+
+	vadModelPath := filepath.Join(modelsDir, "for-tests-silero-v6.2.0-ggml.bin")
+
+	args := []string{
+		"-m", modelPath,
+		"-l", "fr",
+		"-t", "4",
+		"--suppress-nst",
+		"--beam-size", "5",
+		"--best-of", "5",
+		"--port", "8089",
+	}
+
+	if _, err := os.Stat(vadModelPath); err == nil {
+		args = append(args, "--vad", "--vad-model", vadModelPath, "--vad-threshold", "0.5")
+	}
+
+	cmd := exec.Command(serverPath, args...)
+	cmd.Env = append(os.Environ(), "LD_LIBRARY_PATH=/opt/cuda/lib64:"+os.Getenv("LD_LIBRARY_PATH"))
+
+	err = cmd.Start()
+	if err != nil {
+		return fmt.Errorf("impossible de démarrer whisper-server : %w", err)
+	}
+
+	vm.whisperServerCmd = cmd
+	fmt.Println("[VoiceManager] Serveur GPU persistant Whisper lancé sur http://127.0.0.1:8089")
+
+	time.Sleep(1 * time.Second)
+	return nil
+}
+
+func (vm *VoiceManager) transcribeViaServer(ctx context.Context, wavPath string) (string, error) {
+	fileData, err := os.ReadFile(wavPath)
+	if err != nil {
+		return "", err
+	}
+
+	var reqBody bytes.Buffer
+	writer := multipart.NewWriter(&reqBody)
+	part, err := writer.CreateFormFile("file", filepath.Base(wavPath))
+	if err != nil {
+		return "", err
+	}
+	_, err = part.Write(fileData)
+	if err != nil {
+		return "", err
+	}
+	writer.Close()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", vm.asrEndpoint, &reqBody)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	client := http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBytes, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("whisper-server error %d: %s", resp.StatusCode, string(respBytes))
+	}
+
+	var result struct {
+		Text string `json:"text"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+
+	return result.Text, nil
+}
+
+func (vm *VoiceManager) cleanWhisperText(text string) string {
+	text = strings.TrimSpace(text)
+	text = strings.ReplaceAll(text, "[BLANK_AUDIO]", "")
+	lines := strings.Split(text, "\n")
+	var cleanLines []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" && trimmed != "..." && trimmed != ".." && trimmed != "." {
+			cleanLines = append(cleanLines, trimmed)
+		}
+	}
+	text = strings.TrimSpace(strings.Join(cleanLines, " "))
+
+	hallucinationPatterns := []string{
+		"amara.org",
+		"sous-titres réalisés",
+		"sous-titres par la communauté",
+		"subtitles by the amara",
+		"transcribed by",
+		"merci d'avoir regardé",
+		"merci de regarder",
+		"abonnez-vous",
+		"n'oubliez pas de liker",
+		"conversation en français avec pixel",
+		"une assistante ia",
+	}
+	textLower := strings.ToLower(text)
+	for _, pattern := range hallucinationPatterns {
+		if strings.Contains(textLower, pattern) {
+			fmt.Printf("[VoiceManager] Hallucination Whisper détectée et ignorée: '%s'\n", text)
+			return ""
+		}
+	}
+	return text
+}
+
+// TranscribeAudio exécute la transcription via whisper-server GPU ou fallback whisper-cli.
+func (vm *VoiceManager) TranscribeAudio(ctx context.Context, wavPath string) (string, error) {
+	// 1. Essayer le serveur GPU persistant whisper-server (sub-50ms)
+	text, err := vm.transcribeViaServer(ctx, wavPath)
+	if err == nil {
+		cleaned := vm.cleanWhisperText(text)
+		return cleaned, nil
+	}
+
+	// Tenter de démarrer whisper-server si pas encore prêt
+	go vm.EnsureWhisperServer(context.Background())
+
+	// 2. Fallback sur whisper-cli
+	modelsDir := filepath.Join(vm.binDir, "whisper.cpp", "models")
 	type modelCandidate struct {
 		path  string
 		label string
@@ -111,48 +264,36 @@ func (vm *VoiceManager) TranscribeAudio(ctx context.Context, wavPath string) (st
 	if modelPath == "" {
 		return "", fmt.Errorf("aucun modèle Whisper disponible, veuillez patienter...")
 	}
-	fmt.Printf("[VoiceManager] Modèle sélectionné : %s\n", modelLabel)
 
 	cliPath := filepath.Join(vm.binDir, "whisper.cpp", "build", "bin", "whisper-cli")
 	if _, err := os.Stat(cliPath); os.IsNotExist(err) {
 		return "", fmt.Errorf("le décodeur vocal local whisper-cli est en cours de compilation...")
 	}
 
-	// Modèle VAD Silero pour couper les segments silencieux avant le décodage
-	// (élimine les hallucinations à la source)
 	vadModelPath := filepath.Join(modelsDir, "for-tests-silero-v6.2.0-ggml.bin")
-
-	// Préfixe de sortie temporaire pour whisper.cpp
 	tempOutput := filepath.Join(os.TempDir(), fmt.Sprintf("whisper_out_%d", time.Now().UnixNano()))
 	defer os.Remove(tempOutput + ".txt")
 
-
-	// Arguments de base
 	args := []string{
-		"-t", "4",           // 4 threads CPU suffisent avec GPU (réduit la contention)
+		"-t", "4",
 		"-m", modelPath,
 		"-f", wavPath,
 		"-otxt",
 		"-of", tempOutput,
-		"-l", "fr",           // forcer le français (suffit, pas besoin de --prompt)
+		"-l", "fr",
 		"--suppress-nst",
 		"--no-speech-thold", "0.5",
 		"--entropy-thold", "2.8",
 		"--temperature", "0.0",
 		"--beam-size", "5",
-		"--word-thold", "0.01",   // rejeter les mots avec confiance < 1%
-		"--max-len", "0",         // pas de limite de longueur par segment
-		// NOTE : --prompt supprimé — whisper.cpp peut halluciner le texte du prompt
-		// au lieu de transcrire l'audio quand le signal est court ou peu clair.
+		"--word-thold", "0.01",
+		"--max-len", "0",
 	}
 
-	// Activer le GPU (CUDA) pour le modèle medium — RTX 5060 disponible
 	if modelLabel == "medium-q5_0 (GPU)" {
 		args = append(args, "--device", "0", "--flash-attn")
-		fmt.Println("[VoiceManager] GPU RTX 5060 activé pour la transcription (CUDA)")
 	}
 
-	// Activer le VAD Silero si le modèle est disponible (coupe silence avant décodage)
 	if _, err := os.Stat(vadModelPath); err == nil {
 		args = append(args,
 			"--vad-model", vadModelPath,
@@ -163,61 +304,21 @@ func (vm *VoiceManager) TranscribeAudio(ctx context.Context, wavPath string) (st
 	}
 
 	cmd := exec.CommandContext(ctx, cliPath, args...)
-	// Injecter LD_LIBRARY_PATH pour que whisper-cli trouve les libs CUDA au runtime
 	cmd.Env = append(os.Environ(), "LD_LIBRARY_PATH=/opt/cuda/lib64:"+os.Getenv("LD_LIBRARY_PATH"))
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
-	if err != nil {
-		return "", fmt.Errorf("whisper-cli execution failed: %w (stderr: %s)", err, stderr.String())
+	runErr := cmd.Run()
+	if runErr != nil {
+		return "", fmt.Errorf("whisper-cli execution failed: %w (stderr: %s)", runErr, stderr.String())
 	}
 
-	// Lire le texte transcrit
-	textBytes, err := os.ReadFile(tempOutput + ".txt")
-	if err != nil {
-		return "", fmt.Errorf("impossible de lire le fichier de transcription produit : %w", err)
+	textBytes, readErr := os.ReadFile(tempOutput + ".txt")
+	if readErr != nil {
+		return "", fmt.Errorf("impossible de lire le fichier de transcription : %w", readErr)
 	}
 
-	text := strings.TrimSpace(string(textBytes))
-
-	// Nettoyer les tokens de silence produits par Whisper ("...", "[BLANK_AUDIO]", etc.)
-	text = strings.ReplaceAll(text, "[BLANK_AUDIO]", "")
-	lines := strings.Split(text, "\n")
-	var cleanLines []string
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed != "" && trimmed != "..." && trimmed != ".." && trimmed != "." {
-			cleanLines = append(cleanLines, trimmed)
-		}
-	}
-	text = strings.TrimSpace(strings.Join(cleanLines, " "))
-
-	// Liste noire des hallucinations connues de Whisper
-	// (artefacts des données d'entraînement : watermarks de sous-titres YouTube, etc.)
-	hallucinationPatterns := []string{
-		"amara.org",
-		"sous-titres réalisés",
-		"sous-titres par la communauté",
-		"subtitles by the amara",
-		"transcribed by",
-		"merci d'avoir regardé",
-		"merci de regarder",
-		"abonnez-vous",
-		"n'oubliez pas de liker",
-		// Filet de sécurité : si le prompt supprimé ressurgit quand même (vieux cache)
-		"conversation en français avec pixel",
-		"une assistante ia",
-	}
-	textLower := strings.ToLower(text)
-	for _, pattern := range hallucinationPatterns {
-		if strings.Contains(textLower, pattern) {
-			fmt.Printf("[VoiceManager] Hallucination Whisper détectée et ignorée: '%s'\n", text)
-			return "", nil
-		}
-	}
-
-	return text, nil
+	return vm.cleanWhisperText(string(textBytes)), nil
 }
 
 // Synthesize utilise Piper localement sur le CPU pour générer le WAV audio correspondant au texte

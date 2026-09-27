@@ -90,9 +90,11 @@ func NewPlayMusicHandler(resolver MusicResolver, s *Scheduler) TaskHandler {
 
 		ipcSocket := fmt.Sprintf("/tmp/mpvsocket_%s", task.ID)
 		
-		// Run mpv with the cancelable task context
+		// Run mpv with native PipeWire audio output (CachyOS default)
 		args := []string{
 			"--no-video",
+			"--ao=pipewire",
+			"--ytdl-format=bestaudio/best",
 			fmt.Sprintf("--input-ipc-server=%s", ipcSocket), // IPC socket for play/pause/stop control
 		}
 		if strings.Contains(targetURL, "list=") {
@@ -139,40 +141,12 @@ func NewPlayMusicHandler(resolver MusicResolver, s *Scheduler) TaskHandler {
 					nextTask.AppendLog("Pré-résolution de la musique en arrière-plan...")
 					u, title, dir, err := resolver.ResolveMusicURL(nextTask.Payload)
 					if err == nil {
-						finalURL := u
-						if dir && !strings.Contains(u, "list=") && title != "" {
-							os.MkdirAll("/tmp/pixel_cache", 0755)
-							safeTitle := strings.Map(func(r rune) rune {
-								if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
-									return r
-								}
-								return '_'
-							}, title)
-							cachePath := fmt.Sprintf("/tmp/pixel_cache/%s.mp3", safeTitle)
-
-							if _, statErr := os.Stat(cachePath); os.IsNotExist(statErr) {
-								nextTask.AppendLog("Téléchargement en arrière-plan pour le cache...")
-								dlCmd := exec.Command("yt-dlp", "-x", "--audio-format", "mp3", "-o", cachePath, u)
-								localBin := "/home/marceloc/Documents/Pixel/bin"
-								dlCmd.Env = append(os.Environ(), "PATH="+localBin+":"+os.Getenv("PATH"))
-								if dlErr := dlCmd.Run(); dlErr == nil {
-									finalURL = cachePath
-									nextTask.AppendLog("Mise en cache terminée avec succès.")
-								} else {
-									nextTask.AppendLog(fmt.Sprintf("Échec de la mise en cache : %v", dlErr))
-								}
-							} else {
-								finalURL = cachePath
-								nextTask.AppendLog("Piste trouvée dans le cache local.")
-							}
-						}
-
 						nextTask.mu.Lock()
-						nextTask.ResolvedURL = finalURL
+						nextTask.ResolvedURL = u
 						nextTask.ResolvedTitle = title
 						nextTask.IsDirect = dir
 						nextTask.mu.Unlock()
-						nextTask.AppendLog(fmt.Sprintf("Pré-résolution réussie : %s (%s)", finalURL, title))
+						nextTask.AppendLog(fmt.Sprintf("Pré-résolution réussie (streaming direct) : %s (%s)", u, title))
 					} else {
 						nextTask.AppendLog(fmt.Sprintf("Échec de la pré-résolution : %v", err))
 					}

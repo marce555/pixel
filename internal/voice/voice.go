@@ -66,14 +66,12 @@ func NewVoiceManager() (*VoiceManager, error) {
 // ConvertWebMToWav décode le fichier WebM audio du navigateur en WAV 16kHz mono PCM compatible Whisper.
 func (vm *VoiceManager) ConvertWebMToWav(webmPath, wavPath string) error {
 	// Commande ffmpeg pour transcoder avec traitement DSP voix haut de gamme :
-	// - aformat=channel_layouts=mono : downmix natif stéréo→mono (inclut les deux canaux, évite le canal gauche vide
-	//   sur les drivers PipeWire/PulseAudio Linux qui placent le signal sur les deux canaux en WebM)
-	// - highpass=f=80 : coupe les bruits sourds de basse fréquence et les vibrations
-	// - lowpass=f=10000 : conserve les sibilantes françaises (s, f, ch) qui montent jusqu'à 10kHz
-	// - equalizer f=3000 : boost de 4dB sur les fréquences de parole pour micro laptop à signal faible
-	// - volume=3.0 : gain renforcé pour les micros intégrés à faible sensibilité
+	// - aformat=channel_layouts=mono : downmix natif stéréo→mono (inclut les deux canaux)
+	// - highpass=f=75 : coupe les bruits sourds et ronronnements sans tronquer la fondamentale de la voix (85-180Hz)
+	// - lowpass=f=9500 : préserve le timbre vocal naturel et les sibilantes françaises
+	// - dynaudnorm=f=150:g=15 : normalisation dynamique par fenêtres de 150ms pour niveau optimal Whisper
 	cmd := exec.Command("ffmpeg", "-y", "-i", webmPath, "-ar", "16000", "-af",
-		"aformat=channel_layouts=mono,highpass=f=80,lowpass=f=8000,volume=1.2",
+		"aformat=channel_layouts=mono,highpass=f=75,lowpass=f=9500,dynaudnorm=f=150:g=15",
 		"-c:a", "pcm_s16le", wavPath)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -170,7 +168,7 @@ func (vm *VoiceManager) transcribeViaServer(ctx context.Context, wavPath string)
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
-	client := http.Client{Timeout: 5 * time.Second}
+	client := http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
@@ -282,8 +280,9 @@ func (vm *VoiceManager) TranscribeAudio(ctx context.Context, wavPath string) (st
 		"-of", tempOutput,
 		"-l", "fr",
 		"--suppress-nst",
-		"--no-speech-thold", "0.5",
-		"--entropy-thold", "2.8",
+		"--prompt", "Conversation en français avec Pixel, un assistant IA.",
+		"--no-speech-thold", "0.6",
+		"--entropy-thold", "2.4",
 		"--temperature", "0.0",
 		"--beam-size", "5",
 		"--word-thold", "0.01",

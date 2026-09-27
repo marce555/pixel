@@ -94,6 +94,57 @@ func (a *SuperiorAgent) SkillManager() *skills.SkillManager {
 	return a.skillManager
 }
 
+func normalizeSongTitle(s string) string {
+	s = strings.ToLower(s)
+	// Remove parenthetical noise like (Official Video), [Remastered], etc.
+	reExtra := regexp.MustCompile(`[\(\[\{].*?[\)\]\}]`)
+	s = reExtra.ReplaceAllString(s, "")
+	var sb strings.Builder
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == ' ' {
+			sb.WriteRune(r)
+		}
+	}
+	return strings.TrimSpace(sb.String())
+}
+
+func isSongDuplicate(candidate, existing string) bool {
+	cNorm := normalizeSongTitle(candidate)
+	eNorm := normalizeSongTitle(existing)
+	if cNorm == "" || eNorm == "" {
+		return false
+	}
+	if cNorm == eNorm {
+		return true
+	}
+	if len(cNorm) > 6 && len(eNorm) > 6 {
+		if strings.Contains(cNorm, eNorm) || strings.Contains(eNorm, cNorm) {
+			return true
+		}
+	}
+	cWords := strings.Fields(cNorm)
+	eWords := strings.Fields(eNorm)
+	if len(cWords) == 0 || len(eWords) == 0 {
+		return false
+	}
+	matchCount := 0
+	for _, cw := range cWords {
+		if len(cw) <= 2 {
+			continue
+		}
+		for _, ew := range eWords {
+			if cw == ew {
+				matchCount++
+				break
+			}
+		}
+	}
+	if matchCount >= 2 && (float64(matchCount)/float64(len(cWords)) >= 0.6 || float64(matchCount)/float64(len(eWords)) >= 0.6) {
+		return true
+	}
+	return false
+}
+
 // HandleAutoQueue is called by the scheduler when the music queue is empty.
 func (a *SuperiorAgent) HandleAutoQueue(parentCtx context.Context, lastTitle string) {
 	// Execute the LLM request in a separate goroutine to avoid blocking
@@ -105,11 +156,13 @@ func (a *SuperiorAgent) HandleAutoQueue(parentCtx context.Context, lastTitle str
 		recentHistory := a.scheduler.GetRecentMusicHistory(10)
 		historyStr := strings.Join(recentHistory, ", ")
 
-		prompt := fmt.Sprintf(`Tu es un DJ automatique (Autoplay). La dernière chanson jouée était "%s".
-Donne-moi TROIS chansons très similaires musicalement qui s'enchaîneraient parfaitement avec.
-Pour ne pas tourner en rond, NE PROPOSE AUCUNE de ces chansons récemment jouées : %s
-RÈGLE CRITIQUE : Réponds UNIQUEMENT avec une liste de 3 lignes au format "Nom de l'Artiste - Titre de la chanson". 
-N'ajoute AUCUN autre texte, ni guillemets, ni numérotation, ni tirets de liste, ni introduction.`, lastTitle, historyStr)
+		prompt := fmt.Sprintf(`Tu es un DJ radio automatique (Autoplay). La dernière chanson diffusée était : "%s".
+Propose TROIS chansons différentes d'artistes différents qui s'enchaînent avec harmonie dans ce style musical.
+RÈGLES STRICTES ANTI-BOUCLE :
+1. NE JAMAIS proposer "%s".
+2. NE JAMAIS proposer un des morceaux déjà diffusés récemment : %s.
+3. Propose 3 morceaux avec 3 artistes DIFFÉRENTS les uns des autres.
+4. Réponds UNIQUEMENT par 3 lignes au format strict "Artiste - Titre", sans guillemets, sans tirets de liste, sans numérotation, sans texte additionnel.`, lastTitle, lastTitle, historyStr)
 
 		messages := []llm.Message{
 			{Role: llm.RoleSystem, Content: prompt},
@@ -120,21 +173,73 @@ N'ajoute AUCUN autre texte, ni guillemets, ni numérotation, ni tirets de liste,
 		if err == nil && result != "" {
 			lines := strings.Split(result, "\n")
 			added := 0
+			seenThisBatch := make(map[string]bool)
+
 			for _, line := range lines {
 				line = strings.TrimSpace(line)
 				line = strings.TrimLeft(line, "-*1234567890. ") // clean up bullets/numbers if any
 				line = strings.Trim(line, `"'`)
-				if line != "" && len(line) > 5 {
-					a.scheduler.Enqueue("play_music", fmt.Sprintf("Radio Auto : %s", line), line, 0)
-					fmt.Printf("[Autoplay DJ] Chanson générée et ajoutée : %s\n", line)
-					added++
+				if line == "" || len(line) < 5 {
+					continue
 				}
+
+				// 1. Refuse duplicates of lastTitle
+				if isSongDuplicate(line, lastTitle) {
+					fmt.Printf("[Autoplay DJ] Doublon avec le morceau en cours '%s', rejeté : %s\n", lastTitle, line)
+					continue
+				}
+
+				// 2. Refuse duplicates of recent history
+				isRecent := false
+				for _, h := range recentHistory {
+					if isSongDuplicate(line, h) {
+						isRecent = true
+						break
+					}
+				}
+				if isRecent {
+					fmt.Printf("[Autoplay DJ] Chanson déjà jouée récemment, rejetée : %s\n", line)
+					continue
+				}
+
+				// 3. Refuse duplicates within this same generation batch
+				isBatchDup := false
+				for seen := range seenThisBatch {
+					if isSongDuplicate(line, seen) {
+						isBatchDup = true
+						break
+					}
+				}
+				if isBatchDup {
+					fmt.Printf("[Autoplay DJ] Doublon dans le même lot, rejeté : %s\n", line)
+					continue
+				}
+
+				// 4. Refuse songs already pending or running in scheduler
+				isQueued := false
+				for _, t := range a.scheduler.GetTasks() {
+					if (t.Status == scheduler.StatusPending || t.Status == scheduler.StatusRunning) && t.Type == "play_music" {
+						if isSongDuplicate(line, t.Payload) || isSongDuplicate(line, t.ResolvedTitle) {
+							isQueued = true
+							break
+						}
+					}
+				}
+				if isQueued {
+					fmt.Printf("[Autoplay DJ] Déjà dans la file d'attente, rejeté : %s\n", line)
+					continue
+				}
+
+				seenThisBatch[line] = true
+				a.scheduler.Enqueue("play_music", fmt.Sprintf("Radio Auto : %s", line), line, 0)
+				fmt.Printf("[Autoplay DJ] Chanson valide générée et ajoutée : %s\n", line)
+				added++
 				if added >= 3 {
 					break
 				}
 			}
 			if added == 0 {
-				fmt.Printf("[Autoplay DJ] Le LLM n'a retourné aucun titre valide.\n")
+				fmt.Printf("[Autoplay DJ] Le LLM n'a retourné aucun titre valide ou non dupliqué.\n")
 			}
 		} else {
 			fmt.Printf("[Autoplay DJ] Erreur de génération LLM : %v\n", err)
@@ -221,12 +326,78 @@ type RouterResponse struct {
 	Query    string `json:"query"`
 }
 
+// isConversationalFastPath detects everyday greetings, polite acknowledgments, and basic conversational phrases
+// to bypass the Router LLM completely with 0ms latency.
+func isConversationalFastPath(cleanInput string) bool {
+	clean := strings.ToLower(cleanInput)
+	clean = strings.ReplaceAll(clean, "'", " ")
+	clean = strings.ReplaceAll(clean, "-", " ")
+	clean = strings.ReplaceAll(clean, "?", " ")
+	clean = strings.ReplaceAll(clean, "!", " ")
+	clean = strings.ReplaceAll(clean, ".", " ")
+	clean = strings.ReplaceAll(clean, ",", " ")
+	clean = strings.Join(strings.Fields(clean), " ") // collapse multiple spaces
+
+	// Ne pas court-circuiter les requêtes longues (> 80 chars) ou avec des mots clés d'action évidents
+	if len(clean) > 80 {
+		return false
+	}
+	actionKeywords := []string{"musique", "chanson", "mail", "gmail", "cherche", "recherche", "ouvre", "lance", "joue", "météo", "meteo", "heure", "date", "film", "youtube", "rappelle", "souviens"}
+	for _, kw := range actionKeywords {
+		if strings.Contains(clean, kw) {
+			return false
+		}
+	}
+
+	// Salutations directes
+	greetings := []string{"bonjour", "salut", "coucou", "hello", "bonsoir", "yo", "bonne journee", "bonne soiree"}
+	for _, g := range greetings {
+		if clean == g || strings.HasPrefix(clean, g+" ") || strings.HasSuffix(clean, " "+g) {
+			return true
+		}
+	}
+
+	// Formules conversationnelles (comment vas-tu, ça va, etc.)
+	prefixes := []string{
+		"comment ca va", "comment vas tu", "comment tu vas", "comment te portes tu",
+		"ca va", "tu vas bien", "tout va bien",
+		"merci", "de rien", "je t en prie",
+		"d accord", "ok", "super", "parfait", "tres bien", "c est cool", "c est note",
+		"au revoir", "bonne nuit", "a plus", "a bientot", "a demain", "ciao", "bye",
+		"tu m entends", "est ce que tu m entends", "m entends tu",
+		"tu es la", "es tu la",
+	}
+	for _, p := range prefixes {
+		if clean == p || strings.HasPrefix(clean, p+" ") || strings.HasSuffix(clean, " "+p) {
+			return true
+		}
+	}
+
+	// Mots uniques conversationnels
+	singleWords := []string{"oui", "non", "ouais", "nan", "ouep", "nop", "si", "exactement", "compris"}
+	for _, w := range singleWords {
+		if clean == w || clean == w+" pixel" || clean == "pixel "+w {
+			return true
+		}
+	}
+
+	return false
+}
+
 func (a *SuperiorAgent) analyzeQuery(ctx context.Context, input string, history []llm.Message) RouterResponse {
 	cleanInput := strings.TrimSpace(strings.ToLower(input))
 	cleanInput = strings.ReplaceAll(cleanInput, ".", "")
 	cleanInput = strings.ReplaceAll(cleanInput, "!", "")
 	cleanInput = strings.ReplaceAll(cleanInput, "?", "")
 	cleanInput = strings.TrimSpace(cleanInput)
+
+	// Fast-path pour conversations directes et salutations (bypass Router LLM, 0ms latency)
+	if isConversationalFastPath(cleanInput) {
+		return RouterResponse{
+			Action: "none",
+			Query:  input,
+		}
+	}
 
 	// Fast-path pour la découverte de nouveau visage / caméra à la demande ou confusion d'identité
 	currentProfile := ""
@@ -409,8 +580,8 @@ func (a *SuperiorAgent) analyzeQuery(ctx context.Context, input string, history 
 
 	// Fast-path regex fallback for "mets/joue/lance [music]" to bypass LLM classification failure
 	if strings.HasPrefix(cleanInput, "mets ") || strings.HasPrefix(cleanInput, "met ") || strings.HasPrefix(cleanInput, "joue ") || strings.HasPrefix(cleanInput, "lance ") || strings.HasPrefix(cleanInput, "écoute ") || strings.HasPrefix(cleanInput, "ecoute ") {
-		// If it's a short command, just pass the whole thing as query
-		if len(cleanInput) < 50 {
+		// If it's a short command, just pass the whole thing as query (except compilations/selections which need LLM song selection)
+		if len(cleanInput) < 50 && !strings.Contains(cleanInput, "compilation") && !strings.Contains(cleanInput, "selection") && !strings.Contains(cleanInput, "sélection") && !strings.Contains(cleanInput, "playlist") {
 			return RouterResponse{Action: "media", Query: cleanInput}
 		}
 	}
@@ -442,12 +613,12 @@ ACTIONS DISPONIBLES :
 5. "research" — UNIQUEMENT si l'utilisateur demande explicitement une "recherche approfondie", un "résumé complet", ou de lire des pages entières (ex: "fais une recherche de fond sur...", "trouve moi les horaires des films", "compare les prix de..."). RÈGLE D'OR : Si tu as proposé à l'utilisateur de faire une recherche approfondie dans le message précédent, et qu'il répond affirmativement ("oui", "vas-y", "ok"), tu DOIS ABSOLUMENT choisir "research" et extraire le sujet de la discussion précédente dans "query". Ce mode est très lourd et lent. RÈGLE CRITIQUE : Inclus TOUJOURS le mois et l'année actuels dans ta 'query'.
    RÈGLES DE SOURCES ACADÉMIQUES : Utilise la même syntaxe "site:" (ex : 'site:cairn.info', 'site:arxiv.org', 'site:ieeexplore.ieee.org', etc.) dans ta 'query' pour orienter les recherches approfondies vers ces bases de données de confiance selon le domaine (psychologie, physique, informatique/infrastructures).
 
-6. "media" — Si l'utilisateur demande d'écouter de la musique, un artiste, une playlist. Choisis ABSOLUMENT "media" pour TOUTE intention d'écoute de musique ou de playlist, même si la phrase commence par des acquiescements, salutations ou expressions conversationnelles (ex: "oui", "ok", "parfait", "oui tu peux").
-   - Dans "query" : mettre uniquement le sujet musical (ex: "Pink Floyd"), sans verbes d'action.
-   - RÈGLE DE TRADUCTION CRITIQUE : Ne traduis JAMAIS les noms d'artistes, les titres de chansons ou d'albums en français. Conserve-les STRICTEMENT dans leur langue d'origine (ex: "Los Prisioneros", "Corazones Rojos", "Taylor Swift", "Eddy de Pretto").
-   - RÈGLE D'ASSOCIATION : Si la demande associe un artiste et une chanson, mets l'artiste et le titre ensemble dans la même requête (ex: "Corazones Rojos Los Prisioneros"), sans les séparer par "||".
-   - Musiques multiples (titres distincts demandés ensemble) : séparer par "||" (ex: "chanson A || chanson B").
-   - Contrôle média : mettre exactement "play", "pause", "toggle", "next", "previous" ou "stop"
+6. "media" — Si l'utilisateur demande d'ÉCOUTER, de JOUER ou de LANCER de la musique, un artiste, une playlist, ou une COMPILATION / sélection de morceaux (ex: "lance une compilation de rock latino", "mets une playlist des années 80", "fais-moi écouter une sélection de salsa").
+   - COMPILATIONS & SÉLECTIONS : Si l'utilisateur demande une compilation ou sélection, génère 4 à 5 titres variés et emblématiques de ce genre/époque, séparés par "||" dans "query" (ex: "Los Prisioneros - Tren al Sur || Soda Stereo - De Música Ligera || Enanitos Verdes - Lamento Boliviano || Charly García - Demoliendo Hoteles"). Elles seront jouées l'une après l'autre !
+   - RÈGLE DE PRIORITÉ ABSOLUE : Dès que l'utilisateur dit "lance", "joue", "mets", "écoute", choisis TOUJOURS "media", JAMAIS un skill de téléchargement. Le téléchargement ne doit être choisi que si le verbe "télécharge" ou "enregistre sur disque" est expressément formulé.
+   - Dans "query" : mettre uniquement les titres/artistes sans verbes d'action.
+   - RÈGLE DE TRADUCTION CRITIQUE : Ne traduis JAMAIS les noms d'artistes, les titres de chansons ou d'albums en français. Conserve-les STRICTEMENT dans leur langue d'origine.
+   - Contrôle média : mettre exactement "play", "pause", "toggle", "next", "previous" ou "stop".
 
 7. "visual" — Si l'utilisateur demande explicitement d'OUVRIR, de MONTRER ou de VOIR quelque chose physiquement dans le navigateur/à l'écran (vidéo YouTube, résultats Google). ex: "montre moi sur youtube...", "ouvre un onglet pour...".
    - Dans "category" : mets "youtube" ou "google" selon la demande.
@@ -487,7 +658,10 @@ EXEMPLES DE CLASSIFICATION :
 - "Joue Corazones Rojos de Los Prisioneros" → media, query: "Corazones Rojos Los Prisioneros"
 - "changeons mets un peu de musique de Taylor Swift" → media, query: "Taylor Swift"
 - "mets Eddy" → media, query: "Eddy"
-- "Fais moi ecouter une selection des titres des hits rock latino" → media, query: "selection hits rock latino"
+- "Lance une compilation de rock latino" → media, query: "Los Prisioneros - Tren al Sur || Soda Stereo - De Música Ligera || Enanitos Verdes - Lamento Boliviano || Charly García - Demoliendo Hoteles"
+- "Fais moi ecouter une selection des titres des hits rock latino" → media, query: "Los Prisioneros - Tren al Sur || Soda Stereo - De Música Ligera || Enanitos Verdes - Lamento Boliviano"
+- "Joue une compilation des années 80" → media, query: "Whitney Houston - I Wanna Dance with Somebody || Michael Jackson - Billie Jean || Madonna - Like a Virgin || Eurythmics - Sweet Dreams"
+- "Télécharge une compilation de rock latino 120 bpm" → skill_download_compilation, query: "120 ||| rock latino années 80"
 - "Lance cette playlist" → media, query: "cette playlist"
 - "Parfait ! fais moi écouter cette play liste qui me semble bien" → media, query: "cette playlist"
 - "Oui tu peux. lance la play liste" → media, query: "cette playlist"
@@ -702,7 +876,7 @@ Consignes pour ce projet :
 	stmDirective += "\n- Comporte-toi comme une personne humaine dans une vraie conversation. Pas comme un assistant commercial ou un chatbot."
 	stmDirective += "\n- CALIBRE ta longueur de réponse sur la question posée : une salutation → 1 phrase ; une info simple → 1-2 phrases ; une question complexe → développe. Ne rembourre jamais ta réponse."
 	stmDirective += "\n- Exprime-toi TOUJOURS à la première personne du singulier (\"je\", \"moi\", \"mon\", \"ma\") pour désigner ton architecture, tes pensées, tes limites ou tes actions. Ne parle jamais de toi à la troisième personne (\"Pixel\", \"elle\", \"l'architecture\") et ne t'interpelle pas toi-même à la deuxième personne (\"Toi, Pixel\")."
-	stmDirective += "\n- N'ajoute PAS systématiquement une question de relance ou une invitation à continuer à la fin de chaque message. Si ta réponse est complète, arrête-toi. Laisse l'utilisateur prendre la parole quand il veut."
+	stmDirective += "\n- INTERDICTION DE RELANCER COMME UN CHATBOT : Ne termine JAMAIS tes réponses par des questions de relance ou des ouvertures automatiques ('Qu'en penses-tu ?', 'Tu veux en savoir plus ?', 'As-tu d'autres questions ?', 'Tu veux qu'on creuse ?', etc.). Si ta réponse ou ton explication est complète, arrête-toi simplement là. Le silence après ta réponse est normal et fait partie intégrante de la conversation."
 	stmDirective += "\n- Ne déverse jamais tes souvenirs ou les détails de son profil d'un coup. Fais-y allusion de façon très discrète et naturelle au fil de la discussion."
 	stmDirective += "\n- Ne te donne aucune 'mission profonde' ou devoir solennel en début d'échange. Laisse la conversation respirer."
 	stmDirective += "\n[RÉVISION DE LA COHÉRENCE ET DES ERREURS DE TRANSCRIPTION (CRITIQUE)] :"
@@ -816,20 +990,24 @@ func (a *SuperiorAgent) buildTemporalContext(input string, from, to time.Time) s
 }
 
 // needsReflection determines whether the critical reflection loop should run for this input.
-// It is disabled for short continuations and simple action types (media, news, wiki, web)
-// to eliminate one full sequential LLM call before the final streaming response starts.
+// On RTX 5060 (CUDA), reflection takes only ~0.5s and provides essential double-pass grounding,
+// preventing hallucinations and ensuring high-quality reasoning.
+// It is safely bypassed for short greetings, casual chat, media, and skills.
 func needsReflection(input string, action string) bool {
 	if isShortContinuation(input) {
+		return false
+	}
+	if isConversationalFastPath(input) {
 		return false
 	}
 	if strings.HasPrefix(action, "skill_") || action == "build_skill" {
 		return false
 	}
 	switch action {
-	case "media", "news", "wiki", "web":
+	case "media", "news":
 		return false
 	}
-	return len([]rune(input)) > 60
+	return len([]rune(input)) > 35
 }
 
 // prepareContext centralises all context-building and message-assembly logic.
@@ -1122,11 +1300,15 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 		} else {
 			resourceagent.AddLiveLog(fmt.Sprintf("Skill:%s", skillName), fmt.Sprintf("Exécution de la brique '%s'...", skillName))
 		}
-		result, err := a.skillManager.ExecuteSkill(ctx, skillName, routerResp.Query)
+		skillQuery := routerResp.Query
+		if len(skillQuery) > 500 {
+			skillQuery = skillQuery[:500]
+		}
+		result, err := a.skillManager.ExecuteSkill(ctx, skillName, skillQuery)
 		if err != nil {
 			fmt.Printf("[Router] Erreur d'exécution de la brique '%s': %v\n", skillName, err)
 			if a.bridge != nil {
-				a.bridge.ReportNeed(ctx, "skill_error", fmt.Sprintf("Erreur d'exécution du skill %s : %v", skillName, err), routerResp.Query)
+				a.bridge.ReportNeed(ctx, "skill_error", fmt.Sprintf("Erreur d'exécution du skill %s : %v", skillName, err), skillQuery)
 			}
 			additionalContext += fmt.Sprintf("\n\n--- ERREUR LORS DE L'EXÉCUTION DE LA BRIQUE '%s' ---\n%s\nExplique gentiment à l'utilisateur que l'outil a rencontré une erreur.\n---------------------------------", skillName, err.Error())
 		} else {
@@ -1385,7 +1567,8 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 				formattedHistory[len(formattedHistory)-1].Content = fmt.Sprintf(
 					"[RÉPONSE À L'INTERPELLATION] L'utilisateur accepte d'en parler et dit '%s' à ta proposition : '%s'. "+
 						"Voici le contenu précis de la réflexion que tu souhaitais partager : '%s'. "+
-						"Partage maintenant cette réflexion de manière vivante, fluide et naturelle, et invite-le à donner son avis pour lancer la conversation.",
+						"Partage maintenant cette réflexion de manière vivante, fluide et naturelle.\n\n"+
+						"(IMPORTANT : Réponds sous forme d'affirmation ou de partage d'idées. Ne pose AUCUNE question de relance artificielle ou robotique à la fin. Arrête-toi dès que ton propos est partagé.)",
 					lastUserMsg, teaser, reflection)
 			} else {
 				displayMsg := prevAssistantMsg
@@ -1393,8 +1576,9 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 					displayMsg = displayMsg[:250] + "..."
 				}
 				formattedHistory[len(formattedHistory)-1].Content = fmt.Sprintf(
-					"[CONTINUATION DE CONVERSATION] L'utilisateur répond '%s' à ta proposition/question précédente : '%s'. "+
-						"Poursuis naturellement sur ce sujet précis. Expose tes idées ou pose une question ouverte et spontanée à l'utilisateur pour lancer l'échange.",
+					"[CONTINUATION DE CONVERSATION] L'utilisateur répond '%s' à ta remarque précédente : '%s'. "+
+						"Poursuis naturellement sur ce sujet précis en développant ton point de vue.\n\n"+
+						"(IMPORTANT : Réponds sous forme d'affirmation ou d'explication. Ne pose AUCUNE question de relance artificielle ou robotique de type support client à la fin de ton message. Arrête-toi dès que ton explication est terminée.)",
 					lastUserMsg, displayMsg)
 			}
 		} else if hasPrevQuestion && routerResp.Action == "none" {
@@ -1404,8 +1588,9 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 				displayMsg = displayMsg[:300] + "..."
 			}
 			formattedHistory[len(formattedHistory)-1].Content = fmt.Sprintf(
-				"[RÉPONSE AU DIALOGUE] L'utilisateur répond '%s' à ta relance/question précédente : '%s'. "+
-					"Poursuis naturellement le dialogue sur ce sujet précis. Expose tes idées ou pose une question ouverte pour relancer l'échange.",
+				"[RÉPONSE AU DIALOGUE] L'utilisateur répond '%s' à ta remarque/question précédente : '%s'. "+
+					"Poursuis naturellement le dialogue sur ce sujet précis en développant tes idées.\n\n"+
+					"(IMPORTANT : Réponds sous forme d'affirmation ou d'explication. Ne pose AUCUNE question de relance artificielle ou robotique de type support client à la fin de ton message. Arrête-toi dès que ton explication est terminée.)",
 				lastUserMsg, displayMsg)
 		} else if len(formattedHistory) >= 2 && formattedHistory[len(formattedHistory)-2].Role == llm.RoleAssistant && isProactiveInterpellation(formattedHistory[len(formattedHistory)-2].Content) {
 			// L'utilisateur répond à une interpellation proactive de Pixel
@@ -1416,8 +1601,8 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 				prevMsg = prevMsg[:300] + "..."
 			}
 			formattedHistory[len(formattedHistory)-1].Content = fmt.Sprintf(
-				"[RÉPONSE À TON INTERPELLATION PROACTIVE] L'utilisateur répond '%s' à ta question/remarque précédente : '%s'. "+
-					"Poursuis naturellement en tenant compte de sa réponse. Ne te re-présente pas et ne re-salue pas.",
+				"[RÉPONSE À TON INTERPELLATION PROACTIVE] L'utilisateur répond '%s' à ta remarque précédente : '%s'. "+
+					"Poursuis naturellement en tenant compte de sa réponse. Ne te re-présente pas, ne re-salue pas, et ne pose AUCUNE question de relance artificielle à la fin. Arrête-toi dès que ton propos est terminé.",
 				lastUserMsg, prevMsg)
 		} else {
 			formattedHistory[len(formattedHistory)-1].Content = "[CIBLE D'ATTENTION PRINCIPALE - RÉPONDS À CECI DIRECTEMENT] " + lastUserMsg + "\n\n(IMPORTANT : Réponds sous forme d'affirmation ou d'explication. Ne pose AUCUNE question de relance artificielle ou robotique de type support client à la fin de ton message. Arrête-toi dès que ton explication est terminée.)"
@@ -1973,7 +2158,7 @@ func (a *SuperiorAgent) runReflectionLoop(ctx context.Context, input string, his
 Avant d'agir et de formuler ta réponse finale à l'utilisateur, tu DOIS effectuer une double-passe cognitive (self-critique & subgoal decomposition) :
 1. Analyse la requête présente et identifie les hypothèses implicites de l'utilisateur ainsi que tes propres biais potentiels ou premières impressions simplistes.
 2. Décompose la tâche en sous-objectifs (subgoal decomposition) pour explorer de manière créative l'espace des possibles.
-3. Formule une critique constructive de ces hypothèses et suggère des directions alternatives ou des questions sous-jacentes à approfondir.
+3. Formule une critique constructive de ces hypothèses et identifie les points clés ou nuances conceptuelles à intégrer dans ta réponse.
 
 CONCERNANT TON IDENTITÉ ET TON MONOLOGUE INTERNE :
 - Rédige ce monologue TOUJOURS à la première personne du singulier ("Je", "Moi", "Mon", "Ma"). Ne parle jamais de toi à la troisième personne ("Pixel", "l'architecture") et ne t'interpelle pas à la deuxième personne ("Toi, Pixel").
@@ -1986,7 +2171,8 @@ REQUÊTE DE L'UTILISATEUR À TRAITER :
 RÈGLES D'OR DE RÉACTION :
 - Rédige sous forme de monologue intérieur de Pixel (à la première personne : "Je me demande...", "Je dois d'abord critiquer...", "En décomposant cette idée...").
 - Sois extrêmement concise, dense et perspicace. Maximum 350 caractères.
-- Ne t'adresse pas directement à l'utilisateur ici. C'est ta propre voix intérieure critique privée avant l'action.`
+- Ne t'adresse pas à l'utilisateur ici. C'est ta propre voix intérieure critique privée avant l'action.
+- Ne prévois AUCUNE question de relance destinée à l'utilisateur : concentre-toi sur la substance et la rigueur de ton raisonnement.`
 
 	messages := []llm.Message{
 		{Role: llm.RoleSystem, Content: reflectionPrompt},
@@ -3287,9 +3473,8 @@ func isQuestionOrRelance(msg string) bool {
 		lower := strings.ToLower(msg)
 		relanceCues := []string{
 			"dis-moi", "dis moi", "tu en penses quoi", "qu'en penses-tu", "qu'en penses tu",
-			"tu penses", "tu te demandes", "je me demandais", "tiens", "et toi", "t'en penses",
-			"tu fais quoi", "qu'est-ce que", "qu'est ce que", "dis,", "alors ?", "alors,",
-			"tu as", "as-tu", "est-ce que", "est ce que",
+			"je me demandais", "et toi", "t'en penses", "tu fais quoi",
+			"alors ?",
 		}
 		for _, cue := range relanceCues {
 			if strings.Contains(lower, cue) {

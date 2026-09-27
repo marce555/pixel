@@ -358,6 +358,13 @@
             </form>
         </main>
     </div>
-    <script src="app.js?v=9"></script>
+    <script>
+      /* Migration automatique : forcer le transcripteur Web Speech API navigateur (v13) */
+      (function() {
+        localStorage.setItem('pixel_stt_engine', 'browser');
+        console.log('[Pixel] Moteur STT activé → Navigateur Web (Google Speech API)');
+      })();
+    </script>
+    <script src="app.js?v=13"></script>
 </body>
 </html>

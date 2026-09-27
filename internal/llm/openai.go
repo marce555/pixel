@@ -310,6 +310,9 @@ func (p *OpenAICompatibleProvider) CreateEmbedding(ctx context.Context, text str
 	var resp *http.Response
 	for attempt := 1; attempt <= 8; attempt++ {
 		baseURL := strings.TrimSuffix(p.BaseURL, "/")
+		if strings.Contains(baseURL, "52625") {
+			baseURL = strings.Replace(baseURL, "52625", "52626", 1)
+		}
 		// NOTE: L'endpoint standard est "/embeddings" (ou "/v1/embeddings" selon la BaseURL)
 		req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/embeddings", bytes.NewBuffer(jsonData))
 		if err != nil {

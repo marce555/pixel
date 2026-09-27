@@ -203,6 +203,16 @@ def main():
             "Kool & The Gang - Celebration"
         ]
 
+    # Deduplicate tracks while preserving order, and limit to 10 max
+    seen = set()
+    unique_tracks = []
+    for t in tracks:
+        clean_t = t.strip()
+        if clean_t and clean_t.lower() not in seen:
+            seen.add(clean_t.lower())
+            unique_tracks.append(clean_t)
+    tracks = unique_tracks[:10]
+
     dest_dir = f"/home/marceloc/Musique/pixel/{bpm}/"
     os.makedirs(dest_dir, exist_ok=True)
     
@@ -215,12 +225,13 @@ def main():
                 f"Le téléchargement en arrière-plan a démarré avec succès.\n"
                 f"Dossier de destination : {dest_dir}\n"
                 f"Progression journalisée dans : {dest_dir}download.log\n\n"
-                f"Titres sélectionnés pour cette compilation :\n" + 
+                f"Titres sélectionnés ({len(tracks)}) :\n" + 
                 "\n".join([f"- {t}" for t in tracks])
             )
+            sys.stdout.flush()
             sys.exit(0)
     except OSError as e:
-        print(f"Erreur fork. Lancement synchrone.")
+        print(f"Erreur fork : {e}. Lancement synchrone.")
         run_download_loop(tracks, dest_dir)
         sys.exit(0)
         
@@ -232,6 +243,20 @@ def main():
     except OSError:
         sys.exit(0)
         
+    # Grandchild: detach standard descriptors so Go's exec.Command pipe terminates immediately!
+    sys.stdout.flush()
+    sys.stderr.flush()
+    try:
+        devnull = os.open(os.devnull, os.O_RDWR)
+        log_fd = os.open(os.path.join(dest_dir, "download.log"), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        os.dup2(devnull, 0)
+        os.dup2(log_fd, 1)
+        os.dup2(log_fd, 2)
+        os.close(devnull)
+        os.close(log_fd)
+    except Exception:
+        pass
+
     # Grandchild does the download work
     run_download_loop(tracks, dest_dir)
     sys.exit(0)

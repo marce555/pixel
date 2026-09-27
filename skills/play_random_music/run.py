@@ -167,11 +167,12 @@ def main():
         # Arrêt d'une éventuelle instance précédente
         stop_previous_player()
 
-        # Démarrage de mpv en arrière-plan détaché (daemon)
+        # Démarrage de mpv en arrière-plan détaché (daemon) avec sortie native PipeWire
         mpv_cmd = [
             "mpv",
             "--no-video",
             "--no-terminal",
+            "--ao=pipewire",
             f"--input-ipc-server={IPC_SOCKET}",
             "--loop-playlist=no",
             f"--playlist={PLAYLIST_FILE}"

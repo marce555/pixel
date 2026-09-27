@@ -395,19 +395,9 @@ func (w *WebAgent) ResolveMusicURL(songQuery string) (string, string, bool, erro
 	// 1. Try direct scraping of YouTube's search results page (ultra-fast, native, exact)
 	targetURL, videoTitle = w.ScrapeYouTubeDirect(query)
 
-	// Check if the title returned matches query exactly.
-	// If it doesn't match exactly, or if no video was found, validate the query with Wikipedia and run a new search with the corrected title.
-	exact := false
-	if targetURL != "" && videoTitle != "" {
-		exact = isExactMatch(query, videoTitle)
-	}
-
-	if !exact {
-		if targetURL != "" {
-			fmt.Printf("[WebAgent] Titre YouTube '%s' ne correspond pas exactement à la requête '%s'. Validation via Wikipédia...\n", videoTitle, query)
-		} else {
-			fmt.Printf("[WebAgent] Aucun titre trouvé directement sur YouTube pour '%s'. Validation via Wikipédia...\n", query)
-		}
+	// If direct scraping found no video, try to validate the title via Wikipedia as fallback
+	if targetURL == "" {
+		fmt.Printf("[WebAgent] Aucun titre trouvé directement sur YouTube pour '%s'. Validation via Wikipédia...\n", query)
 		wikiTitle := w.ValidateTitleWithWikipedia(query)
 		if wikiTitle != "" && strings.ToLower(wikiTitle) != strings.ToLower(query) {
 			fmt.Printf("[WebAgent] Titre validé par Wikipédia : '%s'. Nouvelle recherche YouTube...\n", wikiTitle)
@@ -492,7 +482,7 @@ func (w *WebAgent) PlayMusic(songQuery string) (string, error) {
 	localBin := "/home/marceloc/Documents/Pixel/bin"
 	newPath := localBin + ":" + path
 
-	args := []string{"--no-video", "--input-ipc-server=/tmp/mpvsocket_webagent"}
+	args := []string{"--no-video", "--ao=pipewire", "--input-ipc-server=/tmp/mpvsocket_webagent"}
 	if strings.Contains(targetURL, "list=") {
 		args = append(args, "--ytdl-raw-options=yes-playlist=")
 	}

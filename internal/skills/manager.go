@@ -147,8 +147,15 @@ func (sm *SkillManager) ExecuteSkill(ctx context.Context, name string, query str
 
 	fmt.Printf("[SkillManager] Exécution du skill '%s' avec argument: '%s'\n", name, query)
 
-	// Use a dedicated timeout (15 minutes) for long skill tasks like ISO flash/copy
-	skillCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	// Use a dedicated timeout: 60s for standard skills, 15 minutes for heavy tasks like ISO flash/copy
+	timeout := 60 * time.Second
+	if name == "cachyos_bootable_usb_creator" {
+		timeout = 15 * time.Minute
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	skillCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(skillCtx, "python3", "run.py", query)

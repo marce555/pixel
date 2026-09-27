@@ -1149,7 +1149,7 @@ class VoiceController {
             this._bindRecognitionEvents();
         } else {
             this.recognition = null;
-            console.warn('[VoiceController] Web Speech API non disponible dans ce navigateur. Passage en mode Fallback local (Whisper CPU).');
+            console.warn('[VoiceController] Web Speech API non disponible dans ce navigateur. Passage en mode Fallback local.');
         }
 
         // Toujours initialiser les propriétés de fallback pour commuter à la volée
@@ -1223,61 +1223,32 @@ class VoiceController {
 
         this.recognition.onend = () => {
             this._stopListeningUI();
-            
-            // Si la session a duré moins de 1.5s sans détecter de parole,
-            // c'est que l'API est bloquée ou inopérante (ex. Firefox / Chromium sans clés)
-            const duration = Date.now() - (this.recognitionStartTime || 0);
-            if (duration < 1500 && !this.hasSpeechStarted) {
-                console.warn('[VoiceController] La reconnaissance native a pris fin prématurément. Bascule définitive vers Whisper local.');
-                this.sttEngine = 'local';
-                localStorage.setItem('pixel_stt_engine', 'local');
-                if (this.sttEngineSelect) this.sttEngineSelect.value = 'local';
-                // Nullifier l'objet recognition pour que startListening() prenne
-                // le chemin MediaRecorder → Whisper et non le chemin Web Speech API
-                this.recognition = null;
-                
-                if (window.appendMessage) {
-                    window.showToast('Moteur vocal navigateur indisponible — Whisper local activé', 'info');
-                }
-                // Ne pas relancer automatiquement : laisser l'utilisateur appuyer sur le micro
-                return;
-            }
 
-            // Mode mains-libres : relancer après que Pixel a fini de parler
+            // Mode mains-libres : relancer l'écoute tant que Pixel ne parle pas
             if (this.handsfreeEnabled && !this.isSpeakingSession && !this.isSpeakingSentence && !this.currentAudio) {
                 setTimeout(() => {
                     if (!this.isListening && !this.isSpeakingSession) this.startListening(true);
-                }, 800);
+                }, 400);
             }
         };
 
         this.recognition.onerror = (event) => {
-            // 'no-speech' est normal (timeout), pas besoin d'afficher une erreur
             if (event.error !== 'no-speech' && event.error !== 'aborted') {
-                console.error('[VoiceController] Erreur reconnaissance native :', event.error);
-                
-                // Si l'erreur est liée au réseau ou au service Google non disponible (Chromium Linux sans clés API)
-                if (event.error === 'network' || event.error === 'service-not-allowed' || event.error === 'language-not-supported') {
-                    console.warn('[VoiceController] Service cloud de reconnaissance défaillant. Bascule définitive vers le moteur local.');
-                    this.sttEngine = 'local';
-                    localStorage.setItem('pixel_stt_engine', 'local');
-                    if (this.sttEngineSelect) this.sttEngineSelect.value = 'local';
-                    // Nullifier pour forcer le chemin MediaRecorder → Whisper
-                    this.recognition = null;
-                    
+                console.warn('[VoiceController] Statut reconnaissance web :', event.error);
+                if (event.error === 'not-allowed') {
                     if (window.appendMessage) {
-                        window.showToast('Moteur vocal navigateur indisponible — Whisper local activé', 'info');
+                        window.showToast('⚠️ Microphone refusé — autorisez l\'accès dans les paramètres du navigateur', 'warning');
                     }
-                    // Ne pas relancer automatiquement : évite la boucle infinie
-                    this._stopListeningUI();
-                    return;
-                }
-                
-                if (window.appendMessage && event.error === 'not-allowed') {
-                    window.showToast('⚠️ Microphone refusé — autorisez l\'accès dans les paramètres du navigateur', 'warning');
                 }
             }
             this._stopListeningUI();
+
+            // Relancer automatiquement en mode mains-libres après un court silence
+            if (this.handsfreeEnabled && !this.isSpeakingSession && event.error !== 'not-allowed') {
+                setTimeout(() => {
+                    if (!this.isListening && !this.isSpeakingSession) this.startListening(true);
+                }, 600);
+            }
         };
     }
 
@@ -1408,6 +1379,20 @@ class VoiceController {
     }
 
     /* ── STT ───────────────────────────────────────────────── */
+    async getAudioContext() {
+        if (!this.audioCtx || this.audioCtx.state === 'closed') {
+            this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        if (this.audioCtx.state === 'suspended') {
+            try {
+                await this.audioCtx.resume();
+            } catch (e) {
+                console.warn('[VoiceController] Impossible de reprendre AudioContext:', e);
+            }
+        }
+        return this.audioCtx;
+    }
+
     // fromHandsfree : true = appel automatique depuis le système mains-libres (coupe le TTS pour éviter l'echo)
     //                 false = clic manuel de l'utilisateur (le TTS continue si activé)
     async startListening(fromHandsfree = false) {
@@ -1428,19 +1413,19 @@ class VoiceController {
             this.userInput.placeholder = '🎤 Parlez maintenant...';
         }
 
-        if (this.recognition) {
+        // Si le mode navigateur cloud est explicitement configuré et disponible
+        if (this.sttEngine === 'browser' && this.recognition) {
             try {
                 this.recognition.start();
                 this.isListening = true;
                 this._startListeningUI();
             } catch (e) {
-                // Déjà en cours → on ignore
                 console.warn('[VoiceController] Recognition déjà active :', e.message);
             }
             return;
         }
 
-        // Fallback local (MediaRecorder -> backend Whisper)
+        // Moteur local (MediaRecorder -> backend Whisper)
         this.audioChunks = [];
         try {
             const stream = await navigator.mediaDevices.getUserMedia({
@@ -1487,12 +1472,11 @@ class VoiceController {
                 }
             }, 15000);
 
-            // Détecter la fin de parole via le volume (uniquement en mains-libres)
-            this.setupSilenceDetection(stream);
+            // Détecter la fin de parole via le volume (VAD robuste)
+            await this.setupSilenceDetection(stream);
 
         } catch (err) {
             console.error("Impossible d'accéder au microphone :", err);
-            // Désactiver le mode mains-libres pour éviter les boucles infinies de popups
             this.handsfreeEnabled = false;
             if (this.handsfreeInput) this.handsfreeInput.checked = false;
             localStorage.setItem('pixel_handsfree_enabled', 'false');
@@ -1505,9 +1489,19 @@ class VoiceController {
     }
 
     stopListening() {
-        // Guard anti-doublon : évite que VAD + bouton/timeout déclenchent deux uploads simultanés
         if (this._isStopping) return;
         this._isStopping = true;
+
+        // Arrêter l'analyseur VAD
+        this.isSilenceDetectionActive = false;
+        if (this.source) {
+            try { this.source.disconnect(); } catch(e) {}
+            this.source = null;
+        }
+        if (this.analyser) {
+            try { this.analyser.disconnect(); } catch(e) {}
+            this.analyser = null;
+        }
 
         if (this.recognition && this.isListening) {
             try { this.recognition.abort(); } catch(e) {}
@@ -1548,71 +1542,76 @@ class VoiceController {
     // Alias conservés pour compatibilité avec le code existant
     stopListeningUI() { this._stopListeningUI(); }
 
-    setupSilenceDetection(stream) {
-        // Actif dans TOUS les modes (manuel et mains-libres) — l'utilisateur n'a plus besoin
-        // d'appuyer sur le bouton pour arrêter : le silence automatique déclenche la transcription
+    async setupSilenceDetection(stream) {
         try {
-            this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-            this.analyser = this.audioCtx.createAnalyser();
-            this.source = this.audioCtx.createMediaStreamSource(stream);
-            
+            const audioCtx = await this.getAudioContext();
+            this.analyser = audioCtx.createAnalyser();
+            this.source = audioCtx.createMediaStreamSource(stream);
+
             this.source.connect(this.analyser);
-            this.analyser.fftSize = 256;
-            
-            const bufferLength = this.analyser.frequencyBinCount;
-            const dataArray = new Uint8Array(bufferLength);
-            
-            let silenceStart = null;
-            let speechStartTime = null;
-            let speechDetected = false;
-            let noiseFloor = 6.0;
+            this.analyser.fftSize = 1024;
+
+            const timeData = new Float32Array(this.analyser.fftSize);
+
+            let silenceStart        = null;
+            let speechStartTime     = null;
+            let speechDetected      = false;
+            let noiseFloor          = 0.015;
+            let silenceFrameCount   = 0;
+            const SILENCE_HYSTERESIS = 4; // ~60ms
+
             this.isSilenceDetectionActive = true;
-            
             const minSpeechMs = 250;
-            
+
             const checkVolume = () => {
                 if (!this.isSilenceDetectionActive || !this.isListening) return;
-                
-                this.analyser.getByteFrequencyData(dataArray);
-                
-                let sum = 0;
-                for (let i = 0; i < bufferLength; i++) {
-                    sum += dataArray[i];
-                }
-                const averageVolume = sum / bufferLength;
 
-                // Estimation dynamique du bruit de fond ambiant
-                if (!speechDetected) {
-                    noiseFloor = noiseFloor * 0.90 + Math.min(averageVolume, 10.0) * 0.10;
+                this.analyser.getFloatTimeDomainData(timeData);
+
+                // Calcul du vrai RMS temporel (amplitude de -1.0 à +1.0)
+                let sumSquares = 0;
+                for (let i = 0; i < timeData.length; i++) {
+                    sumSquares += timeData[i] * timeData[i];
                 }
-                
-                // Seuil ultra-sensible adapté aux voix douces et micros intégrés : max(3.0, noiseFloor * 1.35)
-                const dynamicThreshold = Math.max(3.0, noiseFloor * 1.35);
-                
-                if (averageVolume > dynamicThreshold) {
+                const rms = Math.sqrt(sumSquares / timeData.length);
+
+                // Adaptation lente du bruit de fond quand l'utilisateur ne parle pas encore
+                if (!speechDetected) {
+                    noiseFloor = noiseFloor * 0.96 + Math.min(rms, 0.04) * 0.04;
+                }
+
+                // Seuil dynamique : minimum 0.032, ou 2.2x le bruit de fond mesuré
+                const threshold = Math.max(0.032, noiseFloor * 2.2);
+
+                if (rms > threshold) {
                     if (!speechDetected) speechStartTime = Date.now();
-                    speechDetected = true;
-                    silenceStart = null;
-                    
-                    // Interruption Barge-in : Si l'utilisateur commence à parler pendant que Pixel diffuse du son TTS
+                    speechDetected    = true;
+                    silenceStart      = null;
+                    silenceFrameCount = 0;
+
+                    // Barge-in : interruption si Pixel est en train de parler
                     if (this.isSpeakingSession || this.isSpeakingSentence || this.currentAudio) {
-                        console.log("[VoiceController] Interruption Barge-in : Utilisateur prend la parole, arrêt du TTS.");
+                        console.log("[VoiceController] Barge-in : interruption vocale utilisateur");
                         this.stopSpeaking();
                     }
                 } else if (speechDetected) {
-                    if (silenceStart === null) {
-                        silenceStart = Date.now();
-                    } else {
-                        const silenceDuration = Date.now() - silenceStart;
-                        const speechDuration = silenceStart - (speechStartTime || silenceStart);
-                        
-                        // Délai adaptatif : 1.0s si la phrase est longue, 1.3s en mains-libres
-                        const silenceDelay = speechDuration > 2000 ? 1000 : (this.handsfreeEnabled ? 1300 : 1000);
-                        
-                        if (silenceDuration > silenceDelay && speechDuration > minSpeechMs) {
-                            console.log(`[VoiceController] Dynamic VAD : Fin de parole (${speechDuration}ms discours, ${silenceDuration}ms silence, threshold ${dynamicThreshold.toFixed(1)}) → transcription`);
-                            this.stopListening();
-                            return;
+                    silenceFrameCount++;
+                    if (silenceFrameCount >= SILENCE_HYSTERESIS) {
+                        if (silenceStart === null) {
+                            silenceStart = Date.now();
+                        } else {
+                            const silenceDuration = Date.now() - silenceStart;
+                            const speechDuration  = silenceStart - (speechStartTime || silenceStart);
+
+                            // Délais de silence réactifs : 1.1s en mains-libres, 0.9s en manuel
+                            const baseDelay    = this.handsfreeEnabled ? 1100 : 900;
+                            const silenceDelay = speechDuration > 3000 ? baseDelay + 400 : baseDelay;
+
+                            if (silenceDuration > silenceDelay && speechDuration > minSpeechMs) {
+                                console.log(`[VoiceController] VAD RMS : fin de phrase (${speechDuration}ms parole, ${silenceDuration}ms silence, rms=${rms.toFixed(4)}, seuil=${threshold.toFixed(4)}) → Transcription`);
+                                this.stopListening();
+                                return;
+                            }
                         }
                     }
                 }
@@ -1620,26 +1619,33 @@ class VoiceController {
             };
             checkVolume();
         } catch (e) {
-            console.warn('VAD non disponible :', e);
+            console.warn('[VoiceController] VAD non disponible :', e);
         }
     }
 
     async uploadAudioAndTranscribe() {
-        if (this.audioChunks.length === 0) return;
+        if (this.audioChunks.length === 0) {
+            if (this.handsfreeEnabled && !this.isSpeakingSession) {
+                setTimeout(() => this.startListening(true), 600);
+            }
+            return;
+        }
 
-        // Si Pixel est déjà en train de parler ou de répondre, on ignore la transcription
+        // Si Pixel est déjà en train de parler ou de répondre, ignorer la transcription
         if (this.isSpeakingSession || this.isSpeakingSentence || this.currentAudio) {
             console.log("[VoiceController] Pixel répond déjà. On ignore la transcription de l'audio résiduel.");
             this.audioChunks = [];
             return;
         }
-        
-        // Vider les chunks immédiatement pour éviter un 2ème upload si onstop est rappelé
-        const chunks = this.audioChunks.splice(0);
 
+        const chunks = this.audioChunks.splice(0);
         const recordingDuration = Date.now() - (this.recordingStartTime || 0);
-        if (recordingDuration < 800) {
+
+        if (recordingDuration < 600) {
             console.log(`[VoiceController] Enregistrement trop court (${recordingDuration}ms), ignoré.`);
+            if (this.handsfreeEnabled && !this.isSpeakingSession) {
+                setTimeout(() => this.startListening(true), 600);
+            }
             return;
         }
 
@@ -1666,7 +1672,7 @@ class VoiceController {
             if (this.userInput) {
                 if (data.text && data.text.trim()) {
                     const cleaned = data.text.trim();
-                    
+
                     // Filtrer les hallucinations
                     const isHallucination = cleaned.length < 3 || /^(.{10,50})\1{2,}/.test(cleaned);
                     if (isHallucination) {
@@ -1677,7 +1683,7 @@ class VoiceController {
                         }
                         return;
                     }
-                    
+
                     this.userInput.value = cleaned;
                     if (this.handsfreeEnabled) {
                         if (this.isSpeakingSession || this.isSpeakingSentence || this.currentAudio) {
@@ -1697,17 +1703,14 @@ class VoiceController {
                             }
                         }, 300);
                     } else {
-                        // Mettre le focus et sélectionner tout le texte pour correction facile
                         this.userInput.focus();
                         this.userInput.select();
-                        // Indication visuelle : bordure orange pour signaler "en attente de validation"
                         this.userInput.style.outline = '2px solid #f59e0b';
                         this.userInput.style.boxShadow = '0 0 8px rgba(245,158,11,0.5)';
                         const clearStyle = () => {
                             this.userInput.style.outline = '';
                             this.userInput.style.boxShadow = '';
                         };
-                        // Retirer le highlight dès que l'utilisateur touche l'input ou envoie
                         this.userInput.addEventListener('keydown', clearStyle, { once: true });
                         this.userInput.addEventListener('input', clearStyle, { once: true });
                         console.log('[VoiceController] Transcription prête pour correction :', cleaned);
@@ -1717,6 +1720,10 @@ class VoiceController {
                     if (window.appendMessage) {
                         window.showToast('Aucune voix détectée — signal trop faible, réessayez', 'info');
                     }
+                    // Relance automatique en mains-libres même si aucun mot n'a été reconnu
+                    if (this.handsfreeEnabled && !this.isSpeakingSession) {
+                        setTimeout(() => this.startListening(true), 1000);
+                    }
                 }
             }
         } catch (err) {
@@ -1724,6 +1731,10 @@ class VoiceController {
             if (this.userInput) this.userInput.value = "";
             if (window.appendMessage) {
                 window.showToast('⚠️ Échec transcription : ' + err.message, 'error');
+            }
+            // En cas d'erreur de communication, relancer en mains-libres après un court délai
+            if (this.handsfreeEnabled && !this.isSpeakingSession) {
+                setTimeout(() => this.startListening(true), 2000);
             }
         }
     }
@@ -1795,7 +1806,7 @@ class VoiceController {
                 if (this.handsfreeEnabled && !this.isListening) {
                     setTimeout(() => {
                         if (!this.currentAudio && !this.isListening && !this.isSpeakingSession) this.startListening(true); // true = mains-libres
-                    }, 650);
+                    }, 1200);
                 }
             }
             return;

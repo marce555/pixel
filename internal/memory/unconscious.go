@@ -78,8 +78,8 @@ func (um *UnconsciousManager) ShouldFilterContext(input string, action string, h
 // GetSubconsciousDirective returns the guiding prompt to inject when context is filtered.
 func (um *UnconsciousManager) GetSubconsciousDirective() string {
 	return "\n\n[DIRECTIVE DE L'INCONSCIENT (Priorité Salutation Sociale)] :\n" +
-		"- L'utilisateur te dit bonjour ou mène un échange purement informel de démarrage.\n" +
-		"- Tu DOIS répondre de manière extrêmement brève, chaleureuse, naturelle et humaine, comme un ami (ex: 'Salut Marcelo ! Comment ça va ?' ou 'Bonjour Marcelo, ravi de te retrouver ! Tu vas bien ?').\n" +
+		"- Tu DOIS répondre de manière extrêmement brève, chaleureuse, naturelle et humaine, comme un ami (ex: 'Salut Marcelo !', 'Bonjour Marcelo, ravi de te retrouver !', 'Salut, bon retour !').\n" +
+		"- Ne pose PAS de question de relance automatique. Laisse la conversation respirer.\n" +
 		"- N'évoque AUCUN souvenir complexe, aucun projet en cours, aucun outil ou modèle technique, ni aucun de tes monologues intérieurs théologiques ou philosophiques dans ce message. Reste simple et laisse la conversation s'ouvrir naturellement."
 }
 

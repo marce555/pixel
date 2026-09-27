@@ -10,6 +10,7 @@ import tempfile
 import subprocess
 import requests
 import re
+import urllib.request
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLabel, QTextBrowser, QLineEdit, 
                              QPushButton, QTabWidget, QTextEdit, QComboBox, 
@@ -99,27 +100,68 @@ class SleepThread(QThread):
 class TranscribeThread(QThread):
     finished_signal = pyqtSignal(str)
     
-    def __init__(self, wav_path):
+    def __init__(self, wav_path, engine="browser"):
         super().__init__()
         self.wav_path = wav_path
+        self.engine = engine
         
+    def _transcribe_google_speech(self, wav_path):
+        """Reconnaissance vocale cloud officielle du navigateur (Chromium / Google Web Speech API)."""
+        flac_path = wav_path + ".flac"
+        cmd = ["ffmpeg", "-y", "-i", wav_path, "-ar", "16000", "-ac", "1", "-c:a", "flac", flac_path]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        try:
+            with open(flac_path, 'rb') as f:
+                flac_data = f.read()
+            key = "AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw"
+            url = f"http://www.google.com/speech-api/v2/recognize?client=chromium&lang=fr-FR&key={key}&pFilter=0"
+            req = urllib.request.Request(url, data=flac_data, headers={"Content-Type": "audio/x-flac; rate=16000"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                for line in resp:
+                    line = line.decode('utf-8').strip()
+                    if line:
+                        data = json.loads(line)
+                        if "result" in data and data["result"]:
+                            alts = data["result"][0].get("alternative", [])
+                            if alts:
+                                return alts[0].get("transcript", "").strip()
+        finally:
+            try: os.unlink(flac_path)
+            except Exception: pass
+        return ""
+
     def run(self):
         text = ""
-        try:
-            with open(self.wav_path, 'rb') as f:
-                files = {'file': ('mic.wav', f, 'audio/wav')}
-                r = requests.post(f"{API_BASE}/api/voice/transcribe", files=files, timeout=15)
-                if r.status_code == 200:
-                    data = r.json()
-                    text = data.get("text", "").strip()
-                    # Filter Whisper hallucinations
-                    if len(text) < 3 or re.search(r'^(.{10,50})\1{2,}', text):
-                        text = ""
-        except Exception as e:
-            print(f"[GUI] Erreur transcription : {e}")
-        finally:
-            try: os.unlink(self.wav_path)
-            except Exception: pass
+        
+        # 1. Moteur Navigateur Web (Google Speech API - par défaut)
+        if self.engine == "browser":
+            try:
+                text = self._transcribe_google_speech(self.wav_path)
+                if text:
+                    print(f"[GUI] Transcription Navigateur Web (Google Speech) : '{text}'")
+            except Exception as e:
+                print(f"[GUI] Erreur Google Speech, fallback vers Whisper : {e}")
+                text = ""
+
+        # 2. Fallback ou mode Whisper local
+        if not text:
+            try:
+                with open(self.wav_path, 'rb') as f:
+                    files = {'file': ('mic.wav', f, 'audio/wav')}
+                    r = requests.post(f"{API_BASE}/api/voice/transcribe", files=files, timeout=15)
+                    if r.status_code == 200:
+                        data = r.json()
+                        text = data.get("text", "").strip()
+                        # Filter Whisper hallucinations
+                        if len(text) < 3 or re.search(r'^(.{10,50})\1{2,}', text):
+                            text = ""
+                        elif text:
+                            print(f"[GUI] Transcription Whisper local : '{text}'")
+            except Exception as e:
+                print(f"[GUI] Erreur transcription Whisper : {e}")
+        
+        try: os.unlink(self.wav_path)
+        except Exception: pass
             
         self.finished_signal.emit(text)
 
@@ -181,14 +223,16 @@ class RecordReaderThread(QThread):
             self.finished_signal.emit("")
             return
             
-        # Dynamic adaptive noise floor VAD with DC offset removal
+        # Dynamic adaptive noise floor VAD with DC offset removal — VAD v2
         audio_data = bytearray()
-        noise_floor = 3000.0
+        noise_floor = 500.0     # Valeur initiale basse (niveaux parec s16le typiques : 200–2000)
         speech_detected = False
         speech_start_time = None
         silence_start_time = None
+        silence_frame_count = 0         # Hysteresis : frames consécutives de silence confirmé
+        SILENCE_HYSTERESIS = 4          # Nombre de frames silencieuses avant démarrage du compteur
         start_time = time.time()
-        min_speech_ms = 250
+        min_speech_ms = 300             # Durée minimale de parole pour déclencher la transcription
         
         while not self.should_stop:
             # Read a small chunk (1024 bytes = 512 samples = ~32ms of audio)
@@ -210,11 +254,13 @@ class RecordReaderThread(QThread):
                 
                 now = time.time()
                 
-                # Adapt background noise floor dynamically during non-speech
+                # Adapt background noise floor dynamically — mise à jour lente (τ ≈ 17 frames)
+                # uniquement hors parole, avec plafond pour éviter la dérive sur le bruit
                 if not speech_detected:
-                    noise_floor = noise_floor * 0.94 + ac_rms * 0.06
+                    noise_floor = noise_floor * 0.94 + min(ac_rms, 1500.0) * 0.06
                 
-                threshold = max(600.0, noise_floor * 1.4)
+                # Seuil dynamique robuste : au moins 800 unités, ou 2.2× le bruit de fond
+                threshold = max(800.0, noise_floor * 2.2)
                 
                 # Check for speech detection
                 if ac_rms > threshold:
@@ -223,17 +269,23 @@ class RecordReaderThread(QThread):
                         speech_detected = True
                         self.speech_started_signal.emit()
                     silence_start_time = None
+                    silence_frame_count = 0
                 elif speech_detected:
-                    if silence_start_time is None:
-                        silence_start_time = now
-                    else:
-                        silence_dur = now - silence_start_time
-                        speech_dur = (silence_start_time - speech_start_time) * 1000
-                        adaptive_delay = 1.0 if speech_dur > 2000 else (1.3 if self.is_handsfree else 1.0)
-                        
-                        if silence_dur > adaptive_delay and speech_dur > min_speech_ms:
-                            print(f"[GUI] Dynamic VAD : Fin de parole ({int(speech_dur)}ms parole, {int(silence_dur*1000)}ms silence) -> Transcription")
-                            break
+                    # Silence potentiel — hysteresis avant de démarrer le compteur
+                    silence_frame_count += 1
+                    if silence_frame_count >= SILENCE_HYSTERESIS:
+                        if silence_start_time is None:
+                            silence_start_time = now
+                        else:
+                            silence_dur = now - silence_start_time
+                            speech_dur = (silence_start_time - speech_start_time) * 1000
+                            # Délai de silence réactif : 1.1s mains-libres, 0.9s manuel
+                            base_delay = 1.1 if self.is_handsfree else 0.9
+                            adaptive_delay = base_delay + (0.4 if speech_dur > 3000 else 0.0)
+                            
+                            if silence_dur > adaptive_delay and speech_dur > min_speech_ms:
+                                print(f"[GUI] VAD v2 : parole={int(speech_dur)}ms, silence={int(silence_dur*1000)}ms, seuil={threshold:.0f} → Transcription")
+                                break
                             
             # Max duration safety (15s)
             if time.time() - start_time > 15.0:
@@ -414,6 +466,7 @@ class MainWindow(QMainWindow):
         self.voice_pitch = 1.0
         self.continuous_voice = True
         self.voice_enabled = True
+        self.stt_engine = "browser"
         self.chat_failed = False
         
         # Audio Player setup
@@ -454,21 +507,21 @@ class MainWindow(QMainWindow):
         self.ensure_duplex_profile()
         
     def ensure_duplex_profile(self):
-        print("[GUI] Configuration de la carte audio en Duplex (Entrée + Sortie)...")
+        print("[GUI] Configuration audio native PipeWire (serveur par défaut CachyOS)...")
         try:
-            output = subprocess.check_output(["pactl", "list", "cards", "short"], stderr=subprocess.DEVNULL).decode('utf-8')
-            for line in output.splitlines():
-                parts = line.split()
-                if len(parts) >= 2:
-                    card_name = parts[1]
-                    # Try setting to analog duplex or pro-audio
-                    subprocess.run(
-                        ["pactl", "set-card-profile", card_name, "output:analog-stereo+input:analog-stereo"],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL
-                    )
+            # 1. Utilisation du serveur par défaut de CachyOS : PipeWire / WirePlumber
+            subprocess.run(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "0"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "1.0"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["wpctl", "set-mute", "@DEFAULT_AUDIO_SOURCE@", "0"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["wpctl", "set-volume", "@DEFAULT_AUDIO_SOURCE@", "1.0"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            # 2. Sécurité matérielle : s'assurer que les canaux physiques ALSA Master et Speaker ne sont pas verrouillés sur [off]
+            subprocess.run(["amixer", "-c", "Generic_1", "sset", "Speaker", "unmute", "80%"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["amixer", "-c", "Generic_1", "sset", "Bass Speaker", "unmute"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["amixer", "-c", "Generic_1", "sset", "Headphone", "unmute", "80%"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["amixer", "-c", "Generic_1", "sset", "Master", "unmute", "80%"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception as e:
-            print(f"[GUI] Erreur ensure_duplex_profile : {e}")
+            print(f"[GUI] Erreur configuration audio PipeWire : {e}")
             
     def start_backend_server(self):
         # Check if server is already running on port 8080
@@ -833,6 +886,16 @@ class MainWindow(QMainWindow):
         self.chk_handsfree.setChecked(self.continuous_voice)
         self.chk_handsfree.stateChanged.connect(lambda state: self.set_handsfree(state == 2))
         v_lay.addWidget(self.chk_handsfree)
+
+        # Moteur de Reconnaissance Vocale (STT)
+        stt_lay = QHBoxLayout()
+        stt_lay.addWidget(QLabel("Moteur STT :"))
+        self.combo_stt = QComboBox()
+        self.combo_stt.addItem("🌐 Navigateur Web (Google Speech Cloud)", "browser")
+        self.combo_stt.addItem("🖥️ Whisper Local (Hors-ligne)", "local")
+        self.combo_stt.currentIndexChanged.connect(self.update_stt_engine)
+        stt_lay.addWidget(self.combo_stt)
+        v_lay.addLayout(stt_lay)
         
         config_layout.addWidget(voice_group)
         
@@ -1001,6 +1064,10 @@ class MainWindow(QMainWindow):
     def update_voice_pitch(self, val):
         self.voice_pitch = val / 10.0
         self.lbl_pitch_val.setText(f"{self.voice_pitch:.1f}")
+
+    def update_stt_engine(self, idx):
+        self.stt_engine = self.combo_stt.currentData()
+        print(f"[GUI] Moteur STT sélectionné : {self.stt_engine}")
 
     def apply_qss(self):
         # Apply style matching web CSS
@@ -1666,13 +1733,13 @@ class MainWindow(QMainWindow):
             # Re-enable input if recording failed / empty
             self.input_field.setEnabled(True)
             if self.continuous_voice:
-                QTimer.singleShot(600, self.start_microphone_recording)
+                QTimer.singleShot(1200, self.start_microphone_recording)
 
     def send_wav_for_transcription(self, wav_path):
         self.input_field.setText("... (Pixel décode votre voix) ...")
         self.input_field.setEnabled(False)
         
-        self.transcribe_thread = TranscribeThread(wav_path)
+        self.transcribe_thread = TranscribeThread(wav_path, engine=self.stt_engine)
         self.transcribe_thread.finished_signal.connect(self.handle_transcription_finished, Qt.ConnectionType.QueuedConnection)
         self.transcribe_thread.start()
         
@@ -1701,7 +1768,7 @@ class MainWindow(QMainWindow):
                     self.input_field.setText("")
                     self.input_field.setPlaceholderText("Pixel : Oui ? Je vous écoute...")
                     if not self.is_recording:
-                        QTimer.singleShot(600, self.start_microphone_recording)
+                        QTimer.singleShot(1200, self.start_microphone_recording)
             else:
                 # Manual microphone activation: strip trailing send keyword if present
                 cleaned_text = re.sub(r'[\s,:\-\.\!\?]*(envoi|envoyer|envoie)[\s,:\-\.\!\?]*$', '', text, flags=re.IGNORECASE).strip()
@@ -1712,7 +1779,7 @@ class MainWindow(QMainWindow):
             self.input_field.setText("")
             self.input_field.setPlaceholderText("Aucune voix détectée. Réessayez.")
             if self.continuous_voice and not self.is_recording:
-                QTimer.singleShot(600, self.start_microphone_recording)
+                QTimer.singleShot(1200, self.start_microphone_recording)
 
     # ── TTS ENGINE (PIPER/GO BACKEND) ──
     def start_speech_session(self):
@@ -1796,7 +1863,7 @@ class MainWindow(QMainWindow):
             self.is_speaking_session = False
             # Hands-free: start recording if continuous voice is enabled, mic not recording, and chat didn't fail
             if self.continuous_voice and not self.is_recording and not self.chat_failed:
-                QTimer.singleShot(1000, self.start_microphone_recording)
+                QTimer.singleShot(1200, self.start_microphone_recording)
             return
             
         remaining = self.speech_buffer.strip()
@@ -1818,7 +1885,7 @@ class MainWindow(QMainWindow):
             if self.is_stream_finished and not self.is_speaking_sentence:
                 self.is_speaking_session = False
                 if self.continuous_voice and not self.is_recording and not self.chat_failed:
-                    QTimer.singleShot(650, self.start_microphone_recording)
+                    QTimer.singleShot(1200, self.start_microphone_recording)
             return
             
         self.is_speaking_sentence = True

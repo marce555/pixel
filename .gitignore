@@ -52,3 +52,5 @@ webcam_temp_*
 # Scratch & Temporary Testing Folders
 scratch/
 tmp/
+*.log
+*.bak

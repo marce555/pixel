@@ -1,6 +1,6 @@
 {
   "name": "download_compilation",
-  "description": "Télécharge une compilation de hits dansants d'une décennie dans une plage de BPM spécifique.",
-  "test_query": "120 ||| Whitney Houston - I Wanna Dance with Somebody, Madonna - Material Girl",
-  "router_instructions": "Utilise cette action si l'utilisateur demande de télécharger une compilation de hits de danse d'une décennie (ex: 80s, 90s) avec un certain BPM. Génère d'abord une liste d'au moins 20 titres correspondants. Formate la 'query' de cette manière stricte: '<BPM> ||| <artiste1> - <titre1>, <artiste2> - <titre2>, ...'"
+  "description": "Télécharge et enregistre des fichiers MP3 d'une compilation de musique sur le disque dur local.",
+  "test_query": "120 ||| rock latino années 80",
+  "router_instructions": "RÈGLE STRICTE : Utilise cette action UNIQUEMENT si l'utilisateur demande EXPLICITEMENT d'ENREGISTRER ou de TÉLÉCHARGER des morceaux/compilations sur son disque (ex: 'télécharge une compilation', 'télécharge les MP3'). Si l'utilisateur demande d'ÉCOUTER, JOUER ou LANCER de la musique ('lance une compilation', 'mets une compilation', 'joue du rock latino'), N'UTILISE JAMAIS ce skill, choisis obligatoirement l'action 'media' !"
 }

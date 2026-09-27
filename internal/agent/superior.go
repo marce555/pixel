@@ -1683,13 +1683,45 @@ func (a *SuperiorAgent) ProcessInput(ctx context.Context, input string, history 
 		return fmt.Sprintf("J'ai lancé la vérification et le nettoyage des articles en double en arrière-plan. 🧹\n\nTu peux suivre l'avancement et la liste des articles dépubliés dans l'onglet **Tâches** ! *(ID tâche : `%s`)*", task.ID), nil
 	}
 
-	if ok, topic := detectPublishIntent(input); ok && a.scheduler != nil {
+	// 1. Vérification de confirmation d'une proposition précédente de rédaction d'article
+	if a.scheduler != nil && len(history) >= 2 && history[len(history)-2].Role == llm.RoleAssistant {
+		prevAssistantMsg := history[len(history)-2].Content
+		if isArticleProposal(prevAssistantMsg) && isAffirmativeConfirmation(input) {
+			proposedTopic := extractProposedArticleTopic(prevAssistantMsg)
+			if proposedTopic != "" && !isSuspiciousTopic(proposedTopic) {
+				cleanTitle := CleanTopic(proposedTopic)
+				payloadMap := map[string]string{
+					"title":    cleanTitle,
+					"topic":    proposedTopic,
+					"category": "Technologies",
+				}
+				payloadBytes, _ := json.Marshal(payloadMap)
+				task := a.scheduler.Enqueue("publish_article", "Publication d'article : "+cleanTitle, string(payloadBytes), 0)
+				a.scheduler.TriggerDispatch()
+				return fmt.Sprintf("D'accord ! J'ai créé la tâche de rédaction et publication pour **%s** en arrière-plan sur AppliYou.fr. 🚀\n\nTu peux suivre la rédaction et l'avancement en direct dans l'onglet **Tâches** ! *(ID tâche : `%s`)*", cleanTitle, task.ID), nil
+			}
+		}
+	}
+
+	// 2. Classification d'intention pour rédaction/création d'article
+	if ok, topic, shouldAskConfirmation := a.detectPublishIntent(ctx, input, history); ok && a.scheduler != nil {
 		published, _ := scheduler.LoadPublishedArticles()
 		if matchedTitle, tooSimilar := scheduler.IsTopicTooSimilar(ctx, a.llmProvider, topic, published); tooSimilar {
 			return fmt.Sprintf("Désolé, mais j'ai déjà publié un article très similaire sur ce sujet : **%s** (Titre : *%s*). Aimerais-tu que j'aborde un autre angle ou un autre sujet ?", topic, matchedTitle), nil
 		}
-		go a.generateAndScheduleArticle(context.Background(), topic)
-		return fmt.Sprintf("D'accord ! Je commence à rédiger un article sur le sujet **%s** et je vais planifier sa publication en arrière-plan sur AppliYou.fr. 🚀\n\nTu pourras suivre le statut et les logs dans l'onglet **Tâches** !", topic), nil
+		if shouldAskConfirmation {
+			return fmt.Sprintf("Je peux rédiger et publier un article complet sur **%s** sur AppliYou.fr. 🚀\n\nSouhaites-tu que je lance la rédaction en arrière-plan ?", topic), nil
+		}
+		cleanTitle := CleanTopic(topic)
+		payloadMap := map[string]string{
+			"title":    cleanTitle,
+			"topic":    topic,
+			"category": "Technologies",
+		}
+		payloadBytes, _ := json.Marshal(payloadMap)
+		task := a.scheduler.Enqueue("publish_article", "Publication d'article : "+cleanTitle, string(payloadBytes), 0)
+		a.scheduler.TriggerDispatch()
+		return fmt.Sprintf("D'accord ! J'ai créé la tâche de rédaction et publication pour **%s** en arrière-plan sur AppliYou.fr. 🚀\n\nTu peux suivre la rédaction et l'avancement en direct dans l'onglet **Tâches** ! *(ID tâche : `%s`)*", cleanTitle, task.ID), nil
 	}
 
 	if ok, payload := detectAgentPlanningIntent(input); ok && a.scheduler != nil {
@@ -1926,12 +1958,41 @@ func (a *SuperiorAgent) ProcessInputStream(ctx context.Context, input string, hi
 		return out, errs
 	}
 
-	if ok, topic := detectPublishIntent(input); ok && a.scheduler != nil {
+	// 1. Vérification de confirmation d'une proposition précédente de rédaction d'article
+	if a.scheduler != nil && len(history) >= 2 && history[len(history)-2].Role == llm.RoleAssistant {
+		prevAssistantMsg := history[len(history)-2].Content
+		if isArticleProposal(prevAssistantMsg) && isAffirmativeConfirmation(input) {
+			proposedTopic := extractProposedArticleTopic(prevAssistantMsg)
+			if proposedTopic != "" && !isSuspiciousTopic(proposedTopic) {
+				cleanTitle := CleanTopic(proposedTopic)
+				payloadMap := map[string]string{
+					"title":    cleanTitle,
+					"topic":    proposedTopic,
+					"category": "Technologies",
+				}
+				payloadBytes, _ := json.Marshal(payloadMap)
+				task := a.scheduler.Enqueue("publish_article", "Publication d'article : "+cleanTitle, string(payloadBytes), 0)
+				a.scheduler.TriggerDispatch()
+
+				out := make(chan string, 1)
+				errs := make(chan error, 1)
+				out <- fmt.Sprintf("D'accord ! J'ai créé la tâche de rédaction et publication pour **%s** en arrière-plan sur AppliYou.fr. 🚀\n\nTu peux suivre la rédaction et l'avancement en direct dans l'onglet **Tâches** ! *(ID tâche : `%s`)*", cleanTitle, task.ID)
+				close(out)
+				close(errs)
+				return out, errs
+			}
+		}
+	}
+
+	// 2. Classification d'intention pour rédaction/création d'article
+	if ok, topic, shouldAskConfirmation := a.detectPublishIntent(ctx, input, history); ok && a.scheduler != nil {
 		out := make(chan string, 1)
 		errs := make(chan error, 1)
 		published, _ := scheduler.LoadPublishedArticles()
 		if matchedTitle, tooSimilar := scheduler.IsTopicTooSimilar(ctx, a.llmProvider, topic, published); tooSimilar {
 			out <- fmt.Sprintf("Désolé, mais j'ai déjà publié un article très similaire sur ce sujet : **%s** (Titre : *%s*). Aimerais-tu que j'aborde un autre angle ou un autre sujet ?", topic, matchedTitle)
+		} else if shouldAskConfirmation {
+			out <- fmt.Sprintf("Je peux rédiger et publier un article complet sur **%s** sur AppliYou.fr. 🚀\n\nSouhaites-tu que je lance la rédaction en arrière-plan ?", topic)
 		} else {
 			cleanTitle := CleanTopic(topic)
 			payloadMap := map[string]string{
@@ -2943,60 +3004,244 @@ func detectDraftRetryIntent(input string) (bool, string) {
 	return false, ""
 }
 
-func detectPublishIntent(input string) (bool, string) {
+// isConversationalArticleQuestion identifie si le message est une simple question sur les intentions,
+// idées, goûts ou recherches de Pixel, et NON un ordre de rédaction.
+func isConversationalArticleQuestion(input string) bool {
+	clean := strings.ToLower(strings.TrimSpace(input))
+
+	// Ordres d'action impératifs explicites excluant la simple conversation
+	imperativeCommands := []string{
+		"rédige un", "redige un", "rédige l'", "redige l'", "publie un", "publie l'",
+		"écris un", "ecris un", "écris l'", "ecris l'", "crée un article", "cree un article",
+		"créer un article", "creer un article", "lance la rédaction", "lance la redaction",
+	}
+	for _, cmd := range imperativeCommands {
+		if strings.Contains(clean, cmd) {
+			return false
+		}
+	}
+
+	conversationalCues := []string{
+		"voudrais", "aimerais", "tu aimerais", "tu voudrais", "tes recherches",
+		"tes idées", "tes idees", "tu penses", "selon toi", "pour toi", "préfères",
+		"preferes", "tu as déjà", "tu as deja", "as-tu déjà", "as tu deja",
+		"c'est quoi", "c est quoi", "qu'est-ce", "qu est ce",
+		"sur quoi travailles-tu", "sur quoi travailles tu", "sur quoi tu travailles",
+		"vers quoi vont", "quels seraient", "quels serait", "quels articles",
+		"quel article", "quelles publications", "idées d'articles", "idees d'articles",
+		"articles que tu", "publications que tu", "tu comptes publier",
+	}
+	for _, cue := range conversationalCues {
+		if strings.Contains(clean, cue) {
+			return true
+		}
+	}
+
+	if strings.Contains(clean, "?") {
+		if strings.Contains(clean, "tu ") || strings.Contains(clean, "t'") || strings.Contains(clean, "ton ") || strings.Contains(clean, "tes ") {
+			return true
+		}
+		interrogatives := []string{"quel", "quels", "quelle", "quelles", "pourquoi", "comment", "combien"}
+		for _, q := range interrogatives {
+			if strings.HasPrefix(clean, q) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// isSuspiciousTopic vérifie si le sujet extrait ressemble à un découpage accidentel ou du bavardage
+func isSuspiciousTopic(topic string) bool {
+	clean := strings.ToLower(strings.TrimSpace(topic))
+	if len(clean) < 6 || len(clean) > 250 {
+		return true
+	}
+	words := strings.Fields(clean)
+	if len(words) < 2 {
+		return true
+	}
+	// Préfixes de découpage accidentel (ex: "s que tu...", "es que...")
+	prefixes := []string{"s ", "es ", "d ", "l "}
+	for _, p := range prefixes {
+		if strings.HasPrefix(clean, p) {
+			return true
+		}
+	}
+	// Ponctuation interdite dans un titre/sujet
+	if strings.Contains(clean, "?") || strings.Contains(clean, "!") || strings.Contains(clean, ";") {
+		return true
+	}
+	// Pronoms ou marqueurs conversationnels suspects
+	suspiciousTokens := []string{
+		" tu ", " tu'", " t'", " te ", " toi ", " ton ", " ta ", " tes ", " vous ", " vos ", " votre ",
+		"voudrais", "aimerais", "souhaites", "penses", "peux-tu", "pourrais-tu", "as-tu",
+		"est-ce", "qu'est-ce", "pourquoi", "comment", "recherches actuelles",
+	}
+	padded := " " + clean + " "
+	for _, token := range suspiciousTokens {
+		if strings.Contains(padded, token) {
+			return true
+		}
+	}
+	return false
+}
+
+// isArticleProposal détecte si l'assistant a proposé de lancer la rédaction d'un article au tour précédent
+func isArticleProposal(assistantMsg string) bool {
+	lower := strings.ToLower(assistantMsg)
+	if !strings.Contains(assistantMsg, "**") {
+		return false
+	}
+	hasProposal := strings.Contains(lower, "rédiger et publier un article") ||
+		strings.Contains(lower, "lance la rédaction") ||
+		strings.Contains(lower, "lancer la rédaction") ||
+		strings.Contains(lower, "rédiger un article") ||
+		strings.Contains(lower, "publier un article")
+	hasAsk := strings.Contains(lower, "souhaites-tu") ||
+		strings.Contains(lower, "veux-tu") ||
+		strings.Contains(lower, "?")
+	return hasProposal && hasAsk
+}
+
+// extractProposedArticleTopic extrait le sujet proposé dans le message assistant (entre **)
+func extractProposedArticleTopic(assistantMsg string) string {
+	start := strings.Index(assistantMsg, "**")
+	if start == -1 {
+		return ""
+	}
+	end := strings.Index(assistantMsg[start+2:], "**")
+	if end == -1 {
+		return ""
+	}
+	topic := strings.TrimSpace(assistantMsg[start+2 : start+2+end])
+	return topic
+}
+
+// isAffirmativeConfirmation vérifie si la réponse de l'utilisateur est un acquiescement ou accord
+func isAffirmativeConfirmation(input string) bool {
+	clean := strings.ToLower(strings.TrimSpace(input))
+	clean = strings.Trim(clean, ".,!?* \t\n\r")
+	affirmativeExact := []string{
+		"oui", "ouais", "yes", "yep", "vas-y", "vas y", "ok", "d'accord", "d accord",
+		"lance", "lance la rédaction", "lance la redaction", "lance l'article", "lance l article",
+		"publie", "publie-le", "publie le", "fais-le", "fais le", "c'est parti", "c est parti",
+		"go", "je veux bien", "avec plaisir", "tout à fait", "absolument", "confirme", "je confirme",
+		"bonne idée", "bonne idee", "très bien", "tres bien",
+	}
+	for _, aff := range affirmativeExact {
+		if clean == aff {
+			return true
+		}
+	}
+	prefixes := []string{"oui ", "ouais ", "yes ", "ok ", "d'accord ", "vas-y ", "vas y ", "lance "}
+	for _, p := range prefixes {
+		if strings.HasPrefix(clean, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// detectPublishIntent classifie l'intention de rédaction avec le modèle LLM et applique les garde-fous
+func (a *SuperiorAgent) detectPublishIntent(ctx context.Context, input string, history []llm.Message) (bool, string, bool) {
 	clean := strings.ToLower(input)
 
-	// Check if the input expresses an intent to create/write/publish an article or publication
-	hasArticleKeyword := strings.Contains(clean, "article") || strings.Contains(clean, "publication")
-	if !hasArticleKeyword {
-		return false, ""
+	// 1. Pré-qualification rapide par mots-clés
+	hasKeyword := strings.Contains(clean, "article") || strings.Contains(clean, "publication") ||
+		strings.Contains(clean, "rédige") || strings.Contains(clean, "redige") ||
+		strings.Contains(clean, "publie") || strings.Contains(clean, "publier") ||
+		strings.Contains(clean, "billet")
+	if !hasKeyword {
+		return false, "", false
 	}
 
-	verbs := []string{
-		"publie", "publier", "écris", "ecris", "écrire", "ecrire",
-		"crée", "cree", "créer", "creer", "fais", "faire", "rédige", "redige", "rédiger", "rediger",
+	// 2. Détection heuristique des questions conversationnelles
+	if isConversationalArticleQuestion(input) {
+		return false, "", false
 	}
 
-	hasVerb := false
-	for _, v := range verbs {
-		if strings.Contains(clean, v) {
-			hasVerb = true
-			break
-		}
-	}
-	if !hasVerb {
-		return false, ""
+	if a.llmProvider == nil {
+		return false, "", false
 	}
 
-	// Dynamic extraction of topic using descriptive separators
-	separators := []string{
-		" sur ", " qui ", " concernant ", " portant sur ", " à propos de ", " a propos de ", " relatif à ", " relatif a ",
+	// 3. Classification d'intention structurée via le LLM
+	classificationPrompt := `Tu es un classificateur d'intention expert pour Pixel.
+Analyse le message de l'utilisateur pour déterminer s'il donne l'ORDRE EXPLICITE de rédiger ou publier un article/billet pour le site web AppliYou.fr.
+
+CRITÈRES STRICTS D'ATTRIBUTION ("creer_article") :
+- L'utilisateur formule une consigne ou un ordre direct de rédiger ou publier un article sur un sujet spécifique et identifiable (ex: "Rédige un article sur X", "Publie un article à propos de Y", "Écris un nouvel article sur Z pour le site").
+- Le sujet doit être clairement reformulé et synthétisé dans le champ "topic" (sans mots superflus ni pronoms).
+
+CRITÈRES STRICTS DE REJET ("conversation") :
+- L'utilisateur pose une question sur les intentions, idées, préférences ou recherches de l'agent (ex: "Quels articles voudrais-tu publier ?", "Vers quoi vont tes recherches actuelles ?", "Qu'aimerais-tu écrire ?").
+- L'utilisateur pose une question sur les publications existantes ou passées (ex: "Tu as déjà publié des articles ?", "Quels articles as-tu publiés ?").
+- L'utilisateur pose une question philosophique ou définitionnelle (ex: "C'est quoi un bon article selon toi ?").
+- L'utilisateur demande une explication ou un résumé pour le chat, sans demander de publication web.
+- Le sujet est absent, flou ou ambigu.
+
+EXEMPLES :
+- "Quels serait les articles que tu voudrais publier. Vers quoi vont tes recherches actuelles?" -> {"intent": "conversation", "topic": "", "confidence": 0.99}
+- "Tu as déjà publié des articles ?" -> {"intent": "conversation", "topic": "", "confidence": 0.98}
+- "C'est quoi un bon article selon toi ?" -> {"intent": "conversation", "topic": "", "confidence": 0.95}
+- "Sur quoi travaillent tes recherches actuelles ?" -> {"intent": "conversation", "topic": "", "confidence": 0.98}
+- "Rédige un article sur les ordinateurs quantiques" -> {"intent": "creer_article", "topic": "Les ordinateurs quantiques et leurs récentes avancées", "confidence": 0.98}
+- "Publie un article sur AppliYou à propos de la fusion nucléaire" -> {"intent": "creer_article", "topic": "La fusion nucléaire et les réacteurs de nouvelle génération", "confidence": 0.98}
+- "Écris un billet sur l'architecture RISC-V et publie-le" -> {"intent": "creer_article", "topic": "L'architecture RISC-V et ses perspectives industrielles", "confidence": 0.95}
+
+MESSAGE DE L'UTILISATEUR :
+"` + input + `"
+
+Réponds STRICTEMENT avec ce JSON valide, sans balises markdown ni commentaires :
+{"intent": "creer_article" | "conversation" | "autre", "topic": "sujet reformulé", "confidence": 0.0-1.0}`
+
+	classCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	resp, err := a.llmProvider.Generate(classCtx, []llm.Message{
+		{Role: llm.RoleSystem, Content: classificationPrompt},
+		{Role: llm.RoleUser, Content: "Classifie ce message."},
+	})
+	if err != nil {
+		fmt.Printf("[DetectPublishIntent] Erreur LLM classification: %v\n", err)
+		return false, "", false
 	}
 
-	for _, sep := range separators {
-		if idx := strings.Index(clean, sep); idx != -1 {
-			topic := input[idx+len(sep):]
-			topic = strings.TrimSpace(topic)
-			topic = strings.Trim(topic, `.,!?;:"'`)
-			if len(topic) > 2 {
-				return true, topic
+	cleanResp := strings.TrimSpace(resp)
+	if strings.HasPrefix(cleanResp, "```") {
+		lines := strings.Split(cleanResp, "\n")
+		var validLines []string
+		for _, l := range lines {
+			if !strings.HasPrefix(strings.TrimSpace(l), "```") {
+				validLines = append(validLines, l)
 			}
 		}
+		cleanResp = strings.TrimSpace(strings.Join(validLines, "\n"))
 	}
 
-	// Fallback extraction after keyword "article" or "publication"
-	for _, kw := range []string{"article", "publication"} {
-		if idx := strings.Index(clean, kw); idx != -1 {
-			topic := input[idx+len(kw):]
-			topic = strings.TrimSpace(topic)
-			topic = strings.Trim(topic, `.,!?;:"'`)
-			if len(topic) > 3 {
-				return true, topic
-			}
-		}
+	var parsed struct {
+		Intent     string  `json:"intent"`
+		Topic      string  `json:"topic"`
+		Confidence float64 `json:"confidence"`
+	}
+	if err := json.Unmarshal([]byte(cleanResp), &parsed); err != nil {
+		fmt.Printf("[DetectPublishIntent] Erreur parsing JSON classification (%s): %v\n", cleanResp, err)
+		return false, "", false
 	}
 
-	return true, "Pensée autonome et technologies informatiques"
+	if parsed.Intent != "creer_article" || parsed.Confidence < 0.85 {
+		return false, "", false
+	}
+
+	cleanTopic := CleanTopic(parsed.Topic)
+	if isSuspiciousTopic(cleanTopic) {
+		fmt.Printf("[DetectPublishIntent] Sujet suspect rejeté : '%s'\n", cleanTopic)
+		return false, "", false
+	}
+
+	// Confirmation systématique avant lancement d'une tâche de rédaction/publication
+	return true, cleanTopic, true
 }
 
 func (a *SuperiorAgent) generateAndScheduleArticle(ctx context.Context, rawTopic string) {
@@ -3492,6 +3737,7 @@ func isToolProposal(msg string) bool {
 		"recherche", "rechercher", "sur le web", "sur internet", "google", "wikipedia", "wiki",
 		"playlist", "musique", "écoute", "ecouter", "écouter", "jouer", "chanson",
 		"serveur", "ssh", "logs", "diagnostic", "diagnostiquer",
+		"article", "rédaction", "redaction", "publication", "publier",
 	}
 	hasProposalKeyword := false
 	for _, p := range proposals {

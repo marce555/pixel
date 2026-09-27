@@ -249,3 +249,54 @@ func TestDetectPublishIntentWithLLM(t *testing.T) {
 		t.Errorf("Expected low confidence to be rejected, got ok=true")
 	}
 }
+
+func TestShouldTriggerRAG(t *testing.T) {
+	agent := &SuperiorAgent{}
+
+	tests := []struct {
+		input    string
+		action   string
+		query    string
+		expected bool
+	}{
+		// Screenshot case with typo "souvennirs": must trigger RAG!
+		{
+			input:    "Vraiment tu n'as aucun souvennirs de théologie ?",
+			action:   "self_awareness", // even if router mistakenly returns self_awareness!
+			query:    "",
+			expected: true,
+		},
+		{
+			input:    "Quels sont tes souvenirs concernant la theologie?",
+			action:   "none",
+			query:    "",
+			expected: true,
+		},
+		{
+			input:    "Tu te rappelles de Balthasar ?",
+			action:   "none",
+			query:    "",
+			expected: true,
+		},
+		{
+			input:    "Comment fonctionnent tes algorithmes ?",
+			action:   "self_awareness",
+			query:    "Comment fonctionnent tes algorithmes ?",
+			expected: false,
+		},
+		{
+			input:    "Qui es-tu ?",
+			action:   "self_awareness",
+			query:    "Qui es-tu ?",
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		got := agent.shouldTriggerRAG(tt.input, tt.action, tt.query)
+		if got != tt.expected {
+			t.Errorf("shouldTriggerRAG(%q, %q, %q) = %v; want %v", tt.input, tt.action, tt.query, got, tt.expected)
+		}
+	}
+}
+

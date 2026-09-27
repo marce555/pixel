@@ -270,16 +270,18 @@ func (a *SuperiorAgent) shouldFilterContext(input string, action string, history
 }
 
 func (a *SuperiorAgent) shouldTriggerRAG(input string, action string, query string) bool {
-	if action == "self_awareness" {
-		return false
-	}
 	if action == "rag" && query != "" {
 		return true
 	}
 	clean := memory.FoldString(input)
+	for _, w := range strings.Fields(clean) {
+		if strings.HasPrefix(w, "souven") || strings.HasPrefix(w, "rappel") || strings.HasPrefix(w, "rapel") {
+			return true
+		}
+	}
 	keywords := []string{
 		// Mémoire explicite (y compris variantes de transcription vocale)
-		"balthasar", "souvenir", "souvenirs", "theologie", "philosophie", "reference", "rappelle", "rappel", "rappelles", "rapelle",
+		"balthasar", "theologie", "theologique", "philosophie", "reference", "rappelle", "rappel", "rappelles", "rapelle",
 		"rapelles", "rapelle-toi", "rappelle-toi", "souviens", "souvient", "te souviens",
 		"tu te souviens", "tu t'en souviens", "te rappelles", "tu rappelles",
 		"tu te rappelles", "t'en souviens", "tu t'en rappelles",
@@ -1098,6 +1100,7 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 
 	// Context assembly ────────────────────────────────────────────────────────────────────────
 	var additionalContext string
+	hasMemories := false
 	cleanInput := strings.ToLower(input)
 	isOldestCheck := strings.Contains(cleanInput, "vieux souvenir") || strings.Contains(cleanInput, "plus ancien") || strings.Contains(cleanInput, "premier souvenir") || strings.Contains(cleanInput, "premiers souvenirs")
 	isSynthesisCheck := strings.Contains(cleanInput, "synthèse de ta mémoire") || strings.Contains(cleanInput, "résumé de ta mémoire") || strings.Contains(cleanInput, "qu'as-tu en mémoire") || strings.Contains(cleanInput, "aperçu de ta mémoire") || strings.Contains(cleanInput, "structure de ta mémoire") || strings.Contains(cleanInput, "métadonnées de ta mémoire")
@@ -1135,7 +1138,7 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 			queryVector, _ = a.llmProvider.CreateEmbedding(ctx, queryStr)
 		}
 
-		hasMemories := false
+		hasMemories = false
 		if len(queryVector) > 0 {
 			searchQuery := input
 			if queryStr != "" && queryStr != input {
@@ -1341,7 +1344,7 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 
 	// Activation de l'Agent d'Autoconnaissance et de Conscience de Soi (SelfAwarenessAgent)
 	isSelfAwareness, _ := detectSelfAwarenessIntent(input)
-	if routerResp.Action == "self_awareness" || isSelfAwareness {
+	if (routerResp.Action == "self_awareness" || isSelfAwareness) && !hasMemories {
 		resourceagent.AddLiveLog("Conscience", "Consultation de la conscience intérieure et des algorithmes de Pixel...")
 		if a.selfAwareness != nil {
 			introCtx, introCancel := context.WithTimeout(context.Background(), 20*time.Second)

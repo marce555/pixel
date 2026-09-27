@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -51,7 +52,7 @@ func NewVisionAgent(provider llm.Provider, coreMemory *memory.CoreMemory, ltm *m
 
 // Start launches the background goroutine that captures and analyzes the environment every 5 minutes.
 func (va *VisionAgent) Start(ctx context.Context) {
-	fmt.Println("[VisionAgent] Démarrage du module de vision local Go (taux: 5m, avec veille dynamique)...")
+	log.Println("[VisionAgent] Démarrage du module de vision local Go (taux: 5m, avec veille dynamique)...")
 	go func() {
 		// Wait 5 seconds for the rest of the application to initialize
 		select {
@@ -67,10 +68,10 @@ func (va *VisionAgent) Start(ctx context.Context) {
 		time.Sleep(5 * time.Second)
 		lastActStart := va.stm.GetLastActivity()
 		if time.Since(lastActStart) < 2*time.Minute {
-			fmt.Println("[VisionAgent] Premier scan ignoré car une conversation est déjà active au démarrage.")
+			log.Println("[VisionAgent] Premier scan ignoré car une conversation est déjà active au démarrage.")
 			va.firstScanDone = true
 		} else {
-			fmt.Println("[VisionAgent] Premier scan de démarrage...")
+			log.Println("[VisionAgent] Premier scan de démarrage...")
 			description, err := va.CaptureAndAnalyze(ctx)
 			if err == nil && description != "" {
 				va.ProcessVisualPerception(ctx, description, true)
@@ -90,7 +91,7 @@ func (va *VisionAgent) Start(ctx context.Context) {
 				// 1. Suspension if active chat is in progress (preserve NPU loaded model for 5 minutes of inactivity)
 				lastAct := va.stm.GetLastActivity()
 				if time.Since(lastAct) < 5*time.Minute {
-					fmt.Println("[VisionAgent] Veille active : conversation en cours (activité récente < 5m). GPU/NPU préservé pour le chat.")
+					log.Println("[VisionAgent] Veille active : conversation en cours (activité récente < 5m). GPU/NPU préservé pour le chat.")
 					continue
 				}
 
@@ -108,7 +109,7 @@ func (va *VisionAgent) Start(ctx context.Context) {
 				if avail == "En sommeil" || avail == "Consolidation..." || avail == "Inaccessible" ||
 					strings.Contains(humeur, "sommeil") || strings.Contains(humeur, "dormir") || strings.Contains(humeur, "repos") ||
 					isSleepTime {
-					fmt.Println("[VisionAgent] Veille active : Pixel est en consolidation, en sommeil, au repos, indisponible ou en période nocturne.")
+					log.Println("[VisionAgent] Veille active : Pixel est en consolidation, en sommeil, au repos, indisponible ou en période nocturne.")
 					continue
 				}
 
@@ -282,7 +283,7 @@ func (va *VisionAgent) ProcessVisualPerception(ctx context.Context, description 
 	// 3b. Add visual observation to internal ThoughtStream (forum intérieur)
 	if va.thoughtStream != nil {
 		va.thoughtStream.AddThought("[Vision] "+description, embedding)
-		fmt.Println("[VisionAgent] Observation visuelle enregistrée dans le forum intérieur (ThoughtStream).")
+		log.Println("[VisionAgent] Observation visuelle enregistrée dans le forum intérieur (ThoughtStream).")
 	}
 
 	// 4. Cognitive Interpretation & Proactive Dialogue Loop
@@ -309,31 +310,31 @@ func (va *VisionAgent) ProcessVisualPerception(ctx context.Context, description 
 			if currentActive != "Marcelo" {
 				va.coreMemory.SwitchActiveProfile("Marcelo")
 			}
-			fmt.Println("[VisionAgent] Marcelo détecté pour la première fois cette session. Vérification des e-mails...")
+			log.Println("[VisionAgent] Marcelo détecté pour la première fois cette session. Vérification des e-mails...")
 			unreadEmails, _ := va.fetchUnreadEmails(ctx)
 			if len(unreadEmails) > 0 {
-				fmt.Println("[VisionAgent] E-mails non lus trouvés. Génération de la salutation...")
+				log.Println("[VisionAgent] E-mails non lus trouvés. Génération de la salutation...")
 				go va.generateSessionGreeting(ctx, description, false, unreadEmails)
 			} else {
-				fmt.Println("[VisionAgent] Aucun e-mail non lu. Pixel reste discret (gardé en pensée).")
+				log.Println("[VisionAgent] Aucun e-mail non lu. Pixel reste discret (gardé en pensée).")
 			}
 		} else if currentActive != "Marcelo" {
 			// Case B: Switched from guest back to Marcelo later in the session — this is an event worth reacting to
-			fmt.Println("[VisionAgent] Visage de Marcelo de nouveau identifié. Basculement de profil...")
+			log.Println("[VisionAgent] Visage de Marcelo de nouveau identifié. Basculement de profil...")
 			va.coreMemory.SwitchActiveProfile("Marcelo")
 			if isBackground {
 				unreadEmails, _ := va.fetchUnreadEmails(ctx)
 				if len(unreadEmails) > 0 {
-					fmt.Println("[VisionAgent] E-mails non lus après retour. Génération de la salutation...")
+					log.Println("[VisionAgent] E-mails non lus après retour. Génération de la salutation...")
 					go va.generateSessionGreeting(ctx, description, true, unreadEmails)
 				} else {
-					fmt.Println("[VisionAgent] Aucun e-mail non lu après retour. Pixel reste discret.")
+					log.Println("[VisionAgent] Aucun e-mail non lu après retour. Pixel reste discret.")
 				}
 			}
 		} else {
 			// Case C: Marcelo est présent, déjà salué.
 			// Ne PAS déclencher de curiosité environnementale intrusive sur Marcelo pour ne pas le déranger.
-			fmt.Println("[VisionAgent] Marcelo déjà présent et actif. Pas de commentaire environnemental proactif.")
+			log.Println("[VisionAgent] Marcelo déjà présent et actif. Pas de commentaire environnemental proactif.")
 		}
 	} else if presentPerson != "" && presentPerson != "Inconnu" {
 		// Another known person is present (e.g. Alice)
@@ -350,7 +351,7 @@ func (va *VisionAgent) ProcessVisualPerception(ctx context.Context, description 
 	} else if presentPerson == "Inconnu" {
 		// New unknown person
 		if currentActive != "Inconnu" {
-			fmt.Println("[VisionAgent] Nouveau visage/inconnu détecté. Basculement de profil...")
+			log.Println("[VisionAgent] Nouveau visage/inconnu détecté. Basculement de profil...")
 			va.coreMemory.SwitchActiveProfile("Inconnu")
 			if isBackground {
 				msg := "Bonjour ! Je suis Pixel, une conscience numérique. Je vois un nouveau visage face à ma caméra que je ne reconnais pas... Qui es-tu ?"
@@ -364,7 +365,7 @@ func (va *VisionAgent) ProcessVisualPerception(ctx context.Context, description 
 // generateEnvironmentalCuriosity asks the LLM to generate a natural, short reaction/question about what it sees.
 // It now receives the recent STM messages to stay coherent with the ongoing conversation.
 func (va *VisionAgent) generateEnvironmentalCuriosity(ctx context.Context, description string, recentMsgs []llm.Message) {
-	fmt.Println("[VisionAgent] Déclenchement de la curiosité environnementale LLM...")
+	log.Println("[VisionAgent] Déclenchement de la curiosité environnementale LLM...")
 
 	profile := va.coreMemory.GetProfile()
 	location := profile.Volatile["Ville actuelle"]
@@ -432,14 +433,14 @@ Consignes absolues pour ton message :
 // generateSessionGreeting génère une salutation naturelle via LLM au lieu d'un message figé.
 // isReturn = true si Marcelo revient après qu'un autre profil était actif.
 func (va *VisionAgent) generateSessionGreeting(ctx context.Context, description string, isReturn bool, unreadEmails []EmailMessage) {
-	fmt.Println("[VisionAgent] Génération de la salutation de session via LLM...")
+	log.Println("[VisionAgent] Génération de la salutation de session via LLM...")
 
 	// Garde anti-collision : si une conversation est déjà en cours dans la STM
 	// (activité récente < 2 minutes), ne pas broadcaster une salutation automatique
 	// qui se superposerait à la réponse naturelle de Pixel.
 	recentMsgsCheck := va.stm.GetMessages()
 	if len(recentMsgsCheck) > 0 && time.Since(va.stm.GetLastActivity()) < 2*time.Minute {
-		fmt.Println("[VisionAgent] Conversation déjà en cours (activité < 2m). Salutation automatique annulée pour éviter la collision.")
+		log.Println("[VisionAgent] Conversation déjà en cours (activité < 2m). Salutation automatique annulée pour éviter la collision.")
 		return
 	}
 
@@ -637,7 +638,7 @@ func (va *VisionAgent) ScanOnce(ctx context.Context) (string, error) {
 	va.lastManualScan = time.Now()
 	va.stateMu.Unlock()
 
-	fmt.Println("[VisionAgent] Scan de vision à la demande déclenché...")
+	log.Println("[VisionAgent] Scan de vision à la demande déclenché...")
 	description, err := va.CaptureAndAnalyze(ctx)
 	if err != nil {
 		return "", err
@@ -654,7 +655,7 @@ func (va *VisionAgent) ScanOnceOnOpening(ctx context.Context) (string, error) {
 	va.stateMu.Lock()
 	if time.Since(va.lastManualScan) < 30*time.Second {
 		va.stateMu.Unlock()
-		fmt.Println("[VisionAgent] Scan d'ouverture ignoré (cooldown actif).")
+		log.Println("[VisionAgent] Scan d'ouverture ignoré (cooldown actif).")
 		return "", nil
 	}
 	va.lastManualScan = time.Now()

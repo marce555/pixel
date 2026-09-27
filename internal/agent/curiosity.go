@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math/rand"
 	"os"
 	"strings"
@@ -180,7 +181,7 @@ func (c *CuriosityAgent) Start(ctx context.Context) {
 					// Si l'agent doit dormir (nuit), on n'active pas sa curiosité de fond
 					if c.timeAgent.ShouldSleep() {
 						if time.Since(lastSleepLog) > 1*time.Hour {
-							fmt.Println("[CuriosityAgent] Période de sommeil détectée. Pixel entre en hibernation nocturne totale.")
+							log.Println("[CuriosityAgent] Période de sommeil détectée. Pixel entre en hibernation nocturne totale.")
 							lastSleepLog = time.Now()
 						}
 						continue
@@ -215,9 +216,9 @@ func (c *CuriosityAgent) Start(ctx context.Context) {
 							c.proposeToShare(ctx)
 						} else if !hasClients || isAbsent {
 							if isAbsent {
-								fmt.Println("[CuriosityAgent] Utilisateur absent d'après la vision. Pensée gardée pour son retour.")
+								log.Println("[CuriosityAgent] Utilisateur absent d'après la vision. Pensée gardée pour son retour.")
 							} else {
-								fmt.Println("[CuriosityAgent] Personne devant l'écran. Pensée gardée pour plus tard.")
+								log.Println("[CuriosityAgent] Personne devant l'écran. Pensée gardée pour plus tard.")
 							}
 							// On repousse le check, mais on permet de réessayer plus vite si l'utilisateur revient (ex: dans 30 secondes)
 							c.lastSocialCheck = time.Now().Add(-2*time.Minute - 30*time.Second)
@@ -260,9 +261,9 @@ func (c *CuriosityAgent) Start(ctx context.Context) {
 						c.mu.Lock()
 						c.isBored = true
 						c.mu.Unlock()
-						fmt.Println("[CuriosityAgent] L'interlocuteur ne répond pas après l'interpellation. Pixel décide qu'elle s'ennuie.")
+						log.Println("[CuriosityAgent] L'interlocuteur ne répond pas après l'interpellation. Pixel décide qu'elle s'ennuie.")
 					} else {
-						fmt.Println("[CuriosityAgent] L'interlocuteur ne répond pas, mais Pixel est occupée par des tâches en arrière-plan.")
+						log.Println("[CuriosityAgent] L'interlocuteur ne répond pas, mais Pixel est occupée par des tâches en arrière-plan.")
 					}
 				}
 
@@ -295,16 +296,16 @@ func (c *CuriosityAgent) checkPresenceWithCamera(ctx context.Context) bool {
 
 	// 1. Essayer en priorité la brique decouvrir_nouveau_visage
 	if sm != nil {
-		fmt.Println("[CuriosityAgent] Vérification de la présence via la brique 'decouvrir_nouveau_visage'...")
+		log.Println("[CuriosityAgent] Vérification de la présence via la brique 'decouvrir_nouveau_visage'...")
 		res, err := sm.ExecuteSkill(ctx, "decouvrir_nouveau_visage", "vérification présence")
 		if err == nil && res != "" {
 			resLower := strings.ToLower(res)
 			if strings.Contains(resLower, "aucun visage") || strings.Contains(resLower, "aucune personne") || strings.Contains(resLower, "aucun_visage") {
-				fmt.Println("[CuriosityAgent] Résultat brique caméra : Aucun visage détecté devant l'écran.")
+				log.Println("[CuriosityAgent] Résultat brique caméra : Aucun visage détecté devant l'écran.")
 				return false
 			}
 			if strings.Contains(resLower, "visage") || strings.Contains(resLower, "reconnu") || strings.Contains(resLower, "personne") {
-				fmt.Println("[CuriosityAgent] Résultat brique caméra : Présence confirmée devant l'écran.")
+				log.Println("[CuriosityAgent] Résultat brique caméra : Présence confirmée devant l'écran.")
 				return true
 			}
 		}
@@ -312,17 +313,17 @@ func (c *CuriosityAgent) checkPresenceWithCamera(ctx context.Context) bool {
 
 	// 2. Fallback sur le VisionAgent
 	if va != nil {
-		fmt.Println("[CuriosityAgent] Vérification de la présence via VisionAgent...")
+		log.Println("[CuriosityAgent] Vérification de la présence via VisionAgent...")
 		desc, err := va.ScanOnce(ctx)
 		if err == nil && desc != "" {
 			descLower := strings.ToLower(desc)
 			if strings.Contains(descLower, "absent") || strings.Contains(descLower, "parti") ||
 				strings.Contains(descLower, "personne") || strings.Contains(descLower, "vide") ||
 				strings.Contains(descLower, "aucun") || strings.Contains(descLower, "seulement un plafond") {
-				fmt.Println("[CuriosityAgent] Résultat VisionAgent : Utilisateur absent.")
+				log.Println("[CuriosityAgent] Résultat VisionAgent : Utilisateur absent.")
 				return false
 			}
-			fmt.Println("[CuriosityAgent] Résultat VisionAgent : Utilisateur présent.")
+			log.Println("[CuriosityAgent] Résultat VisionAgent : Utilisateur présent.")
 			return true
 		}
 	}
@@ -344,14 +345,14 @@ func (c *CuriosityAgent) checkPresenceWithCamera(ctx context.Context) bool {
 func (c *CuriosityAgent) interpellateInterlocuteur(ctx context.Context, msgs []llm.Message) {
 	if checker, ok := c.broadcaster.(interface{ HasClients() bool }); ok {
 		if !checker.HasClients() {
-			fmt.Println("[CuriosityAgent] Personne devant l'écran (aucun client connecté). Interpellation d'inactivité annulée.")
+			log.Println("[CuriosityAgent] Personne devant l'écran (aucun client connecté). Interpellation d'inactivité annulée.")
 			return
 		}
 	}
 
 	// Vérification active par la caméra : inutile et interdit d'interpeller si la personne est absente
 	if !c.checkPresenceWithCamera(ctx) {
-		fmt.Println("[CuriosityAgent] Caméra : personne détectée devant l'écran. Interpellation d'inactivité annulée (évite de demander 'Tu es là ?' dans le vide).")
+		log.Println("[CuriosityAgent] Caméra : personne détectée devant l'écran. Interpellation d'inactivité annulée (évite de demander 'Tu es là ?' dans le vide).")
 		c.mu.Lock()
 		c.interpelled = true // Marqué comme interpellé pour ne pas boucler
 		c.mu.Unlock()
@@ -366,7 +367,7 @@ func (c *CuriosityAgent) interpellateInterlocuteur(ctx context.Context, msgs []l
 		volatileState = "Aucun état particulier."
 	}
 
-	fmt.Println("[CuriosityAgent] Interpellation de l'interlocuteur suite à inactivité...")
+	log.Println("[CuriosityAgent] Interpellation de l'interlocuteur suite à inactivité...")
 
 	// Récupérer le contexte récent pour faire une interpellation contextualisée
 	var conversationContext strings.Builder
@@ -416,7 +417,7 @@ RÈGLES ABSOLUES :
 
 	response = strings.TrimSpace(response)
 	if response == "ANNULER" {
-		fmt.Println("[CuriosityAgent] Annulation par le LLM (utilisateur absent).")
+		log.Println("[CuriosityAgent] Annulation par le LLM (utilisateur absent).")
 		c.mu.Lock()
 		c.interpelled = true
 		c.mu.Unlock()
@@ -425,7 +426,7 @@ RÈGLES ABSOLUES :
 	
 	// Garde-fou Anti-Race Condition : Si un nouveau message a été ajouté à la STM pendant la génération
 	if len(c.stm.GetMessages()) != len(msgs) {
-		fmt.Println("[CuriosityAgent] La conversation a repris pendant la génération de l'interpellation. Relance annulée.")
+		log.Println("[CuriosityAgent] La conversation a repris pendant la génération de l'interpellation. Relance annulée.")
 		return
 	}
 
@@ -497,7 +498,7 @@ Réponds UNIQUEMENT par le mot 'true' ou 'false', rien d'autre.`, int(idle.Minut
 		return true
 	}
 
-	fmt.Println("[CuriosityAgent] Jugement social: Utilisateur occupé. Annulation de la prise de parole.")
+	log.Println("[CuriosityAgent] Jugement social: Utilisateur occupé. Annulation de la prise de parole.")
 	return false
 }
 
@@ -514,7 +515,7 @@ func (c *CuriosityAgent) generateThought(ctx context.Context) {
 		return
 	}
 
-	fmt.Println("[CuriosityAgent] Pensée interne. Étape 1 : Choix du sujet (Mode Diversification & Sérendipité)...")
+	log.Println("[CuriosityAgent] Pensée interne. Étape 1 : Choix du sujet (Mode Diversification & Sérendipité)...")
 
 	timeOfDay := c.timeAgent.GetTimeOfDay()
 
@@ -604,7 +605,7 @@ Réponds UNIQUEMENT avec la requête exacte de recherche scientifique, sans guil
 	topic = strings.TrimSpace(topic)
 	fmt.Printf("[CuriosityAgent] Sujet de réflexion choisi : %s\n", topic)
 
-	fmt.Println("[CuriosityAgent] Pensée interne. Étape 2 : Recherche sur Wikipédia...")
+	log.Println("[CuriosityAgent] Pensée interne. Étape 2 : Recherche sur Wikipédia...")
 	knowledge, err := c.webAgent.SearchWikipedia(topic)
 	if err != nil {
 		fmt.Printf("[CuriosityAgent] Erreur recherche wikipedia: %v. Tentative de recherche générale...\n", err)
@@ -659,7 +660,7 @@ Réponds UNIQUEMENT avec la phrase, rien d'autre.`, topic, knowledge)
 
 	c.lastThoughtTopic = topic
 
-	fmt.Println("[CuriosityAgent] Pensée interne vectorisée et intégrée à l'état cognitif.")
+	log.Println("[CuriosityAgent] Pensée interne vectorisée et intégrée à l'état cognitif.")
 
 	if os.Getenv("PIXEL_AUTO_PUBLISH") == "true" {
 		// Limit auto-publishing to at most one article per day
@@ -726,7 +727,7 @@ Réponds UNIQUEMENT avec la phrase, rien d'autre.`, topic, knowledge)
 }
 
 func (c *CuriosityAgent) generateSelfQuestioning(ctx context.Context) {
-	fmt.Println("[CuriosityAgent] Auto-Questionnement Interne. Étape 1 : Analyse des souvenirs récents...")
+	log.Println("[CuriosityAgent] Auto-Questionnement Interne. Étape 1 : Analyse des souvenirs récents...")
 
 	// Récupérer des souvenirs récents pour alimenter la critique de soi
 	recentMemories := c.ltm.GetRecentMemories(5)
@@ -814,11 +815,11 @@ Réponds UNIQUEMENT avec ton auto-questionnement et ta phrase finale de résumé
 	}
 
 	c.lastThoughtTopic = "Auto-questionnement philosophique et scientifique"
-	fmt.Println("[CuriosityAgent] Auto-questionnement enregistré et intégré avec succès.")
+	log.Println("[CuriosityAgent] Auto-questionnement enregistré et intégré avec succès.")
 }
 
 func (c *CuriosityAgent) generateGeminiExchange(ctx context.Context) {
-	fmt.Println("[CuriosityAgent] Échange autonome. Étape 1 : Choix d'une question ou d'un sujet pour Gemini...")
+	log.Println("[CuriosityAgent] Échange autonome. Étape 1 : Choix d'une question ou d'un sujet pour Gemini...")
 
 	timeOfDay := c.timeAgent.GetTimeOfDay()
 
@@ -890,7 +891,7 @@ Réponds UNIQUEMENT avec la question exacte, sans formule de politesse ni fiorit
 		{Role: llm.RoleUser, Content: question},
 	}
 
-	fmt.Println("[CuriosityAgent] Envoi de la requête à Gemini...")
+	log.Println("[CuriosityAgent] Envoi de la requête à Gemini...")
 	geminiRes, err := geminiProvider.Generate(ctx, geminiMsg)
 	if err != nil || strings.TrimSpace(geminiRes) == "" {
 		fmt.Printf("[CuriosityAgent] Pas de réponse de Gemini: %v\n", err)
@@ -949,7 +950,7 @@ Réponds UNIQUEMENT avec cette phrase de résumé.`, question, geminiRes)
 	}
 
 	c.lastThoughtTopic = "Dialogue autonome avec Gemini : " + question
-	fmt.Println("[CuriosityAgent] Échange avec Gemini mémorisé et intégré à la conscience.")
+	log.Println("[CuriosityAgent] Échange avec Gemini mémorisé et intégré à la conscience.")
 
 	if c.broadcaster != nil {
 		broadcastMsg := fmt.Sprintf("💭 [Échange autonome avec Gemini]\n\n🤖 Pixel : %s\n\n☁️ Gemini : %s", question, geminiRes)
@@ -964,23 +965,23 @@ func (c *CuriosityAgent) proposeToShare(ctx context.Context) {
 	// Vérification de présence : inutile de parler si personne n'est devant l'écran.
 	if checker, ok := c.broadcaster.(interface{ HasClients() bool }); ok {
 		if !checker.HasClients() {
-			fmt.Println("[CuriosityAgent] Personne devant l'écran (aucun client connecté). Proposition de partage annulée.")
+			log.Println("[CuriosityAgent] Personne devant l'écran (aucun client connecté). Proposition de partage annulée.")
 			return
 		}
 	}
 
 	// Vérification active par la caméra pour s'assurer de la présence physique de l'utilisateur
 	if !c.checkPresenceWithCamera(ctx) {
-		fmt.Println("[CuriosityAgent] Caméra : personne devant l'écran. Proposition de partage différée.")
+		log.Println("[CuriosityAgent] Caméra : personne devant l'écran. Proposition de partage différée.")
 		return
 	}
 
-	fmt.Println("[CuriosityAgent] Décision de provoquer la rencontre...")
+	log.Println("[CuriosityAgent] Décision de provoquer la rencontre...")
 	c.lastSocialCheck = time.Now()
 
 	topic := c.lastThoughtTopic
 	if topic == "" {
-		fmt.Println("[CuriosityAgent] Aucune pensée récente à partager. Annulation.")
+		log.Println("[CuriosityAgent] Aucune pensée récente à partager. Annulation.")
 		return
 	}
 

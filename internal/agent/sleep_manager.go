@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
 	"sync"
@@ -71,14 +72,14 @@ func (s *SleepManager) Start(ctx context.Context) {
 			case <-ticker.C:
 				// 1. Déclenchement si santé dégradée
 				if !s.resourceAgent.CheckHealth() {
-					fmt.Println("\n[SleepManager] Le système requiert une phase de sommeil (Nettoyage matériel)...")
+					log.Println("[SleepManager] Le système requiert une phase de sommeil (Nettoyage matériel)...")
 					s.TriggerSleepCycle(s.AcquireBackgroundContext())
 					continue
 				}
 
 				// 2. Déclenchement si STM saturée (pour ne perdre aucune information)
 				if s.stm.IsFull() {
-					fmt.Println("\n[SleepManager] STM saturée. Déclenchement automatique de la consolidation mémoire...")
+					log.Println("[SleepManager] STM saturée. Déclenchement automatique de la consolidation mémoire...")
 					s.TriggerSleepCycle(s.AcquireBackgroundContext())
 					continue
 				}
@@ -87,7 +88,7 @@ func (s *SleepManager) Start(ctx context.Context) {
 				lastActive := s.stm.GetLastActivity()
 				msgs := s.stm.GetMessages()
 				if len(msgs) > 0 && time.Since(lastActive) > 15*time.Minute {
-					fmt.Println("\n[SleepManager] Inactivité détectée. Digestion et consolidation automatique des derniers souvenirs...")
+					log.Println("[SleepManager] Inactivité détectée. Digestion et consolidation automatique des derniers souvenirs...")
 					s.TriggerSleepCycle(s.AcquireBackgroundContext())
 				}
 			}
@@ -127,7 +128,7 @@ func (s *SleepManager) TriggerSleepCycleForMessages(ctx context.Context, msgs []
 	s.incrementBusy()
 	defer s.decrementBusy()
 
-	fmt.Println("[SleepManager] Phase de consolidation de la mémoire (Classification)...")
+	log.Println("[SleepManager] Phase de consolidation de la mémoire (Classification)...")
 
 	// 1. Analyser le profil de l'interlocuteur actuel (Nom, Rôle...) pour mise à jour statique
 	s.profiler.AnalyzeAndProfile(ctx, msgs)
@@ -352,9 +353,9 @@ Réponds UNIQUEMENT avec un JSON valide, sans commentaires, de ce format :
 
 	if ctx.Err() == nil {
 		s.stm.RemoveOldest(len(msgs))
-		fmt.Println("[SleepManager] Phase de sommeil terminée. Mémoire réconciliée, optimisée et souvenirs consolidés retirés de la STM.")
+		log.Println("[SleepManager] Phase de sommeil terminée. Mémoire réconciliée, optimisée et souvenirs consolidés retirés de la STM.")
 	} else {
-		fmt.Println("[SleepManager] Phase de sommeil annulée. Conservation de l'historique STM intact.")
+		log.Println("[SleepManager] Phase de sommeil annulée. Conservation de l'historique STM intact.")
 	}
 }
 
@@ -368,7 +369,7 @@ func (s *SleepManager) IndexExchange(ctx context.Context, userMsg, assistantMsg 
 	s.incrementBusy()
 	defer s.decrementBusy()
 
-	fmt.Println("[SleepManager] Analyse et indexation en temps réel de l'échange...")
+	log.Println("[SleepManager] Analyse et indexation en temps réel de l'échange...")
 
 	systemPrompt := `Tu es le système de mémoire dynamique de Pixel. Ton rôle est d'analyser cet échange et d'en extraire un souvenir à conserver s'il contient des faits réels, personnels, des projets, des décisions, ou des idées/métaphores/réflexions importantes exprimées par l'utilisateur ou par Pixel.
 CRITIQUE :
@@ -478,7 +479,7 @@ func (s *SleepManager) ReflectAndSelfCorrect(ctx context.Context, userMsg string
 	s.incrementBusy()
 	defer s.decrementBusy()
 
-	fmt.Println("[SleepManager] [Métacognition] Signal de correction détecté. Analyse de l'erreur...")
+	log.Println("[SleepManager] [Métacognition] Signal de correction détecté. Analyse de l'erreur...")
 	var conversation strings.Builder
 	for i := len(msgs) - 3; i < len(msgs); i++ {
 		if i >= 0 {
@@ -667,7 +668,7 @@ func (s *SleepManager) AcquireBackgroundContext() context.Context {
 	defer s.mu.Unlock()
 
 	if s.bgCancel != nil {
-		fmt.Println("[SleepManager] Nouveau chat utilisateur détecté. Interruption immédiate de la consolidation/indexation de fond...")
+		log.Println("[SleepManager] Nouveau chat utilisateur détecté. Interruption immédiate de la consolidation/indexation de fond...")
 		s.bgCancel()
 	}
 
@@ -682,7 +683,7 @@ func (s *SleepManager) CancelBackgroundTasks() {
 	defer s.mu.Unlock()
 
 	if s.bgCancel != nil {
-		fmt.Println("[SleepManager] Interruption forcée des tâches de fond en cours pour prioriser le chat utilisateur...")
+		log.Println("[SleepManager] Interruption forcée des tâches de fond en cours pour prioriser le chat utilisateur...")
 		s.bgCancel()
 		s.bgCancel = nil
 		s.bgCtx = nil

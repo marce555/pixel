@@ -71,8 +71,8 @@ func recordLiveLog(tag, cleanMsg string) {
 	}
 
 	liveLogs = append(liveLogs, formatted)
-	if len(liveLogs) > 30 {
-		liveLogs = liveLogs[len(liveLogs)-30:]
+	if len(liveLogs) > 100 {
+		liveLogs = liveLogs[len(liveLogs)-100:]
 	}
 }
 

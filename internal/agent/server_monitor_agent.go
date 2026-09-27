@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -56,7 +57,7 @@ func (s *ServerMonitorAgent) Start(ctx context.Context) {
 	s.mu.Unlock()
 
 	go func() {
-		fmt.Println("[ServerMonitorAgent] Démarré. Surveillance horaire d'appliyou.fr active.")
+		log.Println("[ServerMonitorAgent] Démarré. Surveillance horaire d'appliyou.fr active.")
 
 		// Première vérification après un court délai (1 minute après démarrage)
 		select {
@@ -72,7 +73,7 @@ func (s *ServerMonitorAgent) Start(ctx context.Context) {
 		for {
 			select {
 			case <-ctx.Done():
-				fmt.Println("[ServerMonitorAgent] Arrêt de l'agent de surveillance serveur.")
+				log.Println("[ServerMonitorAgent] Arrêt de l'agent de surveillance serveur.")
 				return
 			case <-ticker.C:
 				settings := s.coreMemory.GetServerMonitorSettings()
@@ -100,7 +101,7 @@ func (s *ServerMonitorAgent) CheckOnce(ctx context.Context) {
 	s.lastCheckTime = time.Now()
 	s.mu.Unlock()
 
-	fmt.Println("[ServerMonitorAgent] Vérification horaire des logs du serveur distant appliyou.fr...")
+	log.Println("[ServerMonitorAgent] Vérification horaire des logs du serveur distant appliyou.fr...")
 
 	// 1. Exécution du skill check_appliyou_logs
 	var rawResult string
@@ -122,7 +123,7 @@ func (s *ServerMonitorAgent) CheckOnce(ctx context.Context) {
 		!strings.Contains(rawResult, "CRITIQUE")
 
 	if isNominal {
-		fmt.Println("[ServerMonitorAgent] Rapport appliyou.fr nominal. Aucun incident, silence radio.")
+		log.Println("[ServerMonitorAgent] Rapport appliyou.fr nominal. Aucun incident, silence radio.")
 		if s.thoughtStream != nil {
 			s.thoughtStream.AddThought("Pensée de Pixel : J'ai vérifié les logs du serveur appliyou.fr. Tous les services sont stables et aucun incident n'est à déplorer.", nil)
 		}
@@ -130,7 +131,7 @@ func (s *ServerMonitorAgent) CheckOnce(ctx context.Context) {
 	}
 
 	// 3. Présence d'anomalie ou d'incident -> Analyse cognitive pour confirmer et formuler l'alerte
-	fmt.Println("[ServerMonitorAgent] Potentielle anomalie détectée sur appliyou.fr. Évaluation par le modèle...")
+	log.Println("[ServerMonitorAgent] Potentielle anomalie détectée sur appliyou.fr. Évaluation par le modèle...")
 	hasIncident, alertMessage, errEval := s.evaluateIncident(ctx, rawResult)
 	if errEval != nil {
 		fmt.Printf("[ServerMonitorAgent] Erreur évaluation LLM : %v\n", errEval)
@@ -142,7 +143,7 @@ func (s *ServerMonitorAgent) CheckOnce(ctx context.Context) {
 	}
 
 	if !hasIncident {
-		fmt.Println("[ServerMonitorAgent] L'évaluation LLM conclut à un faux positif ou une information mineure. Aucune alerte requise.")
+		log.Println("[ServerMonitorAgent] L'évaluation LLM conclut à un faux positif ou une information mineure. Aucune alerte requise.")
 		if s.thoughtStream != nil {
 			s.thoughtStream.AddThought("Pensée de Pixel : Les logs d'appliyou.fr ont été inspectés, pas d'anomalie bloquante pour l'instant.", nil)
 		}

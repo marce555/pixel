@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"log"
 	"sync"
 	"time"
 
@@ -43,6 +44,7 @@ func (ts *ThoughtStream) AddThought(content string, embedding []float32) {
 	if len(ts.thoughts) > ts.maxSize {
 		ts.thoughts = ts.thoughts[1:] // Keep it bounded
 	}
+	log.Printf("[Pensée] %s", content)
 }
 
 // FindResonantThoughts returns thoughts that are semantically close to the target vector.

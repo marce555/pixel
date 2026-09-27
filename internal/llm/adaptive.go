@@ -60,6 +60,17 @@ func (p *AdaptiveProvider) UpdateSettings(activeMode, cloudAPIKey, cloudBaseURL,
 	fmt.Printf("[AdaptiveProvider] Config updated: Mode=%s, CloudModel=%s, LocalModel=%s (Embed=%s)\n", activeMode, cloudModel, localModel, localEmbed)
 }
 
+func (p *AdaptiveProvider) SetTemperature(temp float64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.localProvider != nil {
+		p.localProvider.SetTemperature(temp)
+	}
+	if p.cloudProvider != nil {
+		p.cloudProvider.SetTemperature(temp)
+	}
+}
+
 func (p *AdaptiveProvider) GetActiveMode() string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

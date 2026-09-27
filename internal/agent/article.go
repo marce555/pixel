@@ -14,23 +14,24 @@ Ton rôle est de rédiger un article de blog haut de gamme, complet, captivant, 
 Voici les informations et le contexte récupérés à ce sujet :
 %s
 
-RÈGLES IMPÉRATIVES DE RÉDACTION ET DE STRUCTURE :
-1. EXPANSION ET PROFONDEUR : L'article doit être LONG, RICHE et EXHAUSTIF. Développe chaque concept en profondeur avec des explications concrètes, des cas d'usage réels, des exemples techniques et des analyses de fond. Ne rédige JAMAIS un résumé rapide.
-2. STRUCTURE ÉDITORIALE DÉTAILLÉE :
+RÈGLES IMPÉRATIVES DE RÉDACTION, DE RIGUEUR ET DE NON-HALLUCINATION :
+1. VÉRIFICABILITÉ ET NON-HALLUCINATION STRICTE : Interdiction formelle d'extrapoler ou d'inventer des noms de projets, d'organismes, d'équipes de recherche, de chercheurs, de publications ou d'études de cas spécifiques. Toutes les références, citations et exemples cités doivent être réels, authentiques et vérifiables. Si une donnée factuelle précise manque ou n'est pas directement issue du contexte vérifié, décris le principe ou le mécanisme de manière générale sans jamais nommer de projet ou d'organisme fictif.
+2. EXPANSION ET PROFONDEUR RIGOUREUSE : L'article doit être LONG, RICHE et EXHAUSTIF, mais fondé strictement sur des connaissances scientifiques et techniques avérées. Développe chaque concept en profondeur avec des explications concrètes et des analyses de fond. Ne rédige JAMAIS un résumé rapide ni de théories spéculatives non vérifiées.
+3. STRUCTURE ÉDITORIALE DÉTAILLÉE :
    - Une balise racine <article class="blog-article">...</article> englobant tout le contenu.
    - Une introduction immersive posant la problématique, le contexte et les enjeux clés.
    - Entre 5 et 7 grandes sections structurées avec des titres <h2>.
    - Sous chaque grande section, 2 à 3 sous-sections substantielles avec des sous-titres <h3> pour traiter les aspects techniques ou méthodologiques.
    - Une conclusion prospective et analytique résumant les perspectives d'avenir.
-3. FORMATAGE STRICTEMENT EN HTML SÉMANTIQUE PUR (INTERDICTION ABSOLUE DU MARKDOWN) :
+4. FORMATAGE STRICTEMENT EN HTML SÉMANTIQUE PUR (INTERDICTION ABSOLUE DU MARKDOWN) :
    - N'utilise AUCUNE syntaxe Markdown (JAMAIS de '#', '##', '###', JAMAIS de '**', JAMAIS de '*' ou '-' pour les listes, JAMAIS de '$$').
    - Rédige et formate le contenu EXCLUSIVEMENT en HTML sémantique propre avec :
      * Des balises <p> obligatoires pour TOUS les paragraphes sans exception.
      * Des balises <strong> pour mettre en valeur les termes clés.
      * Des listes à puces <ul><li>...</li></ul> ou numérotées <ol><li>...</li></ol> pour aérer la lecture.
-     * RÈGLE OBLIGATOIRE : Au moins un TABLEAU HTML complet (<table>, <thead>, <tbody>, <tr>, <th>, <td>) résumant des données chiffrées, comparant des solutions ou synthétisant les points clés.
+     * RÈGLE OBLIGATOIRE : Au moins un TABLEAU HTML complet (<table>, <thead>, <tbody>, <tr>, <th>, <td>) de RÉFÉRENCES ET SOURCES DOCUMENTAIRES VÉRIFIABLES en fin d'article (colonnes : Référence / Source, Type de Ressource [ex: Spécification / RFC, Documentation officielle, Étude scientifique, Standard], Description & Thématique couverte). Ce tableau doit comporter EXCLUSIVEMENT des ressources réelles et vérifiables en lien avec le sujet (ne JAMAIS inventer de référence ou de projet fictif).
      * RÈGLE OBLIGATOIRE (si sujet technique/info/sciences) : Au moins un ou plusieurs blocs de code HTML complets formatés avec <pre><code class="language-...">...</code></pre> (ex: language-bash, language-python, language-json, language-yaml).
-4. Ne mets AUCUNE formule de politesse du type "Voici l'article", commence directement avec les délimiteurs ci-dessous.
+5. Ne mets AUCUNE formule de politesse du type "Voici l'article", commence directement avec les délimiteurs ci-dessous.
 
 Formatte ta réponse EXACTEMENT avec la structure suivante :
 

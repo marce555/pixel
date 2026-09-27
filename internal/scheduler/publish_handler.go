@@ -198,21 +198,22 @@ Ton rôle est de rédiger un article de blog haut de gamme, complet, captivant, 
 Voici les informations et le contexte récupérés à ce sujet :
 %s
 
-RÈGLES IMPÉRATIVES DE RÉDACTION ET DE STRUCTURE :
-1. EXPANSION ET PROFONDEUR : L'article doit être LONG, RICHE et EXHAUSTIF. Développe chaque concept en profondeur avec des explications concrètes, des cas d'usage réels, des exemples techniques et des analyses de fond. Ne rédige JAMAIS un résumé rapide.
-2. STRUCTURE HTML SÉMANTIQUE STRICTE : Organise l'article avec :
+RÈGLES IMPÉRATIVES DE RÉDACTION, DE RIGUEUR ET DE NON-HALLUCINATION :
+1. VÉRIFICABILITÉ ET NON-HALLUCINATION STRICTE : Interdiction formelle d'extrapoler ou d'inventer des noms de projets, d'organismes, d'équipes de recherche, de chercheurs, de publications ou d'études de cas spécifiques. Toutes les références, citations et exemples cités doivent être réels, authentiques et vérifiables. Si une donnée factuelle précise manque ou n'est pas directement issue du contexte vérifié, décris le principe ou le mécanisme de manière générale sans jamais nommer de projet ou d'organisme fictif.
+2. EXPANSION ET PROFONDEUR RIGOUREUSE : L'article doit être LONG, RICHE et EXHAUSTIF, mais fondé strictement sur des connaissances scientifiques et techniques avérées. Développe chaque concept en profondeur avec des explications concrètes et des analyses de fond. Ne rédige JAMAIS un résumé rapide ni de théories spéculatives non vérifiées.
+3. STRUCTURE HTML SÉMANTIQUE STRICTE : Organise l'article avec :
    - Une balise racine <article class="blog-article"> enveloppant tout l'article.
    - Une introduction immersive posant la problématique, le contexte et les enjeux clés.
    - Au moins 5 à 7 grandes sections distinctes avec des titres <h2>.
    - Des sous-sections détaillées avec des sous-titres <h3> sous chaque grande section (2 à 3 sous-sections par section).
    - Une conclusion prospective et synthétique.
-3. FORMATAGE HTML SÉMANTIQUE EXCLUSIF (AUCUN MARKDOWN AUTORISÉ) :
+4. FORMATAGE HTML SÉMANTIQUE EXCLUSIF (AUCUN MARKDOWN AUTORISÉ) :
    - N'UTILISE AUCUNE SYNTAXE MARKDOWN (#, ##, **, *, _, backticks, $$, etc.).
    - Utilise EXCLUSIVEMENT du code HTML pur : <p> pour chaque paragraphe, <strong> pour mettre en valeur les termes clés, <em> pour l'emphase.
    - Intègre systématiquement des listes à puces (<ul>, <li>) ou numérotées (<ol>, <li>) pour aérer la lecture.
-   - RÈGLE OBLIGATOIRE : Intègre au moins un TABLEAU HTML complet (<table>, <thead>, <tbody>, <tr>, <th>, <td>) résumant des données, comparant des solutions ou synthétisant les points clés.
-   - RÈGLE OBLIGATOIRE : Si le sujet concerne l'informatique, le SysOps, le DevOps, la programmation, l'IA ou les sciences, intègre au moins un ou plusieurs blocs de code HTML complets formatés avec <pre><code class="language-...">...</code></pre> (ex: language-bash, language-python, language-json, language-yaml).
-4. Ne mets AUCUNE formule de politesse du type "Voici l'article", commence directement avec les délimiteurs ci-dessous.
+   - RÈGLE OBLIGATOIRE : Intègre au moins un TABLEAU HTML complet (<table>, <thead>, <tbody>, <tr>, <th>, <td>) de RÉFÉRENCES ET SOURCES DOCUMENTAIRES VÉRIFIABLES (colonnes : Référence / Source, Type de ressource, Description & Thématique couverte) résumant des données réelles et vérifiables.
+   - RÈGLE OBLIGATOIRE (si sujet technique/info/sciences) : Au moins un ou plusieurs blocs de code HTML complets formatés avec <pre><code class="language-...">...</code></pre> (ex: language-bash, language-python, language-json, language-yaml).
+5. Ne mets AUCUNE formule de politesse du type "Voici l'article", commence directement avec les délimiteurs ci-dessous.
 
 Formatte ta réponse EXACTEMENT avec la structure suivante :
 

@@ -18,15 +18,18 @@ type OpenAICompatibleProvider struct {
 	APIKey         string
 	ChatModel      string
 	EmbeddingModel string
+	Temperature    *float64
 	Client         *http.Client
 }
 
 func NewOpenAICompatibleProvider(baseURL, apiKey, chatModel, embeddingModel string) *OpenAICompatibleProvider {
+	defaultTemp := 0.2
 	return &OpenAICompatibleProvider{
 		BaseURL:        baseURL,
 		APIKey:         apiKey,
 		ChatModel:      chatModel,
 		EmbeddingModel: embeddingModel,
+		Temperature:    &defaultTemp,
 		Client: &http.Client{
 			Timeout: 900 * time.Second,
 			Transport: &http.Transport{
@@ -39,11 +42,16 @@ func NewOpenAICompatibleProvider(baseURL, apiKey, chatModel, embeddingModel stri
 	}
 }
 
+func (p *OpenAICompatibleProvider) SetTemperature(temp float64) {
+	p.Temperature = &temp
+}
+
 type chatRequest struct {
-	Model     string    `json:"model"`
-	Messages  []Message `json:"messages"`
-	Stream    bool      `json:"stream,omitempty"`
-	MaxTokens int       `json:"max_tokens,omitempty"`
+	Model       string    `json:"model"`
+	Messages    []Message `json:"messages"`
+	Stream      bool      `json:"stream,omitempty"`
+	MaxTokens   int       `json:"max_tokens,omitempty"`
+	Temperature *float64  `json:"temperature,omitempty"`
 }
 
 type chatResponse struct {
@@ -109,9 +117,10 @@ func (p *OpenAICompatibleProvider) GenerateWithMaxTokens(ctx context.Context, me
 		maxTokens = 2048
 	}
 	reqBody := chatRequest{
-		Model:     p.ChatModel,
-		Messages:  messages,
-		MaxTokens: maxTokens,
+		Model:       p.ChatModel,
+		Messages:    messages,
+		MaxTokens:   maxTokens,
+		Temperature: p.Temperature,
 	}
 	
 	jsonData, err := json.Marshal(reqBody)
@@ -184,10 +193,11 @@ func (p *OpenAICompatibleProvider) GenerateStream(ctx context.Context, messages 
 		defer close(errs)
 
 		reqBody := chatRequest{
-			Model:     p.ChatModel,
-			Messages:  messages,
-			Stream:    true,
-			MaxTokens: 4096,
+			Model:       p.ChatModel,
+			Messages:    messages,
+			Stream:      true,
+			MaxTokens:   4096,
+			Temperature: p.Temperature,
 		}
 
 		jsonData, err := json.Marshal(reqBody)

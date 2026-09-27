@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/marce555/pixel/internal/llm"
 )
@@ -243,6 +244,72 @@ func formatSource(source string) string {
 	return "[SOURCE: Curiosité autonome de Pixel (Wikipédia/Pensées)]"
 }
 
+// FoldString normalizes a string by converting to lowercase and stripping common diacritics/accents.
+func FoldString(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		switch r {
+		case 'é', 'è', 'ê', 'ë':
+			b.WriteRune('e')
+		case 'à', 'â', 'ä', 'á':
+			b.WriteRune('a')
+		case 'î', 'ï', 'í':
+			b.WriteRune('i')
+		case 'ô', 'ö', 'ó':
+			b.WriteRune('o')
+		case 'ù', 'û', 'ü', 'ú':
+			b.WriteRune('u')
+		case 'ç':
+			b.WriteRune('c')
+		case 'ñ':
+			b.WriteRune('n')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+var frenchStopWords = map[string]bool{
+	"alors": true, "après": true, "apres": true, "aussi": true, "autre": true, "autres": true,
+	"avec": true, "chez": true, "comme": true, "dans": true, "des": true, "donc": true,
+	"elle": true, "elles": true, "est": true, "étaient": true, "etaient": true, "étais": true,
+	"etais": true, "était": true, "etait": true, "être": true, "etre": true, "eux": true,
+	"fait": true, "font": true, "ils": true, "ici": true, "les": true, "leur": true,
+	"leurs": true, "lui": true, "mais": true, "mes": true, "mien": true, "moi": true,
+	"mon": true, "même": true, "meme": true, "nos": true, "notre": true, "nous": true,
+	"par": true, "pas": true, "peut": true, "peux": true, "pour": true, "quand": true,
+	"que": true, "quel": true, "quelle": true, "quelles": true, "quels": true, "qui": true,
+	"quoi": true, "sans": true, "ses": true, "sien": true, "sont": true, "sous": true,
+	"sur": true, "tes": true, "toi": true, "ton": true, "tous": true, "tout": true,
+	"toute": true, "toutes": true, "une": true, "uns": true, "unes": true, "vos": true,
+	"votre": true, "vous": true, "ces": true, "cet": true, "cette": true, "ceux": true,
+	"celles": true, "concernant": true, "propos": true, "sujet": true, "souvenir": true,
+	"souvenirs": true, "rappelle": true, "souviens": true, "sais": true, "veux": true,
+	"dis": true, "te": true, "se": true, "y": true, "en": true, "de": true,
+	"du": true, "la": true, "le": true, "un": true, "au": true, "aux": true,
+	"parle": true, "parler": true,
+}
+
+// ExtractKeywords extracts normalized, accent-folded topical keywords from a query string.
+func ExtractKeywords(query string) []string {
+	folded := FoldString(query)
+	var keywords []string
+	clean := strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return r
+		}
+		return ' '
+	}, folded)
+
+	for _, word := range strings.Fields(clean) {
+		if len(word) >= 3 && !frenchStopWords[word] {
+			keywords = append(keywords, word)
+		}
+	}
+	return keywords
+}
+
 func (l *LTM) SearchMemory(ctx context.Context, queryString string, queryEmbedding []float32, topK int) ([]string, error) {
 	l.mu.RLock()
 
@@ -251,17 +318,7 @@ func (l *LTM) SearchMemory(ctx context.Context, queryString string, queryEmbeddi
 		return []string{}, nil
 	}
 
-	// Tokenize query for hybrid tag/keyword matching
-	queryWords := []string{}
-	cleanedQuery := strings.ToLower(queryString)
-	for _, word := range strings.Fields(cleanedQuery) {
-		word = strings.Trim(word, ".,!?\"'()*-")
-		if len(word) >= 3 {
-			if word != "les" && word != "des" && word != "une" && word != "que" && word != "qui" && word != "dans" && word != "avec" && word != "pour" && word != "par" && word != "sur" {
-				queryWords = append(queryWords, word)
-			}
-		}
-	}
+	keywords := ExtractKeywords(queryString)
 
 	now := time.Now()
 	var results []searchResult
@@ -283,65 +340,78 @@ func (l *LTM) SearchMemory(ctx context.Context, queryString string, queryEmbeddi
 		}
 		seenTexts[summaryKey] = true
 
-		// Factor 1: Vector similarity (weight: 0.5)
+		// Factor 1: Vector similarity
 		var cosineSim float32
 		if len(queryEmbedding) > 0 && len(entry.Embedding) > 0 {
 			cosineSim = cosineSimilarity(queryEmbedding, entry.Embedding)
 		}
 
-		// Factor 2: Tag/keyword boosting (weight: 0.2)
+		// Factor 2: Accent-folded keyword & tag matching
+		foldedTitle := FoldString(entry.Title)
+		foldedSummary := FoldString(entry.ActionSummary)
 		tagMatches := 0
-		lowerTitle := strings.ToLower(entry.Title)
-		lowerSummary := strings.ToLower(entry.ActionSummary)
-		for _, qw := range queryWords {
-			if strings.Contains(lowerTitle, qw) || strings.Contains(lowerSummary, qw) {
+		for _, kw := range keywords {
+			if strings.Contains(foldedTitle, kw) || strings.Contains(foldedSummary, kw) {
 				tagMatches++
 			}
 			for _, tag := range entry.Tags {
-				if strings.Contains(strings.ToLower(tag), qw) {
-					tagMatches++
+				if strings.Contains(FoldString(tag), kw) {
+					tagMatches += 2 // Tags are high quality semantic markers
 					break
 				}
 			}
 		}
-		tagBoost := float32(tagMatches) * 0.15
-		if tagBoost > 1.0 {
-			tagBoost = 1.0
-		}
 
-		// Factor 3: Importance (weight: 0.2)
-		importance := entry.Importance
-
-		// Factor 4: Recency (weight: 0.1) — logarithmic decay over 30 days
-		daysSince := now.Sub(entry.Timestamp).Hours() / 24.0
-		recency := float32(1.0 / (1.0 + daysSince/30.0))
-
-		// Combined score
-		score := (cosineSim * 0.5) + (tagBoost * 0.2) + (importance * 0.2) + (recency * 0.1)
-
-		// Source bonus: conversation and self-expression memories are prioritized over curiosity
-		if entry.Source == "conversation" || entry.Source == "self_expression" || entry.Source == "proactive" {
-			score += 0.15
-		}
-
-		// Negative memory penalty: deprioritize memories about failures to remember or lack of information
+		// Negative memory filter: skip memories about failures to remember
 		negativePhrases := []string{
-			"n'a pas pu", "n'ont pas pu", "pas pu", "aucune information", "aucune info",
-			"pas d'information", "pas d'informations", "n'étaient pas enregistrées", "n'était pas enregistrée",
-			"pas enregistrée", "pas enregistrées", "ne se rappelle pas", "ne se rappelaient pas",
-			"sans succès", "ne trouve pas", "n'a aucune", "n'ont aucune", "ne disposent pas", "ne dispose pas",
-			"informations manquantes", "information manquante", "n'est pas enregistrée", "n'est pas enregistré",
+			"aucun souvenir", "aucune information", "pas pu", "ne trouve pas", "aucune trace",
+			"informations manquantes", "pas d'information", "ne se rappelle pas", "ne se rappelaient pas",
 		}
 		isNegative := false
 		for _, phrase := range negativePhrases {
-			if strings.Contains(lowerSummary, phrase) {
+			if strings.Contains(foldedSummary, FoldString(phrase)) {
 				isNegative = true
 				break
 			}
 		}
 		if isNegative {
-			score -= 0.5 // Massive penalty to push negative memories to the bottom!
+			continue
 		}
+
+		// Semantic score: normalize background noise threshold (cosine > 0.50 in typical embed models)
+		var semanticScore float32
+		if cosineSim > 0.50 {
+			semanticScore = (cosineSim - 0.50) / 0.50
+		}
+
+		// Lexical score from keyword / tag matches
+		var lexicalScore float32
+		if tagMatches > 0 {
+			lexicalScore = float32(tagMatches) * 0.25
+			if lexicalScore > 1.0 {
+				lexicalScore = 1.0
+			}
+		}
+
+		// GATE: If a memory has neither genuine semantic similarity nor keyword match,
+		// DO NOT let recency/importance resurrect it as an unrelated false positive.
+		if semanticScore < 0.20 && lexicalScore == 0 {
+			continue
+		}
+
+		// Combined relevance
+		relevance := (semanticScore * 0.65) + (lexicalScore * 0.35)
+
+		// Subtle tie-breakers (recency & importance as modifiers, not dominators)
+		daysSince := now.Sub(entry.Timestamp).Hours() / 24.0
+		recencyBonus := float32(1.0 / (1.0 + daysSince/30.0)) * 0.05
+		importanceBonus := entry.Importance * 0.05
+		sourceBonus := float32(0.0)
+		if entry.Source == "conversation" || entry.Source == "self_expression" {
+			sourceBonus = 0.05
+		}
+
+		score := relevance + recencyBonus + importanceBonus + sourceBonus
 
 		results = append(results, searchResult{
 			index:     i,
@@ -361,11 +431,11 @@ func (l *LTM) SearchMemory(ctx context.Context, queryString string, queryEmbeddi
 
 	var topTexts []string
 	for i := 0; i < topK && i < len(results); i++ {
-		if results[i].score > 0.12 {
+		if results[i].score > 0.25 {
 			sourceLabel := formatSource(results[i].source)
 			formattedText := fmt.Sprintf("[%s] %s : %s", results[i].timestamp.Format("2006-01-02 15:04"), sourceLabel, results[i].text)
 			topTexts = append(topTexts, formattedText)
-			// Update access tracking (async to avoid blocking)
+			// Update access tracking
 			l.markAccessed(results[i].index)
 		}
 	}
@@ -388,9 +458,6 @@ func (l *LTM) markAccessed(index int) {
 		if l.Entries[index].Importance > 1.0 {
 			l.Entries[index].Importance = 1.0
 		}
-		// NOTE: Timestamp is intentionally NOT updated here.
-		// Overwriting Timestamp was a bug: it made old memories appear as recent,
-		// corrupting chronological ordering and recency scoring.
 		l.Entries[index].LastDecayed = time.Now()
 	}
 }
@@ -409,18 +476,25 @@ func (l *LTM) SearchPersonalByKeywords(keywords []string, topK int) []string {
 	var results []scored
 	seen := make(map[string]bool)
 
+	var foldedKeywords []string
+	for _, kw := range keywords {
+		f := FoldString(strings.TrimSpace(kw))
+		if len(f) >= 3 {
+			foldedKeywords = append(foldedKeywords, f)
+		}
+	}
+
 	for _, entry := range l.Entries {
-		if entry.Source != "conversation" {
+		if entry.Source != "conversation" && entry.Category != "Personal" && entry.Source != "self_expression" {
 			continue
 		}
-		summaryLow := strings.ToLower(entry.ActionSummary)
-		titleLow := strings.ToLower(entry.Title)
-		tagsLow := strings.ToLower(strings.Join(entry.Tags, " "))
+		summaryFold := FoldString(entry.ActionSummary)
+		titleFold := FoldString(entry.Title)
+		tagsFold := FoldString(strings.Join(entry.Tags, " "))
 
 		matches := 0
-		for _, kw := range keywords {
-			kwLow := strings.ToLower(kw)
-			if strings.Contains(summaryLow, kwLow) || strings.Contains(titleLow, kwLow) || strings.Contains(tagsLow, kwLow) {
+		for _, kw := range foldedKeywords {
+			if strings.Contains(summaryFold, kw) || strings.Contains(titleFold, kw) || strings.Contains(tagsFold, kw) {
 				matches++
 			}
 		}
@@ -429,7 +503,7 @@ func (l *LTM) SearchPersonalByKeywords(keywords []string, topK int) []string {
 		}
 
 		// Deduplicate
-		key := summaryLow
+		key := summaryFold
 		if len(key) > 80 {
 			key = key[:80]
 		}

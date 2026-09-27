@@ -255,7 +255,7 @@ func containsWholeWord(s, word string) bool {
 		return ' '
 	}, s)
 	for _, w := range strings.Fields(clean) {
-		if w == word {
+		if w == word || (len(word) >= 4 && strings.TrimSuffix(w, "s") == word) {
 			return true
 		}
 	}
@@ -276,10 +276,10 @@ func (a *SuperiorAgent) shouldTriggerRAG(input string, action string, query stri
 	if action == "rag" && query != "" {
 		return true
 	}
-	clean := strings.ToLower(input)
+	clean := memory.FoldString(input)
 	keywords := []string{
 		// Mémoire explicite (y compris variantes de transcription vocale)
-		"balthasar", "souvenir", "référence", "rappelle", "rappel", "rappelles", "rapelle",
+		"balthasar", "souvenir", "souvenirs", "theologie", "philosophie", "reference", "rappelle", "rappel", "rappelles", "rapelle",
 		"rapelles", "rapelle-toi", "rappelle-toi", "souviens", "souvient", "te souviens",
 		"tu te souviens", "tu t'en souviens", "te rappelles", "tu rappelles",
 		"tu te rappelles", "t'en souviens", "tu t'en rappelles",
@@ -307,12 +307,13 @@ func (a *SuperiorAgent) shouldTriggerRAG(input string, action string, query stri
 		"projet", "ville", "habite", "vit à", "vit a",
 	}
 	for _, kw := range keywords {
-		if strings.Contains(kw, " ") || strings.Contains(kw, "'") || strings.Contains(kw, "-") {
-			if strings.Contains(clean, kw) {
+		kwFolded := memory.FoldString(kw)
+		if strings.Contains(kwFolded, " ") || strings.Contains(kwFolded, "'") || strings.Contains(kwFolded, "-") {
+			if strings.Contains(clean, kwFolded) {
 				return true
 			}
 		} else {
-			if containsWholeWord(clean, kw) {
+			if containsWholeWord(clean, kwFolded) {
 				return true
 			}
 		}
@@ -1136,7 +1137,11 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 
 		hasMemories := false
 		if len(queryVector) > 0 {
-			memories, _ := a.ltm.SearchMemory(ctx, input, queryVector, 8)
+			searchQuery := input
+			if queryStr != "" && queryStr != input {
+				searchQuery = queryStr + " " + input
+			}
+			memories, _ := a.ltm.SearchMemory(ctx, searchQuery, queryVector, 8)
 			if len(memories) > 0 {
 				joined := strings.Join(memories, "\n")
 				maxLen := 2400

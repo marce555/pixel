@@ -60,6 +60,10 @@ func (idx *MemoryIndex) indexEntry(position int, entry MemoryEntry) {
 		tagLower := strings.ToLower(strings.TrimSpace(tag))
 		if tagLower != "" {
 			idx.byTag[tagLower] = append(idx.byTag[tagLower], position)
+			tagFolded := FoldString(tagLower)
+			if tagFolded != tagLower {
+				idx.byTag[tagFolded] = append(idx.byTag[tagFolded], position)
+			}
 		}
 	}
 

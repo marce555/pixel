@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/marce555/pixel/internal/llm"
@@ -101,7 +102,12 @@ func (r *ReviewerAgent) Review(ctx context.Context, draft *scheduler.ArticleDraf
 		{Role: llm.RoleUser, Content: prompt},
 	}
 
-	res, errGen := llm.GenerateWithContinuation(ctx, r.provider, messages, 6144, func(pass int) {
+	continuationPrompt := "Tu es en train de rédiger la section finale de ---REVIEWED_CONTENT---.\n" +
+		"Poursuis immédiatement le texte HTML là où la dernière phrase a été coupée, jusqu'à la conclusion complète et au tableau de références HTML.\n" +
+		"RÈGLE ABSOLUE : N'émets AUCUN délimiteur (AUCUN '---REVIEW_NOTES---', AUCUN '---REVIEWED_CONTENT---', etc.), AUCUN préambule, AUCUNE note de révision, AUCUN mot-clé, et AUCUN titre.\n" +
+		"Ne recommence PAS l'article au début. Écris UNIQUEMENT la suite directe du code HTML pour terminer la conclusion, inclure le tableau de sources avec DOIs et clore avec </article>."
+
+	res, errGen := llm.GenerateWithCustomContinuation(ctx, r.provider, messages, 6144, continuationPrompt, func(pass int) {
 		fmt.Printf("[ReviewerAgent] Plafond de tokens atteint lors de la relecture (finish_reason=length) : poursuite automatique #%d...\n", pass)
 	})
 	if errGen != nil {
@@ -147,25 +153,122 @@ func (r *ReviewerAgent) fallbackValidation(draft *scheduler.ArticleDraft) (strin
 	return draft.Title, draft.Keywords, content, strings.Join(notes, "; "), nil
 }
 
+var (
+	reReviewNotesTag   = regexp.MustCompile(`(?i)(?:^|\n)\s*(?:---+|###)?\s*REVIEW_NOTES\s*(?:---+|###)?[:.]?`)
+	reReviewedTitleTag = regexp.MustCompile(`(?i)(?:^|\n)\s*(?:---+|###)?\s*REVIEWED_TITLE\s*(?:---+|###)?[:.]?`)
+	reReviewedKeysTag  = regexp.MustCompile(`(?i)(?:^|\n)\s*(?:---+|###)?\s*REVIEWED_KEYWORDS\s*(?:---+|###)?[:.]?`)
+	reReviewedContTag  = regexp.MustCompile(`(?i)(?:^|\n)\s*(?:---+|###)?\s*REVIEWED_CONTENT\s*(?:---+|###)?[:.]?`)
+)
+
 func parseReviewOutput(output string) (title, keywords, content, notes string) {
-	// Extract notes
-	notes = extractBetweenDelimiters(output, "---REVIEW_NOTES---", "---REVIEWED_TITLE---")
-	if notes == "" {
-		notes = extractBetweenDelimiters(output, "---REVIEW_NOTES---", "---REVIEWED_CONTENT---")
+	notesMatch := reReviewNotesTag.FindStringIndex(output)
+	titleMatch := reReviewedTitleTag.FindStringIndex(output)
+	keysMatch := reReviewedKeysTag.FindStringIndex(output)
+	contMatch := reReviewedContTag.FindStringIndex(output)
+
+	// 1. Extract notes
+	if notesMatch != nil {
+		notesStart := notesMatch[1]
+		notesEnd := len(output)
+		if titleMatch != nil && titleMatch[0] > notesStart {
+			notesEnd = titleMatch[0]
+		} else if keysMatch != nil && keysMatch[0] > notesStart {
+			notesEnd = keysMatch[0]
+		} else if contMatch != nil && contMatch[0] > notesStart {
+			notesEnd = contMatch[0]
+		}
+		notes = strings.TrimSpace(output[notesStart:notesEnd])
 	}
 
-	// Extract title
-	title = extractBetweenDelimiters(output, "---REVIEWED_TITLE---", "---REVIEWED_KEYWORDS---")
-	if title == "" {
-		title = extractBetweenDelimiters(output, "---REVIEWED_TITLE---", "---REVIEWED_CONTENT---")
+	// 2. Extract title
+	if titleMatch != nil {
+		titleStart := titleMatch[1]
+		titleEnd := len(output)
+		if keysMatch != nil && keysMatch[0] > titleStart {
+			titleEnd = keysMatch[0]
+		} else if contMatch != nil && contMatch[0] > titleStart {
+			titleEnd = contMatch[0]
+		}
+		title = strings.TrimSpace(output[titleStart:titleEnd])
 	}
 
-	// Extract keywords
-	keywords = extractBetweenDelimiters(output, "---REVIEWED_KEYWORDS---", "---REVIEWED_CONTENT---")
+	// 3. Extract keywords
+	if keysMatch != nil {
+		keysStart := keysMatch[1]
+		keysEnd := len(output)
+		if contMatch != nil && contMatch[0] > keysStart {
+			keysEnd = contMatch[0]
+		}
+		keywords = strings.TrimSpace(output[keysStart:keysEnd])
+	}
 
-	// Extract content
-	if idx := strings.Index(output, "---REVIEWED_CONTENT---"); idx != -1 {
-		content = strings.TrimSpace(output[idx+len("---REVIEWED_CONTENT---"):])
+	// 4. Extract content
+	if contMatch != nil {
+		content = strings.TrimSpace(output[contMatch[1]:])
+	} else {
+		// Fallback: If no explicit ---REVIEWED_CONTENT--- delimiter was found
+		if keysMatch != nil {
+			content = strings.TrimSpace(output[keysMatch[1]:])
+		} else if titleMatch != nil {
+			content = strings.TrimSpace(output[titleMatch[1]:])
+		} else if notesMatch != nil {
+			content = strings.TrimSpace(output[notesMatch[1]:])
+		} else {
+			content = strings.TrimSpace(output)
+		}
+	}
+
+	// 5. Check if content contains a secondary REVIEW_NOTES delimiter (e.g. from an automatic continuation pass)
+	if subNotesMatch := reReviewNotesTag.FindStringIndex(content); subNotesMatch != nil {
+		subNotesStart := subNotesMatch[1]
+		subNotesRest := content[subNotesStart:]
+		subTitleMatch := reReviewedTitleTag.FindStringIndex(subNotesRest)
+		subContMatch := reReviewedContTag.FindStringIndex(subNotesRest)
+
+		var extraNotes string
+		var remainingContent string
+		if subContMatch != nil {
+			extraNotes = strings.TrimSpace(subNotesRest[:subContMatch[0]])
+			remainingContent = strings.TrimSpace(subNotesRest[subContMatch[1]:])
+		} else if subTitleMatch != nil {
+			extraNotes = strings.TrimSpace(subNotesRest[:subTitleMatch[0]])
+			remainingContent = strings.TrimSpace(subNotesRest[subTitleMatch[1]:])
+		} else {
+			lines := strings.Split(subNotesRest, "\n")
+			var noteLines []string
+			var contentLines []string
+			inContent := false
+			for _, l := range lines {
+				tr := strings.TrimSpace(l)
+				if !inContent && (strings.HasPrefix(tr, "<h") || strings.HasPrefix(tr, "<article") || (strings.HasPrefix(tr, "<p>") && !strings.Contains(tr, "article a été") && !strings.Contains(tr, "relecture"))) {
+					inContent = true
+				}
+				if inContent {
+					contentLines = append(contentLines, l)
+				} else {
+					noteLines = append(noteLines, l)
+				}
+			}
+			extraNotes = strings.TrimSpace(strings.Join(noteLines, "\n"))
+			remainingContent = strings.TrimSpace(strings.Join(contentLines, "\n"))
+		}
+
+		if extraNotes != "" {
+			if notes != "" {
+				notes = notes + " ; " + extraNotes
+			} else {
+				notes = extraNotes
+			}
+		}
+
+		part1 := strings.TrimSpace(content[:subNotesMatch[0]])
+		if len(part1) > 0 && len(remainingContent) > 0 {
+			content = part1 + "\n" + remainingContent
+		} else if len(remainingContent) > 0 {
+			content = remainingContent
+		} else {
+			content = part1
+		}
 	}
 
 	title = strings.TrimSpace(cleanMarkdownWraps(title))
@@ -173,21 +276,8 @@ func parseReviewOutput(output string) (title, keywords, content, notes string) {
 	content = strings.TrimSpace(cleanMarkdownWraps(content))
 	notes = strings.TrimSpace(cleanMarkdownWraps(notes))
 
+	// Guarantee no leaked delimiters or meta notes in content
+	content = scheduler.PurgeLeakedReviewMeta(content, title)
+
 	return title, keywords, content, notes
-}
-
-func extractBetweenDelimiters(text, startDelim, endDelim string) string {
-	startIdx := strings.Index(text, startDelim)
-	if startIdx == -1 {
-		return ""
-	}
-	startIdx += len(startDelim)
-
-	rest := text[startIdx:]
-	endIdx := strings.Index(rest, endDelim)
-	if endIdx == -1 {
-		return strings.TrimSpace(rest)
-	}
-
-	return strings.TrimSpace(rest[:endIdx])
 }

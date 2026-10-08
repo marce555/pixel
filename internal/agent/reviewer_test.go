@@ -115,3 +115,90 @@ func TestReviewerAgentFallbackWhenNoProvider(t *testing.T) {
 		t.Errorf("expected non-empty notes")
 	}
 }
+
+func TestParseReviewOutputWithPunctuation(t *testing.T) {
+	input := `---REVIEW_NOTES---.
+L'article a été audité avec succès. Les formules ont été corrigées.
+
+---REVIEWED_TITLE---:
+La Chasse aux Biosignatures Moléculaires
+
+---REVIEWED_KEYWORDS---
+exoplanet atmosphere, spectroscopy
+
+---REVIEWED_CONTENT---
+<p>L'exploration de l'Univers est fascinante.</p>
+<h2>Détection</h2>
+<p>Les données spectroscopiques confirment la présence de molécules.</p>
+`
+	title, keywords, content, notes := parseReviewOutput(input)
+
+	if title != "La Chasse aux Biosignatures Moléculaires" {
+		t.Errorf("unexpected title: %q", title)
+	}
+	if keywords != "exoplanet atmosphere, spectroscopy" {
+		t.Errorf("unexpected keywords: %q", keywords)
+	}
+	if !strings.Contains(notes, "L'article a été audité avec succès") {
+		t.Errorf("unexpected notes: %q", notes)
+	}
+	if strings.Contains(content, "REVIEW_NOTES") || strings.Contains(content, "REVIEWED_") {
+		t.Errorf("delimiters leaked into content:\n%s", content)
+	}
+	if !strings.Contains(content, "L'exploration de l'Univers") {
+		t.Errorf("expected content to contain intro paragraph")
+	}
+}
+
+func TestParseReviewOutputWithContinuationLeak(t *testing.T) {
+	// Simulates the exact bug where continuation appended a secondary review block into content
+	input := `---REVIEW_NOTES---
+Relecture initiale passée.
+
+---REVIEWED_TITLE---
+Exoplanètes et Biosignatures
+
+---REVIEWED_KEYWORDS---
+exoplanet astronomy
+
+---REVIEWED_CONTENT---
+<p>Première partie de l'article sur les biosignatures.</p>
+<h2>Variations Saisonnières</h2>
+<p>Les saisons influencent la chimie atmosphérique.</p>
+---REVIEW_NOTES---.
+L'article a été achevé en complétant la phrase tronquée sur les stratégies d'atténuation des variations saisonnières, en fermant toutes les balises HTML ouvertes.
+
+La Chasse aux Biosignatures Moléculaires
+
+exoplanet atmosphere, spectroscopy
+
+<p>Deuxième partie de l'article avec la conclusion finale.</p>
+`
+	title, keywords, content, notes := parseReviewOutput(input)
+
+	if title != "Exoplanètes et Biosignatures" {
+		t.Errorf("unexpected title: %q", title)
+	}
+	if keywords != "exoplanet astronomy" {
+		t.Errorf("unexpected keywords: %q", keywords)
+	}
+	if !strings.Contains(notes, "Relecture initiale passée") {
+		t.Errorf("expected initial notes in notes: %q", notes)
+	}
+	if !strings.Contains(notes, "L'article a été achevé") {
+		t.Errorf("expected secondary notes in notes: %q", notes)
+	}
+	// Content MUST NOT contain delimiter or notes
+	if strings.Contains(content, "---REVIEW_NOTES---") || strings.Contains(content, "REVIEW_NOTES") {
+		t.Errorf("REVIEW_NOTES delimiter leaked into content: %s", content)
+	}
+	if strings.Contains(content, "L'article a été achevé") {
+		t.Errorf("reviewer notes explanation leaked into content: %s", content)
+	}
+	if strings.Contains(content, "exoplanet atmosphere, spectroscopy") {
+		t.Errorf("leaked keywords should not be in content: %s", content)
+	}
+	if !strings.Contains(content, "Première partie") || !strings.Contains(content, "Deuxième partie") {
+		t.Errorf("expected article content to be preserved: %s", content)
+	}
+}

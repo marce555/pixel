@@ -36,6 +36,10 @@ func CleanToSemanticHTML(raw string, title string) string {
 		return ""
 	}
 
+	// Purge any leaked review delimiters, reviewer notes, and deduplicate doubled sections
+	content = PurgeLeakedReviewMeta(content, title)
+	content = DeduplicateSections(content)
+
 	// 1. Remove trailing truncated characters (e.g. unclosed '<' or '</' or '\')
 	for {
 		trimmed := strings.TrimSpace(content)
@@ -710,12 +714,147 @@ $1`
 	// 6. Tables
 	content = PurgeGenericPlaceholderTables(content, title)
 
+	// 7. Purge any leaked review metadata and deduplicate duplicate sections
+	content = PurgeLeakedReviewMeta(content, title)
+	content = DeduplicateSections(content)
+
 	return content
 }
 
-var reStripTags = regexp.MustCompile(`(?s)<[^>]*>`)
+var (
+	reStripTags        = regexp.MustCompile(`(?s)<[^>]*>`)
+	reReviewMetaDelims = regexp.MustCompile(`(?is)<p>\s*(?:---|###)?\s*REVIEW(?:ED)?_(?:NOTES|TITLE|KEYWORDS|CONTENT)[^<]*</p>`)
+	reReviewMetaBare   = regexp.MustCompile(`(?im)^\s*(?:---|###)?\s*REVIEW(?:ED)?_(?:NOTES|TITLE|KEYWORDS|CONTENT).*?$`)
+	reReviewNotesParas = regexp.MustCompile(`(?is)<p>\s*(?:L'article a été (?:achevé|audité|relu|corrigé)|Relecture effectuée|Résumé des vérifications effectuées|J'ai (?:audité|corrigé|vérifié)).*?</p>`)
+	reKeywordsParas    = regexp.MustCompile(`(?is)<p>\s*[a-z0-9\s-]+(?:,\s*[a-z0-9\s-]+){3,}\.?\s*</p>`)
+	reHeadingTag       = regexp.MustCompile(`(?i)<h([23])[^>]*>(.*?)</h[1-6]>`)
+)
 
 // StripHTML removes all HTML tags and collapses whitespace.
 func StripHTML(s string) string {
 	return strings.Join(strings.Fields(reStripTags.ReplaceAllString(s, " ")), " ")
+}
+
+// PurgeLeakedReviewMeta removes any review delimiters, reviewer notes summaries,
+// repeated title paragraphs, and Unsplash keyword paragraphs that leaked into the article content.
+func PurgeLeakedReviewMeta(content, title string) string {
+	if strings.TrimSpace(content) == "" {
+		return content
+	}
+
+	// 1. Remove delimiter markers (<p>---REVIEW_NOTES---...</p> or bare lines)
+	content = reReviewMetaDelims.ReplaceAllString(content, "")
+	content = reReviewMetaBare.ReplaceAllString(content, "")
+
+	// 2. Remove reviewer explanation paragraphs
+	content = reReviewNotesParas.ReplaceAllString(content, "")
+
+	// 3. Remove standalone Unsplash keywords lines (e.g. <p>exoplanet atmosphere, spectroscopy, methane...</p>)
+	content = reKeywordsParas.ReplaceAllString(content, "")
+
+	// 4. Remove repeated standalone title paragraph (outside heading tags)
+	if strings.TrimSpace(title) != "" {
+		escapedTitle := regexp.QuoteMeta(strings.TrimSpace(title))
+		reTitlePara := regexp.MustCompile(`(?is)<p>\s*` + escapedTitle + `\.?\s*</p>`)
+		content = reTitlePara.ReplaceAllString(content, "")
+	}
+
+	return content
+}
+
+// DeduplicateSections detects duplicate <h2> or <h3> sections (or repeated full articles)
+// and keeps only the first occurrence while preserving unique reference tables.
+func DeduplicateSections(content string) string {
+	if strings.TrimSpace(content) == "" {
+		return content
+	}
+
+	locs := reHeadingTag.FindAllStringIndex(content, -1)
+	if len(locs) <= 1 {
+		return content
+	}
+
+	type section struct {
+		heading string
+		raw     string
+	}
+
+	var sections []section
+	// Preamble before first heading
+	if locs[0][0] > 0 {
+		sections = append(sections, section{
+			heading: "",
+			raw:     content[:locs[0][0]],
+		})
+	}
+
+	for i := 0; i < len(locs); i++ {
+		start := locs[i][0]
+		end := len(content)
+		if i+1 < len(locs) {
+			end = locs[i+1][0]
+		}
+		rawSec := content[start:end]
+		m := reHeadingTag.FindStringSubmatch(rawSec)
+		hText := ""
+		if len(m) > 2 {
+			hText = strings.ToLower(strings.TrimSpace(StripHTML(m[2])))
+		}
+		sections = append(sections, section{
+			heading: hText,
+			raw:     rawSec,
+		})
+	}
+
+	seenHeadings := make(map[string]bool)
+	var dedupedSections []string
+	var savedTables []string
+
+	for _, sec := range sections {
+		if sec.heading != "" {
+			if seenHeadings[sec.heading] {
+				// Duplicate section: save any table it might have contained before dropping
+				if strings.Contains(strings.ToLower(sec.raw), "<table") {
+					reTable := regexp.MustCompile(`(?is)(<div class="table-responsive">.*?</div>|<table.*?</table>)`)
+					if tm := reTable.FindString(sec.raw); tm != "" {
+						savedTables = append(savedTables, tm)
+					}
+				}
+				continue
+			}
+			seenHeadings[sec.heading] = true
+		}
+		dedupedSections = append(dedupedSections, sec.raw)
+	}
+
+	result := strings.Join(dedupedSections, "")
+
+	// Append any unique tables that were in duplicate sections if not already in result
+	for _, tbl := range savedTables {
+		if !strings.Contains(result, tbl) {
+			if strings.Contains(result, "</article>") {
+				result = strings.Replace(result, "</article>", "\n"+tbl+"\n</article>", 1)
+			} else {
+				result = result + "\n" + tbl
+			}
+		}
+	}
+
+	// Check if intro paragraphs were duplicated in the text
+	if len(sections) > 0 && sections[0].heading == "" {
+		preambleText := strings.TrimSpace(sections[0].raw)
+		reFirstP := regexp.MustCompile(`(?is)<p>(.*?)</p>`)
+		if pMatch := reFirstP.FindString(preambleText); pMatch != "" && len(pMatch) > 60 {
+			pIdx1 := strings.Index(result, pMatch)
+			if pIdx1 != -1 {
+				pIdx2 := strings.Index(result[pIdx1+len(pMatch):], pMatch)
+				if pIdx2 != -1 {
+					subIdx := pIdx1 + len(pMatch) + pIdx2
+					result = result[:subIdx] + result[subIdx+len(pMatch):]
+				}
+			}
+		}
+	}
+
+	return result
 }

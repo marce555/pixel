@@ -214,6 +214,10 @@ func NewAuditAndFixArticlesHandlerWithBibliographicAuditor(broadcaster EventBroa
 				title = art.Title
 			}
 
+			// Pre-clean content from any leaked review metadata and duplicate sections
+			content = PurgeLeakedReviewMeta(content, title)
+			content = DeduplicateSections(content)
+
 			// Diagnostic checks
 			hasTable := strings.Contains(content, "<table")
 			hasCodeBlock := strings.Contains(content, "<pre><code")
@@ -226,6 +230,12 @@ func NewAuditAndFixArticlesHandlerWithBibliographicAuditor(broadcaster EventBroa
 			length := len(content)
 
 			var issues []string
+			if strings.Contains(extracted.Content, "REVIEW_NOTES") || strings.Contains(extracted.Content, "REVIEWED_") {
+				issues = append(issues, "Notes de relecture ou délimiteurs méta présents dans le corps de l'article")
+			}
+			if DeduplicateSections(extracted.Content) != extracted.Content {
+				issues = append(issues, "Sections ou paragraphes dupliqués dans le corps de l'article")
+			}
 			if !hasTable {
 				issues = append(issues, "Absence de tableau HTML (<table>)")
 			}

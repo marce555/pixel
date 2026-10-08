@@ -194,3 +194,66 @@ func TestSanitizeDeepContentBaseEditingAndStoica(t *testing.T) {
 		t.Errorf("expected real seminal paper Bintu et al. DOI to be present, got:\n%s", cleaned)
 	}
 }
+
+func TestPurgeLeakedReviewMeta(t *testing.T) {
+	input := `<article>
+<p>Introduction sur les biosignatures.</p>
+<p>---REVIEW_NOTES---.</p>
+<p>L'article a été achevé en complétant la phrase tronquée sur les stratégies d'atténuation des variations saisonnières, en fermant toutes les balises HTML ouvertes.</p>
+<p>La Chasse aux Biosignatures Moléculaires</p>
+<p>exoplanet atmosphere, spectroscopy, methane, nitrogen oxide, space telescope, scientific discovery, data analysis, astronomy.</p>
+<p>Suite normale de l'article.</p>
+</article>`
+
+	cleaned := PurgeLeakedReviewMeta(input, "La Chasse aux Biosignatures Moléculaires")
+
+	if strings.Contains(cleaned, "REVIEW_NOTES") {
+		t.Errorf("expected REVIEW_NOTES to be purged, got:\n%s", cleaned)
+	}
+	if strings.Contains(cleaned, "L'article a été achevé") {
+		t.Errorf("expected review notes explanation to be purged, got:\n%s", cleaned)
+	}
+	if strings.Contains(cleaned, "exoplanet atmosphere, spectroscopy") {
+		t.Errorf("expected Unsplash keywords line to be purged, got:\n%s", cleaned)
+	}
+	if strings.Contains(cleaned, "<p>La Chasse aux Biosignatures Moléculaires</p>") {
+		t.Errorf("expected repeated title paragraph to be purged, got:\n%s", cleaned)
+	}
+	if !strings.Contains(cleaned, "Introduction sur les biosignatures") || !strings.Contains(cleaned, "Suite normale de l'article") {
+		t.Errorf("expected legitimate article paragraphs to be preserved, got:\n%s", cleaned)
+	}
+}
+
+func TestDeduplicateSections(t *testing.T) {
+	input := `<article>
+<p>Intro de l'article.</p>
+<h2>Le Méthane : Un Marqueur Potentiel</h2>
+<p>Le méthane est un biomarqueur clé.</p>
+<h2>Le Protoxyde d'Azote</h2>
+<p>Le N2O est également scruté.</p>
+<h2>Le Méthane : Un Marqueur Potentiel</h2>
+<p>Le méthane est un biomarqueur clé.</p>
+<div class="table-responsive"><table class="table"><tr><td>Ref 1</td></tr></table></div>
+<h2>Conclusion</h2>
+<p>Fin de l'article.</p>
+</article>`
+
+	deduped := DeduplicateSections(input)
+
+	// Section "Le Méthane : Un Marqueur Potentiel" must appear only ONCE
+	countMethane := strings.Count(deduped, "Le Méthane : Un Marqueur Potentiel")
+	if countMethane != 1 {
+		t.Errorf("expected 1 occurrence of section heading, got %d in:\n%s", countMethane, deduped)
+	}
+
+	// Table from duplicate section must be preserved!
+	if !strings.Contains(deduped, "<table") {
+		t.Errorf("expected table from duplicate section to be preserved in:\n%s", deduped)
+	}
+
+	// Conclusion must be preserved
+	if !strings.Contains(deduped, "<h2>Conclusion</h2>") {
+		t.Errorf("expected Conclusion to be preserved in:\n%s", deduped)
+	}
+}
+

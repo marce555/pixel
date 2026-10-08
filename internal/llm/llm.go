@@ -67,6 +67,11 @@ func GenerateDetailedWithFallback(ctx context.Context, provider Provider, messag
 // it triggers an automatic continuation loop (up to 2 passes) to seamlessly complete the output and conclusion.
 // It also invokes onLengthDetected callback if provided, allowing callers to log an alert.
 func GenerateWithContinuation(ctx context.Context, provider Provider, messages []Message, maxTokens int, onLengthDetected func(pass int)) (string, error) {
+	return GenerateWithCustomContinuation(ctx, provider, messages, maxTokens, "", onLengthDetected)
+}
+
+// GenerateWithCustomContinuation generates a completion with a specialized prompt for subsequent continuation turns.
+func GenerateWithCustomContinuation(ctx context.Context, provider Provider, messages []Message, maxTokens int, continuationPrompt string, onLengthDetected func(pass int)) (string, error) {
 	res, err := GenerateDetailedWithFallback(ctx, provider, messages, maxTokens)
 	if err != nil {
 		return "", err
@@ -74,6 +79,10 @@ func GenerateWithContinuation(ctx context.Context, provider Provider, messages [
 
 	content := res.Content
 	finishReason := res.FinishReason
+
+	if continuationPrompt == "" {
+		continuationPrompt = "Continue immédiatement là où ton texte a été coupé pour achever complètement l'article et poser la conclusion. Ferme proprement toutes les balises HTML sans répéter ce qui précède."
+	}
 
 	// If finish_reason indicates length truncation, execute automatic continuation loop
 	pass := 0
@@ -86,7 +95,7 @@ func GenerateWithContinuation(ctx context.Context, provider Provider, messages [
 		continuationMessages := append([]Message{}, messages...)
 		continuationMessages = append(continuationMessages,
 			Message{Role: RoleAssistant, Content: content},
-			Message{Role: RoleUser, Content: "Continue immédiatement là où ton texte a été coupé pour achever complètement l'article et poser la conclusion. Ferme proprement toutes les balises HTML sans répéter ce qui précède."},
+			Message{Role: RoleUser, Content: continuationPrompt},
 		)
 
 		nextRes, nextErr := GenerateDetailedWithFallback(ctx, provider, continuationMessages, maxTokens)

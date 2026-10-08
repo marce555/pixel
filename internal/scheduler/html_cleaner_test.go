@@ -114,3 +114,83 @@ def calculate_bayes(p, l):
 		t.Errorf("expected references and documentary sources section")
 	}
 }
+
+func TestCleanIncompleteSentences(t *testing.T) {
+	input := `<p>La convection lithosphérique influence la tectonique des plaques. Bien que les effets sur la tectonique</p>
+<p>Autre paragraphe complet et bien clos.</p>
+<p>Tandis que</p>`
+
+	cleaned := CleanIncompleteSentences(input)
+
+	if strings.Contains(cleaned, "Bien que les effets sur la tectonique") {
+		t.Errorf("expected truncated dangling sentence to be removed, got:\n%s", cleaned)
+	}
+	if !strings.Contains(cleaned, "La convection lithosphérique influence la tectonique des plaques.") {
+		t.Errorf("expected valid preceding sentence to be preserved, got:\n%s", cleaned)
+	}
+	if strings.Contains(cleaned, "Tandis que") {
+		t.Errorf("expected isolated dangling paragraph to be removed, got:\n%s", cleaned)
+	}
+}
+
+func TestPurgeGenericPlaceholderTables(t *testing.T) {
+	input := `<div class="table-responsive">
+<table>
+<tr><td>Documentation Officielle &amp; Spécifications</td><td>Spécification technique / RFC / Standard</td></tr>
+</table>
+</div>`
+
+	cleaned := PurgeGenericPlaceholderTables(input, "L'Échafaudage Invisible : Dynamique Glaciaire")
+
+	if strings.Contains(cleaned, "RFC / Standard") {
+		t.Errorf("expected RFC placeholder to be purged for climate article, got:\n%s", cleaned)
+	}
+	if !strings.Contains(cleaned, "Rapports GIEC / Copernicus") {
+		t.Errorf("expected GIEC/Copernicus replacement for climate article, got:\n%s", cleaned)
+	}
+}
+
+func TestSanitizeDeepContentBiotechAndKyoto(t *testing.T) {
+	input := `<p>Des essais cliniques, soutenus par des entreprises comme ExaCell Therapeutics, ont montré des résultats encourageants.</p>
+<p>Des projets menés par le laboratoire de Shinya Yamanaka à l'Institut RIKEN et de Masayo Takahashi à l'Université du Japon à Kyoto ont démontré la faisabilité.</p>`
+
+	cleaned := SanitizeDeepContent(input, "L'Architecte de la Mémoire Synthétique")
+
+	if strings.Contains(cleaned, "ExaCell Therapeutics") {
+		t.Errorf("expected ExaCell Therapeutics to be purged, got:\n%s", cleaned)
+	}
+	if !strings.Contains(cleaned, "Vertex Pharmaceuticals et CRISPR Therapeutics") {
+		t.Errorf("expected Vertex and CRISPR Therapeutics to be present, got:\n%s", cleaned)
+	}
+	if strings.Contains(cleaned, "Université du Japon à Kyoto") {
+		t.Errorf("expected 'Université du Japon à Kyoto' to be purged, got:\n%s", cleaned)
+	}
+	if !strings.Contains(cleaned, "Université de Kyoto") {
+		t.Errorf("expected 'Université de Kyoto' to be present, got:\n%s", cleaned)
+	}
+}
+
+func TestSanitizeDeepContentBaseEditingAndStoica(t *testing.T) {
+	input := `<p>Les technologies d'édition génomique comme les variants "base editing" et "prime editing", permettent de modifier des séquences d'ADN en minimisant les dommages à l'ADN par rapport aux systèmes de coupure classique (CRISPR-Cas9), tout en nécessitant des cassures double-brin transitoires lors de l'activation de la désoxyribonucléase.</p>
+<table>
+<tr><td>Stoica, M. et al. (2016)</td><td>Nature Biotechnology</td><td>Article de recherche</td><td>Mémoire synthétique <a href="https://doi.org/10.1038/nbt.3529">DOI: 10.1038/nbt.3529</a></td></tr>
+</table>`
+
+	cleaned := SanitizeDeepContent(input, "L'Architecte de la Mémoire Synthétique")
+
+	// Must NOT claim that base editing requires double-strand breaks
+	if strings.Contains(cleaned, "nécessitant des cassures double-brin") {
+		t.Errorf("expected contradiction about needing DSBs to be eliminated, got:\n%s", cleaned)
+	}
+	if !strings.Contains(cleaned, "sans induire de cassure double-brin") {
+		t.Errorf("expected 'sans induire de cassure double-brin' to be asserted, got:\n%s", cleaned)
+	}
+
+	// Must NOT keep Delaware law DOI 10.1038/nbt.3529
+	if strings.Contains(cleaned, "10.1038/nbt.3529") {
+		t.Errorf("expected Delaware law DOI to be replaced, got:\n%s", cleaned)
+	}
+	if !strings.Contains(cleaned, "10.1126/science.aab2956") {
+		t.Errorf("expected real seminal paper Bintu et al. DOI to be present, got:\n%s", cleaned)
+	}
+}

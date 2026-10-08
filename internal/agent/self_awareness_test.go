@@ -180,4 +180,3 @@ func TestSuperiorAgentSelfAwarenessFastPath(t *testing.T) {
 		t.Fatalf("expected action 'self_awareness', got '%s'", resp.Action)
 	}
 }
-

@@ -18,16 +18,16 @@ import (
 type MemoryEntry struct {
 	ID            string    `json:"id"`
 	Category      string    `json:"category"`
-	Source        string    `json:"source"`          // "conversation" | "curiosity" | "system"
+	Source        string    `json:"source"` // "conversation" | "curiosity" | "system"
 	Title         string    `json:"title"`
 	ActionSummary string    `json:"action_summary"`
-	Tags          []string  `json:"tags"`            // Searchable tags (replaces keywords)
+	Tags          []string  `json:"tags"` // Searchable tags (replaces keywords)
 	Embedding     []float32 `json:"embedding"`
 	Timestamp     time.Time `json:"timestamp"`
-	Importance    float32   `json:"importance"`      // 0.0-1.0, decays over time
-	AccessCount   int       `json:"access_count"`    // How many times this memory was retrieved
-	LastAccessed  time.Time `json:"last_accessed"`   // Last retrieval time
-	LastDecayed   time.Time `json:"last_decayed"`    // When the importance was last decayed
+	Importance    float32   `json:"importance"`    // 0.0-1.0, decays over time
+	AccessCount   int       `json:"access_count"`  // How many times this memory was retrieved
+	LastAccessed  time.Time `json:"last_accessed"` // Last retrieval time
+	LastDecayed   time.Time `json:"last_decayed"`  // When the importance was last decayed
 }
 
 // LTM (Long Term Memory) represents the RAG database.
@@ -404,7 +404,7 @@ func (l *LTM) SearchMemory(ctx context.Context, queryString string, queryEmbeddi
 
 		// Subtle tie-breakers (recency & importance as modifiers, not dominators)
 		daysSince := now.Sub(entry.Timestamp).Hours() / 24.0
-		recencyBonus := float32(1.0 / (1.0 + daysSince/30.0)) * 0.05
+		recencyBonus := float32(1.0/(1.0+daysSince/30.0)) * 0.05
 		importanceBonus := entry.Importance * 0.05
 		sourceBonus := float32(0.0)
 		if entry.Source == "conversation" || entry.Source == "self_expression" {
@@ -580,9 +580,10 @@ func (l *LTM) GetTopPersonalByImportance(topK int) []string {
 	}
 	return out
 }
+
 type RawSearchResult struct {
-	Entry     MemoryEntry
-	Score     float32
+	Entry MemoryEntry
+	Score float32
 }
 
 // SearchRawEntries searches the vector database and returns raw entries with IDs.
@@ -599,7 +600,7 @@ func (l *LTM) SearchRawEntries(ctx context.Context, categoryFilter string, query
 		if categoryFilter != "" && entry.Category != categoryFilter {
 			continue // Skip if category doesn't match the filter
 		}
-		
+
 		score := cosineSimilarity(queryEmbedding, entry.Embedding)
 		results = append(results, RawSearchResult{
 			Entry: entry,
@@ -892,7 +893,7 @@ func (l *LTM) SearchSerendipitousMemory() string {
 	importRand := time.Now().UnixNano()
 	index := int(importRand % int64(len(l.Entries)))
 	entry := l.Entries[index]
-	
+
 	titlePart := ""
 	if entry.Title != "" {
 		titlePart = " (" + entry.Title + ")"

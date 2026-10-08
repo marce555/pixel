@@ -17,7 +17,7 @@ func NewAgentTaskHandler(provider llm.Provider, searcher WebSearcher, broadcaste
 		// ÉTAPE 1 : Planification Cognitive
 		// ==========================================
 		task.AppendLog("Étape 1 : Conception du plan d'action cognitive...")
-		
+
 		planPrompt := fmt.Sprintf(`Tu es le planificateur cognitif de Pixel. L'utilisateur a demandé la tâche complexe suivante :
 "%s"
 
@@ -45,7 +45,7 @@ Réponds de manière extrêmement concise, sous forme de liste à puces simple, 
 		// ÉTAPE 2 : Recherche d'informations en direct
 		// ==========================================
 		task.AppendLog("Étape 2 : Lancement des agents de recherche web en arrière-plan...")
-		
+
 		// Demander au LLM de générer la requête de recherche idéale
 		searchQueryPrompt := fmt.Sprintf(`Basé sur la requête de l'utilisateur : "%s"
 Génère UNIQUEMENT la requête de recherche Google idéale en un seul mot-clé ou courte phrase pour trouver les informations les plus fraîches et pertinentes.

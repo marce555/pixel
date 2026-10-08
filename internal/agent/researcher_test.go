@@ -59,7 +59,7 @@ func (m *MockLLM) CreateEmbedding(ctx context.Context, text string) ([]float32, 
 func TestWebResearcherConsultGemini(t *testing.T) {
 	mockBase := &MockLLM{Response: "test"}
 	mockCloud := &MockLLM{Response: "Gemini Response"}
-	
+
 	adaptive := &MockAdaptiveProvider{
 		Provider:      mockBase,
 		CloudProvider: mockCloud,

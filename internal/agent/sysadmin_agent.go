@@ -44,7 +44,7 @@ func (s *SysadminAgent) executeSSH(ctx context.Context, target string, command s
 	if err != nil {
 		output = fmt.Sprintf("Erreur SSH: %v\nOutput: %s", err, output)
 	}
-	
+
 	// Truncate to avoid exploding context
 	if len(output) > 5000 {
 		output = output[:5000] + "\n...[TRONQUÉ]..."
@@ -141,12 +141,12 @@ Pour terminer l'investigation (OBLIGATOIRE QUAND TU AS FINI) :
 				action.Target = server
 			}
 			fmt.Printf("[SysadminAgent] Exécution SSH sur %s : %s\n", action.Target, action.Command)
-			
+
 			output := s.executeSSH(ctx, action.Target, action.Command)
 			fmt.Printf("[SysadminAgent] Résultat obtenu (%d caractères).\n", len(output))
-			
+
 			scratchpad += fmt.Sprintf("### Commande: `%s`\n**Résultat:**\n```\n%s\n```\n\n", action.Command, output)
-			
+
 			messages = append(messages, llm.Message{Role: llm.RoleUser, Content: fmt.Sprintf("Résultat de la commande: \n%s\n\nQue fais-tu maintenant ?", output)})
 		} else {
 			messages = append(messages, llm.Message{Role: llm.RoleUser, Content: "Action inconnue. Utilise 'ssh_cmd' ou 'finish'."})
@@ -187,10 +187,10 @@ N'inclus que des informations pertinentes et vraies.`, time.Now().Format("2006-0
 		fmt.Printf("[SysadminAgent] Erreur génération rapport : %v\n", err)
 		return scratchpad
 	}
-	
+
 	finalReport := strings.TrimSpace(report)
 	finalReport += "\n\n---\n\n### 📜 Données Brutes Récupérées (Terminal)\n\n" + scratchpad
-	
+
 	return finalReport
 }
 

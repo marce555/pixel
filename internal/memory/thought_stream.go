@@ -108,5 +108,3 @@ func (ts *ThoughtStream) GetRecentThoughts(limit int) []Thought {
 	}
 	return results
 }
-
-

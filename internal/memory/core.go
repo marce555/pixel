@@ -28,7 +28,7 @@ type DynamicGoal struct {
 }
 
 type LLMSettings struct {
-	ActiveMode   string `json:"active_mode"`   // "local", "cloud", "auto"
+	ActiveMode   string `json:"active_mode"` // "local", "cloud", "auto"
 	CloudAPIKey  string `json:"cloud_api_key"`
 	CloudBaseURL string `json:"cloud_base_url"`
 	CloudModel   string `json:"cloud_model"`
@@ -347,7 +347,7 @@ func (cm *CoreMemory) UpdateLateralVector(newThought []float32) {
 func (cm *CoreMemory) GetAutoCorrections() []string {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
-	
+
 	if len(cm.AutoCorrections) == 0 {
 		return []string{}
 	}
@@ -372,7 +372,7 @@ func (cm *CoreMemory) AddAutoCorrection(rule string) {
 	if len(cm.AutoCorrections) > 6 {
 		cm.AutoCorrections = cm.AutoCorrections[1:]
 	}
-	
+
 	cm.mu.Unlock()
 	cm.Save()
 	cm.mu.Lock()
@@ -529,5 +529,3 @@ func (cm *CoreMemory) ResolveDynamicGoalsByKeywords(keywords []string) []string 
 func (cm *CoreMemory) Reload() {
 	cm.Load()
 }
-
-

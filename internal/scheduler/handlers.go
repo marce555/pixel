@@ -89,7 +89,7 @@ func NewPlayMusicHandler(resolver MusicResolver, s *Scheduler) TaskHandler {
 		filteredEnv = append(filteredEnv, "PATH="+localBin+":"+currentPath)
 
 		ipcSocket := fmt.Sprintf("/tmp/mpvsocket_%s", task.ID)
-		
+
 		// Run mpv with native PipeWire audio output (CachyOS default)
 		args := []string{
 			"--no-video",
@@ -105,7 +105,7 @@ func NewPlayMusicHandler(resolver MusicResolver, s *Scheduler) TaskHandler {
 
 		cmd := exec.CommandContext(ctx, "mpv", args...)
 		cmd.Env = filteredEnv
-		
+
 		task.SetCmd(cmd)
 
 		task.AppendLog("Lancement du lecteur audio mpv...")
@@ -121,12 +121,12 @@ func NewPlayMusicHandler(resolver MusicResolver, s *Scheduler) TaskHandler {
 		if s != nil {
 			go func() {
 				nextTask := s.GetNextPendingMusicTask(task.ID)
-				
+
 				// Autoplay (Infinite Radio) logic
 				if nextTask == nil && s.AutoQueueCallback != nil && task.ResolvedTitle != "" {
 					task.AppendLog("File d'attente vide. Appel de l'Autoplay (Radio Infinie)...")
 					s.TriggerAutoplay(task.ResolvedTitle)
-					
+
 					// Wait for the LLM to generate and enqueue the next song (poll for up to 60s)
 					for i := 0; i < 30; i++ {
 						time.Sleep(2 * time.Second)
@@ -136,7 +136,7 @@ func NewPlayMusicHandler(resolver MusicResolver, s *Scheduler) TaskHandler {
 						}
 					}
 				}
-				
+
 				if nextTask != nil {
 					nextTask.AppendLog("Pré-résolution de la musique en arrière-plan...")
 					u, title, dir, err := resolver.ResolveMusicURL(nextTask.Payload)
@@ -169,7 +169,7 @@ func NewPlayMusicHandler(resolver MusicResolver, s *Scheduler) TaskHandler {
 						continue
 					}
 					fmt.Fprintf(conn, `{"command": ["get_property", "time-remaining"]}`+"\n")
-					
+
 					var response struct {
 						Data  float64 `json:"data"`
 						Error string  `json:"error"`
@@ -185,9 +185,9 @@ func NewPlayMusicHandler(resolver MusicResolver, s *Scheduler) TaskHandler {
 								if task.ReleaseSem != nil {
 									task.ReleaseSem()
 								}
-								
+
 								task.AppendLog("Mixage en cours (Fade-out progressif sur 5s)...")
-								
+
 								// Start Fade-Out Goroutine
 								go func() {
 									fadeTicker := time.NewTicker(100 * time.Millisecond)

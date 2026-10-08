@@ -56,7 +56,8 @@ type chatRequest struct {
 
 type chatResponse struct {
 	Choices []struct {
-		Message Message `json:"message"`
+		Message      Message `json:"message"`
+		FinishReason string  `json:"finish_reason"`
 	} `json:"choices"`
 }
 
@@ -109,12 +110,21 @@ func parseAPIError(statusCode int, bodyBytes []byte) error {
 }
 
 func (p *OpenAICompatibleProvider) Generate(ctx context.Context, messages []Message) (string, error) {
-	return p.GenerateWithMaxTokens(ctx, messages, 2048)
+	return p.GenerateWithMaxTokens(ctx, messages, 4096)
 }
 
 func (p *OpenAICompatibleProvider) GenerateWithMaxTokens(ctx context.Context, messages []Message, maxTokens int) (string, error) {
+	res, err := p.GenerateDetailed(ctx, messages, maxTokens)
+	if err != nil {
+		return "", err
+	}
+	return res.Content, nil
+}
+
+// GenerateDetailed implements DetailedProvider interface to expose FinishReason.
+func (p *OpenAICompatibleProvider) GenerateDetailed(ctx context.Context, messages []Message, maxTokens int) (GenerationResult, error) {
 	if maxTokens <= 0 {
-		maxTokens = 2048
+		maxTokens = 4096
 	}
 	reqBody := chatRequest{
 		Model:       p.ChatModel,
@@ -122,21 +132,21 @@ func (p *OpenAICompatibleProvider) GenerateWithMaxTokens(ctx context.Context, me
 		MaxTokens:   maxTokens,
 		Temperature: p.Temperature,
 	}
-	
+
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
-		return "", err
+		return GenerationResult{}, err
 	}
 
 	var resp *http.Response
 	for attempt := 1; attempt <= 8; attempt++ {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return "", ctxErr
+			return GenerationResult{}, ctxErr
 		}
 		baseURL := strings.TrimSuffix(p.BaseURL, "/")
 		req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/chat/completions", bytes.NewBuffer(jsonData))
 		if err != nil {
-			return "", err
+			return GenerationResult{}, err
 		}
 
 		req.Header.Set("Content-Type", "application/json")
@@ -150,13 +160,13 @@ func (p *OpenAICompatibleProvider) GenerateWithMaxTokens(ctx context.Context, me
 		}
 
 		if attempt == 8 {
-			return "", fmt.Errorf("after 8 attempts, failed to contact LLM: %w", err)
+			return GenerationResult{}, fmt.Errorf("after 8 attempts, failed to contact LLM: %w", err)
 		}
 
 		fmt.Printf("[LLM Warning] Connection error (attempt %d/8): %v. Retrying in 1.5s...\n", attempt, err)
 		select {
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return GenerationResult{}, ctx.Err()
 		case <-time.After(1500 * time.Millisecond):
 		}
 	}
@@ -164,24 +174,27 @@ func (p *OpenAICompatibleProvider) GenerateWithMaxTokens(ctx context.Context, me
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		return "", parseAPIError(resp.StatusCode, bodyBytes)
+		return GenerationResult{}, parseAPIError(resp.StatusCode, bodyBytes)
 	}
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", err
+		return GenerationResult{}, err
 	}
 
 	var chatResp chatResponse
 	if err := json.Unmarshal(bodyBytes, &chatResp); err != nil {
-		return "", err
+		return GenerationResult{}, err
 	}
 
 	if len(chatResp.Choices) > 0 {
-		return chatResp.Choices[0].Message.Content, nil
+		return GenerationResult{
+			Content:      chatResp.Choices[0].Message.Content,
+			FinishReason: chatResp.Choices[0].FinishReason,
+		}, nil
 	}
 
-	return "", fmt.Errorf("no choices returned. Raw response: %s", parseAPIError(resp.StatusCode, bodyBytes))
+	return GenerationResult{}, fmt.Errorf("no choices returned. Raw response: %s", parseAPIError(resp.StatusCode, bodyBytes))
 }
 
 func (p *OpenAICompatibleProvider) GenerateStream(ctx context.Context, messages []Message) (<-chan string, <-chan error) {

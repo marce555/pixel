@@ -22,28 +22,90 @@ const (
 	DraftStatusPublishing DraftStatus = "publishing"
 	DraftStatusPublished  DraftStatus = "published"
 	DraftStatusFailed     DraftStatus = "failed"
+
+	// Statuts du cycle de vérification factuelle indépendant
+	DraftStatusFactChecking      DraftStatus = "fact_checking"
+	DraftStatusFactChecked       DraftStatus = "fact_checked"
+	DraftStatusRejectedFactCheck DraftStatus = "rejected_factcheck"
 )
+
+// Verdicts possibles pour une affirmation vérifiée.
+const (
+	ClaimConfirmed    = "confirmé"
+	ClaimImprecise    = "imprécis"
+	ClaimUnverifiable = "non vérifiable"
+	ClaimFalse        = "faux"
+)
+
+// Verdicts globaux du vérificateur factuel.
+const (
+	FactCheckValidated = "VALIDÉ"
+	FactCheckCorrected = "CORRIGÉ"
+	FactCheckRejected  = "REJETÉ"
+	FactCheckSkipped   = "NON EFFECTUÉ"
+)
+
+// ClaimVerdict is the fact-checker's verdict on a single verifiable claim of an article.
+type ClaimVerdict struct {
+	Claim       string `json:"claim"`
+	Excerpt     string `json:"excerpt,omitempty"`
+	Kind        string `json:"kind,omitempty"`
+	Verdict     string `json:"verdict"`
+	Evidence    string `json:"evidence,omitempty"`
+	SourceURL   string `json:"source_url,omitempty"`
+	Correction  string `json:"correction,omitempty"`
+	Applied     bool   `json:"applied"`
+	IsReference bool   `json:"is_reference,omitempty"`
+}
+
+// FactCheckReport summarizes the independent fact-checking cycle on an article.
+type FactCheckReport struct {
+	Verdict        string         `json:"verdict"`
+	Model          string         `json:"model"`
+	Claims         []ClaimVerdict `json:"claims"`
+	Confirmed      int            `json:"confirmed"`
+	Imprecise      int            `json:"imprecise"`
+	Unverifiable   int            `json:"unverifiable"`
+	False          int            `json:"false"`
+	Corrections    int            `json:"corrections"`
+	RemovedRefs    int            `json:"removed_refs"`
+	SourcesVisited []string       `json:"sources_visited,omitempty"`
+	Summary        string         `json:"summary,omitempty"`
+	Warnings       []string       `json:"warnings,omitempty"`
+	CheckedAt      time.Time      `json:"checked_at"`
+}
+
+// WasAdjusted reports whether the fact-checker had to modify Pixel's statements.
+func (r *FactCheckReport) WasAdjusted() bool {
+	return r != nil && (r.Corrections > 0 || r.RemovedRefs > 0)
+}
 
 // ArticleDraft represents an article stored in the persistent temporary cache.
 type ArticleDraft struct {
-	ID              string      `json:"id"`
-	Title           string      `json:"title"`
-	Topic           string      `json:"topic"`
-	Category        string      `json:"category"`
-	Keywords        string      `json:"keywords"`
-	RawContent      string      `json:"raw_content"`
-	ReviewedContent string      `json:"reviewed_content,omitempty"`
-	ReviewNotes     string      `json:"review_notes,omitempty"`
-	Status          DraftStatus `json:"status"`
-	ErrorLog        string      `json:"error_log,omitempty"`
-	RetryCount      int         `json:"retry_count"`
-	CreatedAt       time.Time   `json:"created_at"`
-	UpdatedAt       time.Time   `json:"updated_at"`
-	PublishedAt     *time.Time  `json:"published_at,omitempty"`
+	ID                 string                    `json:"id"`
+	Title              string                    `json:"title"`
+	Topic              string                    `json:"topic"`
+	Category           string                    `json:"category"`
+	Keywords           string                    `json:"keywords"`
+	RawContent         string                    `json:"raw_content"`
+	ReviewedContent    string                    `json:"reviewed_content,omitempty"`
+	ReviewNotes        string                    `json:"review_notes,omitempty"`
+	FactCheckedContent string                    `json:"fact_checked_content,omitempty"`
+	FactCheck          *FactCheckReport          `json:"fact_check,omitempty"`
+	BiblioAudit        *BibliographicAuditReport `json:"biblio_audit,omitempty"`
+	Status             DraftStatus               `json:"status"`
+	ErrorLog           string                    `json:"error_log,omitempty"`
+	RetryCount         int                       `json:"retry_count"`
+	CreatedAt          time.Time                 `json:"created_at"`
+	UpdatedAt          time.Time                 `json:"updated_at"`
+	PublishedAt        *time.Time                `json:"published_at,omitempty"`
 }
 
-// GetEffectiveContent returns the reviewed content if available, or the raw content otherwise.
+// GetEffectiveContent returns the fact-checked content if available, then the reviewed content, or the raw content otherwise.
 func (d *ArticleDraft) GetEffectiveContent() string {
+	if strings.TrimSpace(d.FactCheckedContent) != "" {
+		return d.FactCheckedContent
+	}
 	if strings.TrimSpace(d.ReviewedContent) != "" {
 		return d.ReviewedContent
 	}
@@ -244,7 +306,55 @@ func (m *DraftManager) UpdateReviewedContent(id string, reviewedTitle, reviewedK
 		draft.ReviewedContent = reviewedContent
 	}
 	draft.ReviewNotes = reviewNotes
+	// Un nouveau contenu relu invalide toute vérification factuelle antérieure
+	draft.FactCheckedContent = ""
+	draft.FactCheck = nil
 	draft.Status = DraftStatusValidated
+	draft.UpdatedAt = time.Now()
+
+	return m.saveToFile(draft)
+}
+
+// UpdateFactCheck stores the independent fact-checker report and the corrected content.
+// Status is set to fact_checked, or rejected_factcheck when the verdict is REJETÉ.
+func (m *DraftManager) UpdateFactCheck(id string, report *FactCheckReport, correctedContent string) error {
+	draft, err := m.GetDraft(id)
+	if err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	draft.FactCheck = report
+	if strings.TrimSpace(correctedContent) != "" {
+		draft.FactCheckedContent = correctedContent
+	}
+	if report != nil && report.Verdict == FactCheckRejected {
+		draft.Status = DraftStatusRejectedFactCheck
+		draft.ErrorLog = "Rejeté par le vérificateur factuel : " + report.Summary
+	} else {
+		draft.Status = DraftStatusFactChecked
+	}
+	draft.UpdatedAt = time.Now()
+
+	return m.saveToFile(draft)
+}
+
+// UpdateBiblioAudit saves the bibliographic audit report and updated content to the draft.
+func (m *DraftManager) UpdateBiblioAudit(id string, report *BibliographicAuditReport, updatedContent string) error {
+	draft, err := m.GetDraft(id)
+	if err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	draft.BiblioAudit = report
+	if strings.TrimSpace(updatedContent) != "" {
+		draft.FactCheckedContent = updatedContent
+	}
 	draft.UpdatedAt = time.Now()
 
 	return m.saveToFile(draft)
@@ -290,5 +400,19 @@ func (m *DraftManager) FindLatestDraftByTitle(title string) (*ArticleDraft, erro
 		}
 	}
 	return nil, fmt.Errorf("no draft found matching title %q", title)
+}
+
+// HasPublishedArticleOnDate checks if any draft was successfully published on the given date (format "YYYY-MM-DD").
+func (m *DraftManager) HasPublishedArticleOnDate(dateStr string) bool {
+	drafts, err := m.ListDrafts(DraftStatusPublished)
+	if err != nil {
+		return false
+	}
+	for _, d := range drafts {
+		if d.CreatedAt.Format("2006-01-02") == dateStr || d.UpdatedAt.Format("2006-01-02") == dateStr {
+			return true
+		}
+	}
+	return false
 }
 

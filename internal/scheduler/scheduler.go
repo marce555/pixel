@@ -22,16 +22,16 @@ const (
 
 // Task represents an asynchronous job in Pixel.
 type Task struct {
-	ID          string     `json:"id"`
-	Type        string     `json:"type"`
-	Name        string     `json:"name"`
-	Status      TaskStatus `json:"status"`
-	Payload     string     `json:"payload"`
-	ScheduledAt time.Time  `json:"scheduled_at"`
-	StartedAt   time.Time  `json:"started_at,omitempty"`
-	FinishedAt  time.Time  `json:"finished_at,omitempty"`
-	Error       string     `json:"error,omitempty"`
-	Log         string     `json:"log,omitempty"`
+	ID            string     `json:"id"`
+	Type          string     `json:"type"`
+	Name          string     `json:"name"`
+	Status        TaskStatus `json:"status"`
+	Payload       string     `json:"payload"`
+	ScheduledAt   time.Time  `json:"scheduled_at"`
+	StartedAt     time.Time  `json:"started_at,omitempty"`
+	FinishedAt    time.Time  `json:"finished_at,omitempty"`
+	Error         string     `json:"error,omitempty"`
+	Log           string     `json:"log,omitempty"`
 	ResolvedURL   string     `json:"resolved_url,omitempty"`
 	ResolvedTitle string     `json:"resolved_title,omitempty"`
 	IsDirect      bool       `json:"is_direct,omitempty"`
@@ -109,10 +109,10 @@ type Scheduler struct {
 	mu          sync.RWMutex
 	ctx         context.Context
 	Broadcaster EventBroadcaster
-	
+
 	// Serializer for music playing to avoid overlapping audio
 	musicSem chan struct{}
-	
+
 	// Callback for Autoplay (Infinite Radio)
 	AutoQueueCallback func(ctx context.Context, lastTitle string)
 
@@ -238,7 +238,7 @@ func (s *Scheduler) ClearHistory() {
 func (s *Scheduler) GetTasks() []*Task {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	
+
 	// Return a copy slice
 	res := make([]*Task, len(s.tasks))
 	copy(res, s.tasks)
@@ -318,7 +318,7 @@ func (s *Scheduler) dispatchTasks(ctx context.Context) {
 
 func (s *Scheduler) runTask(parentCtx context.Context, task *Task, handler TaskHandler) {
 	taskCtx, cancel := context.WithCancel(parentCtx)
-	
+
 	task.mu.Lock()
 	task.cancelFunc = cancel
 	task.mu.Unlock()
@@ -332,7 +332,7 @@ func (s *Scheduler) runTask(parentCtx context.Context, task *Task, handler TaskH
 		case s.musicSem <- struct{}{}:
 			var semReleased bool
 			var semMu sync.Mutex
-			
+
 			task.ReleaseSem = func() {
 				semMu.Lock()
 				defer semMu.Unlock()
@@ -410,4 +410,3 @@ func (s *Scheduler) GetNextPendingMusicTask(currentTaskID string) *Task {
 	}
 	return nil
 }
-

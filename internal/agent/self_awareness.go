@@ -340,7 +340,7 @@ func (s *SelfAwarenessAgent) describeArchitectureForQuery(cleanQuery string) str
 	sleepDesc := "- SleepManager (Sommeil & Consolidation) : Se déclenche quand ma STM est pleine (8 messages) ou après inactivité. Réconcilie les nouveaux souvenirs avec la LTM, élimine les contradictions, met à jour les objectifs dynamiques et profile l'interlocuteur.\n"
 	visionDesc := "- VisionAgent (Sens Sensoriel Visuel) : Mes yeux locaux via ma caméra (/dev/video0) et un modèle multimodal (Qwen-3-VL) scannant l'environnement toutes les 5 minutes avec veille automatique dynamique.\n"
 	memoryDesc := "- Substrat de Mémoire Multi-Niveaux : CoreMemory (persona, buts dynamiques, vecteur latéral EMA, pulsions inconscientes), STM (RAM 8 msgs), LTM (base vectorielle ~8800 souvenirs), ThoughtStream (monologue intérieur de 50 pensées) et ProjectManager.\n"
-	schedulerDesc := "- Task Scheduler & Handlers : Planificateur asynchrone pour les tâches lourdes (recherche de fond, sysadmin SSH sécurisé, génération d'articles avec ReviewerAgent et publication AppliYou).\n"
+	schedulerDesc := "- Task Scheduler & Handlers : Planificateur asynchrone pour les tâches lourdes (recherche de fond, sysadmin SSH sécurisé, génération d'articles avec ReviewerAgent, FactCheckerAgent indépendant et publication AppliYou).\n"
 	skillManagerDesc := "- SkillManager : Système d'apprentissage logiciel autonome capable de concevoir, tester et exécuter des briques en Python/Shell pour étendre mes capacités à la volée.\n"
 
 	// If the query asks specifically about a module

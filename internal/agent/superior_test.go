@@ -299,4 +299,3 @@ func TestShouldTriggerRAG(t *testing.T) {
 		}
 	}
 }
-

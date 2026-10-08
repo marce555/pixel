@@ -335,13 +335,13 @@ func (vm *VoiceManager) Synthesize(ctx context.Context, text string) ([]byte, er
 	// Lancer le binaire piper en lui passant le texte via l'entrée standard (stdin)
 	// La voix Siwis étant mono-locuteur, le paramètre --speaker n'est pas nécessaire.
 	cmd := exec.CommandContext(ctx, vm.piperPath, "--model", vm.modelPath, "--output_file", tempWav)
-	
+
 	// Spécifier LD_LIBRARY_PATH pour que Piper charge ses bibliothèques partagées ONNX Runtime
 	piperDir := filepath.Dir(vm.piperPath)
 	cmd.Env = append(os.Environ(), "LD_LIBRARY_PATH="+piperDir)
-	
+
 	cmd.Stdin = strings.NewReader(text)
-	
+
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
@@ -475,7 +475,7 @@ func (vm *VoiceManager) extractTarGz(tarGzPath, destDir string) error {
 		if len(parts) <= 1 {
 			continue // Ignorer le dossier racine lui-même
 		}
-		
+
 		// Recréer le chemin cible
 		relPath := strings.Join(parts[1:], "/")
 		targetPath := filepath.Join(destDir, "piper", relPath)
@@ -496,7 +496,7 @@ func (vm *VoiceManager) extractTarGz(tarGzPath, destDir string) error {
 			if err != nil {
 				return err
 			}
-			
+
 			_, err = io.Copy(outFile, tarReader)
 			outFile.Close()
 			if err != nil {

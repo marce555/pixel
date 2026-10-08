@@ -14,7 +14,6 @@ import (
 	"github.com/marce555/pixel/internal/memory"
 )
 
-
 type EmailMessage struct {
 	ID      string `json:"id"`
 	From    string `json:"from"`
@@ -256,12 +255,12 @@ func (g *GmailAgent) saveProcessedIDs() {
 	for id := range g.processedUIDs {
 		ids = append(ids, id)
 	}
-	
+
 	// Limit size to the last 200 IDs to avoid infinite growth
 	if len(ids) > 200 {
 		ids = ids[len(ids)-200:]
 	}
-	
+
 	data, err := json.Marshal(ids)
 	if err != nil {
 		return

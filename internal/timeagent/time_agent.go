@@ -21,7 +21,7 @@ func NewTimeAgent() *TimeAgent {
 func (t *TimeAgent) GetCurrentTimeContext() string {
 	now := time.Now()
 	duration := now.Sub(t.bootTime)
-	
+
 	return fmt.Sprintf("Contexte Temporel : Il est actuellement %s. Nous discutons depuis %s.",
 		now.Format("15:04:05 (02 Jan 2006)"),
 		duration.Round(time.Minute).String(),

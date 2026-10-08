@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,16 @@ type AdaptiveProvider struct {
 }
 
 func NewAdaptiveProvider(activeMode, cloudAPIKey, cloudBaseURL, cloudModel, localBaseURL, localModel string) *AdaptiveProvider {
+	if cloudAPIKey == "" {
+		if k := os.Getenv("GEMINI_API_KEY"); k != "" {
+			cloudAPIKey = k
+		} else if data, err := os.ReadFile(".key_Gemini.txt"); err == nil {
+			cloudAPIKey = strings.TrimSpace(string(data))
+		}
+	}
+	if cloudModel == "" || cloudModel == "gemini-3.6-flash" || cloudModel == "gemini-1.5-flash" {
+		cloudModel = "gemini-3.5-flash"
+	}
 	p := &AdaptiveProvider{
 		activeMode:   activeMode,
 		cloudAPIKey:  cloudAPIKey,
@@ -106,10 +117,19 @@ func (p *AdaptiveProvider) handleCloudError(err error) {
 }
 
 func (p *AdaptiveProvider) Generate(ctx context.Context, messages []Message) (string, error) {
-	return p.GenerateWithMaxTokens(ctx, messages, 2048)
+	return p.GenerateWithMaxTokens(ctx, messages, 4096)
 }
 
 func (p *AdaptiveProvider) GenerateWithMaxTokens(ctx context.Context, messages []Message, maxTokens int) (string, error) {
+	res, err := p.GenerateDetailed(ctx, messages, maxTokens)
+	if err != nil {
+		return "", err
+	}
+	return res.Content, nil
+}
+
+// GenerateDetailed implements DetailedProvider interface for AdaptiveProvider.
+func (p *AdaptiveProvider) GenerateDetailed(ctx context.Context, messages []Message, maxTokens int) (GenerationResult, error) {
 	p.mu.RLock()
 	mode := p.activeMode
 	local := p.localProvider
@@ -121,21 +141,25 @@ func (p *AdaptiveProvider) GenerateWithMaxTokens(ctx context.Context, messages [
 		if cloud.APIKey != "" {
 			cloudCtx := ctx
 			if mode == "auto" || mode == "adaptive" {
+				timeout := 15 * time.Second
+				if maxTokens > 2048 {
+					timeout = 120 * time.Second
+				}
 				var cancel context.CancelFunc
-				cloudCtx, cancel = context.WithTimeout(ctx, 10*time.Second)
+				cloudCtx, cancel = context.WithTimeout(ctx, timeout)
 				defer cancel()
 			}
-			resp, err := cloud.GenerateWithMaxTokens(cloudCtx, messages, maxTokens)
+			resp, err := cloud.GenerateDetailed(cloudCtx, messages, maxTokens)
 			if err == nil {
 				return resp, nil
 			}
 			p.handleCloudError(err)
 		} else if mode == "cloud" {
-			return "", fmt.Errorf("cloud mode active but API Key is empty")
+			return GenerationResult{}, fmt.Errorf("cloud mode active but API Key is empty")
 		}
 	}
 
-	return local.GenerateWithMaxTokens(ctx, messages, maxTokens)
+	return local.GenerateDetailed(ctx, messages, maxTokens)
 }
 
 func (p *AdaptiveProvider) GenerateStream(ctx context.Context, messages []Message) (<-chan string, <-chan error) {

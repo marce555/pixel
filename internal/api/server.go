@@ -122,7 +122,7 @@ func (s *Server) Start(port string) error {
 	http.HandleFunc("/api/history", s.handleHistory)
 	http.HandleFunc("/api/system_status", s.handleSystemStatus)
 	http.HandleFunc("/api/project", s.handleActiveProject)
-	
+
 	// Task Scheduler Routes
 	http.HandleFunc("/api/tasks", s.handleTasks)
 	http.HandleFunc("/api/tasks/cancel", s.handleTasksCancel)
@@ -272,7 +272,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		s.stm.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: fullReply})
 		// Indexation dynamique et tâches de fond lancées uniquement APRÈS l'envoi complet du flux pour éviter toute interférence
 		bgCtx := s.sleepManager.AcquireBackgroundContext()
-		
+
 		go func(ctx context.Context) {
 			// Attendre une courte pause de 25 secondes de silence avant de lancer les analyses lourdes
 			// Si l'utilisateur envoie un nouveau message entre-temps, CancelBackgroundTasks() annulera ce contexte immédiatement.
@@ -719,4 +719,3 @@ func (s *Server) handleGmailSettings(w http.ResponseWriter, r *http.Request) {
 
 	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 }
-

@@ -137,6 +137,25 @@ func NewPublishArticleHandler(broadcaster EventBroadcaster, stm STMWriter, provi
 
 // NewPublishArticleHandlerWithReviewer creates an orchestrated TaskHandler with persistent draft caching, reviewer validation, and resilient publishing.
 func NewPublishArticleHandlerWithReviewer(broadcaster EventBroadcaster, stm STMWriter, provider llm.Provider, searcher WebSearcher, draftManager *DraftManager, reviewer ArticleReviewer) TaskHandler {
+	return NewPublishArticleHandlerWithFactChecker(broadcaster, stm, provider, searcher, draftManager, reviewer, nil)
+}
+
+// factCheckRequired reports whether a fact-check that could not be completed must block publication (PIXEL_FACTCHECK_REQUIRED, default on).
+func factCheckRequired() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("PIXEL_FACTCHECK_REQUIRED")))
+	return v != "off" && v != "false" && v != "0"
+}
+
+// NewPublishArticleHandlerWithFactChecker creates the full publishing pipeline:
+// writing → ReviewerAgent (form) → independent FactChecker (accuracy) → publication,
+// and reports at the end whether the fact-checker had to adjust Pixel's statements.
+func NewPublishArticleHandlerWithFactChecker(broadcaster EventBroadcaster, stm STMWriter, provider llm.Provider, searcher WebSearcher, draftManager *DraftManager, reviewer ArticleReviewer, factChecker ArticleFactChecker) TaskHandler {
+	return NewPublishArticleHandlerWithBibliographicAuditor(broadcaster, stm, provider, searcher, draftManager, reviewer, factChecker, nil)
+}
+
+// NewPublishArticleHandlerWithBibliographicAuditor creates the ultimate verified publishing pipeline:
+// writing → ReviewerAgent (form) → independent FactChecker (general claims) → BibliographicAuditor (citations/affiliations) → publication.
+func NewPublishArticleHandlerWithBibliographicAuditor(broadcaster EventBroadcaster, stm STMWriter, provider llm.Provider, searcher WebSearcher, draftManager *DraftManager, reviewer ArticleReviewer, factChecker ArticleFactChecker, biblioAuditor ArticleBibliographicAuditor) TaskHandler {
 	if draftManager == nil {
 		draftManager = NewDraftManager("drafts")
 	}
@@ -212,8 +231,12 @@ RÈGLES IMPÉRATIVES DE RÉDACTION, DE RIGUEUR ET DE NON-HALLUCINATION :
    - Utilise EXCLUSIVEMENT du code HTML pur : <p> pour chaque paragraphe, <strong> pour mettre en valeur les termes clés, <em> pour l'emphase.
    - Intègre systématiquement des listes à puces (<ul>, <li>) ou numérotées (<ol>, <li>) pour aérer la lecture.
    - RÈGLE OBLIGATOIRE : Intègre au moins un TABLEAU HTML complet (<table>, <thead>, <tbody>, <tr>, <th>, <td>) de RÉFÉRENCES ET SOURCES DOCUMENTAIRES VÉRIFIABLES (colonnes : Référence / Source, Type de ressource, Description & Thématique couverte) résumant des données réelles et vérifiables.
-   - RÈGLE OBLIGATOIRE (si sujet technique/info/sciences) : Au moins un ou plusieurs blocs de code HTML complets formatés avec <pre><code class="language-...">...</code></pre> (ex: language-bash, language-python, language-json, language-yaml).
-5. Ne mets AUCUNE formule de politesse du type "Voici l'article", commence directement avec les délimiteurs ci-dessous.
+    - RÈGLE OBLIGATOIRE (si sujet technique/info/sciences) : Au moins un ou plusieurs blocs de code HTML complets formatés avec <pre><code class="language-...">...</code></pre> (ex: language-bash, language-python, language-json, language-yaml).
+5. RÈGLE IMPÉRATIVE DE PLAN FINI ET DE CONCLUSION COMPLÈTE (ANTI-TRONCATURE) :
+   - Assure-toi de structurer l'article jusqu'à sa conclusion complète. Ne laisse AUCUNE phrase inachevée.
+   - Calibre ton développement pour que l'intégralité du plan et de la conclusion tienne dans la réponse sans coupure.
+   - Termine OBLIGATOIREMENT par une véritable section de conclusion explicite (avec un titre <h2>Conclusion...</h2>) résumant les perspectives d'avenir, et referme rigoureusement toutes les balises HTML ouvertes (dont impérativement </article>).
+6. Ne mets AUCUNE formule de politesse du type "Voici l'article", commence directement avec les délimiteurs ci-dessous.
 
 Formatte ta réponse EXACTEMENT avec la structure suivante :
 
@@ -237,7 +260,9 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 				return fmt.Errorf("provider nil")
 			}
 
-			res, errGen := llm.GenerateWithTokens(ctx, provider, messages, 3500)
+			res, errGen := llm.GenerateWithContinuation(ctx, provider, messages, 6144, func(pass int) {
+				task.AppendLog(fmt.Sprintf("⚠️ Plafond de tokens atteint lors de la rédaction (finish_reason=length) : poursuite automatique #%d lancée pour achever la conclusion...", pass))
+			})
 			if errGen != nil {
 				task.AppendLog(fmt.Sprintf("Erreur lors de la rédaction LLM : %v", errGen))
 				return fmt.Errorf("generation failed: %w", errGen)
@@ -291,7 +316,9 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 		}
 
 		// Phase 2 : Relecture et validation qualité par l'Agent de Relecture
-		if draft != nil && reviewer != nil && draft.Status != DraftStatusValidated {
+		// (un brouillon déjà passé par le vérificateur factuel n'est pas relu à nouveau, pour ne pas perdre la version vérifiée)
+		alreadyFactChecked := draft != nil && draft.FactCheck != nil
+		if draft != nil && reviewer != nil && draft.Status != DraftStatusValidated && !alreadyFactChecked {
 			task.AppendLog("Transmission du brouillon à l'Agent de Relecture pour audit du format et du contenu...")
 			_ = draftManager.UpdateDraftStatus(draft.ID, DraftStatusInReview, "")
 
@@ -306,8 +333,18 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 				payload.Keywords = revKeywords
 				payload.Content = revContent
 			}
-		} else if draft != nil && draft.Status != DraftStatusValidated {
+		} else if draft != nil && draft.Status != DraftStatusValidated && !alreadyFactChecked {
 			_ = draftManager.UpdateDraftStatus(draft.ID, DraftStatusValidated, "Validation par défaut sans agent de relecture")
+		}
+
+		// Rapport du vérificateur factuel (rechargé depuis le brouillon s'il a déjà été produit)
+		var fcReport *FactCheckReport
+		if draft != nil && draft.FactCheck != nil {
+			fcReport = draft.FactCheck
+		}
+		var biblioReport *BibliographicAuditReport
+		if draft != nil && draft.BiblioAudit != nil {
+			biblioReport = draft.BiblioAudit
 		}
 
 		// Définition du garde-fou de persistance d'erreur pour ne JAMAIS perdre le brouillon
@@ -319,6 +356,12 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 				errStr = reason
 			}
 			failMsg := fmt.Sprintf("⚠️ **[Problème lors de la Publication]**\nL'article **\"%s\"** n'a pas pu être publié sur AppliYou.fr.\n*Raison : %s (%s)*", payload.Title, reason, errStr)
+			if fcReport != nil {
+				failMsg += "\n" + FormatFactCheckSummary(fcReport)
+			}
+			if biblioReport != nil {
+				failMsg += "\n" + FormatBibliographicAuditSummary(biblioReport)
+			}
 			if draft != nil {
 				_ = draftManager.UpdateDraftStatus(draft.ID, DraftStatusFailed, fmt.Sprintf("%s: %s", reason, errStr))
 				failMsg += fmt.Sprintf("\n\n💡 *Le contenu complet de l'article est conservé dans le cache temporaire (`%s`). Aucun texte n'est perdu ! Tu peux relancer la publication sans tout réécrire.*", draft.ID)
@@ -350,6 +393,86 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 				}
 				return fmt.Errorf("%s", msg)
 			}
+		}
+
+		// Phase 2b : Cycle de vérification factuelle INDÉPENDANT (modèle, contexte et sources distincts de Pixel)
+		needsFactCheck := fcReport == nil || fcReport.Verdict == FactCheckSkipped || fcReport.Verdict == FactCheckRejected
+		if factChecker != nil && FactCheckEnabled() && needsFactCheck {
+			task.AppendLog("Transmission de l'article à l'Agent Vérificateur indépendant (vérification des affirmations et des sources)...")
+			if draft != nil {
+				_ = draftManager.UpdateDraftStatus(draft.ID, DraftStatusFactChecking, "")
+			}
+			report, corrected, errFC := factChecker.Check(ctx, payload.Title, payload.Content, task.AppendLog)
+			if errFC != nil || report == nil {
+				reason := "aucun rapport produit"
+				if errFC != nil {
+					reason = errFC.Error()
+				}
+				report = &FactCheckReport{Verdict: FactCheckSkipped, Summary: "Vérification impossible : " + reason, Warnings: []string{"Vérification impossible : " + reason}, CheckedAt: time.Now()}
+				corrected = ""
+			}
+			fcReport = report
+			if report.Verdict == FactCheckSkipped {
+				corrected = ""
+			}
+			if draft != nil {
+				_ = draftManager.UpdateFactCheck(draft.ID, report, corrected)
+			}
+			if strings.TrimSpace(corrected) != "" {
+				payload.Content = corrected
+			}
+			task.AppendLog(fmt.Sprintf("Rapport du vérificateur : %s – %s", report.Verdict, report.Summary))
+
+			blocked := report.Verdict == FactCheckRejected || (report.Verdict == FactCheckSkipped && factCheckRequired())
+			if blocked {
+				msg := fmt.Sprintf("🛑 **[Publication bloquée par l'Agent Vérificateur]**\nL'article **\"%s\"** n'a pas été publié : %s\n%s", payload.Title, report.Summary, FormatFactCheckSummary(report))
+				if draft != nil {
+					if report.Verdict == FactCheckSkipped {
+						_ = draftManager.UpdateDraftStatus(draft.ID, DraftStatusFailed, report.Summary)
+					}
+					msg += fmt.Sprintf("\n💡 *Le brouillon (`%s`) est conservé avec le rapport de vérification détaillé. Tu peux le relancer après correction.*", draft.ID)
+				}
+				task.AppendLog(msg)
+				if broadcaster != nil {
+					broadcaster.Broadcast(msg)
+				}
+				if stm != nil {
+					stm.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: msg})
+				}
+				return fmt.Errorf("publication bloquée par le vérificateur factuel : %s", report.Summary)
+			}
+		} else if factChecker != nil && !FactCheckEnabled() {
+			task.AppendLog("Vérification factuelle désactivée (PIXEL_FACTCHECK=off).")
+		} else if fcReport != nil {
+			task.AppendLog(fmt.Sprintf("Vérification factuelle déjà effectuée sur ce brouillon (%s) : réutilisation du contenu vérifié.", fcReport.Verdict))
+		}
+
+		// Phase 2c : Audit bibliographique, des affiliations académiques et des co-signatures d'auteurs
+		// L'audit est TOUJOURS relancé (y compris sur un brouillon déjà audité) : si une passe précédente
+		// a supprimé toutes les références fausses, cette passe garantit l'injection d'au moins une
+		// référence fondatrice réelle authentifiée via Crossref/PubMed.
+		if biblioAuditor != nil {
+			if biblioReport != nil {
+				task.AppendLog("Brouillon déjà audité : nouvelle passe bibliographique pour garantir au moins une référence vérifiée...")
+			}
+			task.AppendLog("Transmission de l'article à l'Agent de Police Bibliographique (contrôle des affiliations, co-auteurs et revues)...")
+			auditedContent, bReport, errBib := biblioAuditor.Audit(ctx, payload.Title, payload.Content, task.AppendLog)
+			if errBib == nil && bReport != nil {
+				biblioReport = mergeBiblioReports(biblioReport, bReport)
+				if strings.TrimSpace(auditedContent) != "" {
+					payload.Content = auditedContent
+				}
+				if draft != nil {
+					_ = draftManager.UpdateBiblioAudit(draft.ID, biblioReport, payload.Content)
+				}
+			}
+		}
+
+		// Assainissement sémantique, terminologique et structurel approfondi
+		payload.Content = SanitizeDeepContent(payload.Content, payload.Title)
+		payload.Content = CleanIncompleteSentences(payload.Content)
+		if draft != nil {
+			_ = draftManager.UpdateFactCheck(draft.ID, fcReport, payload.Content)
 		}
 
 		// Phase 3 : Passage à l'état de publication
@@ -804,14 +927,22 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 			return recordFailure(fmt.Sprintf("Impossible d'accéder à la page d'édition de l'article (URL actuelle : %s)", redirectURL), nil)
 		}
 
-		// 1. Click "Améliorer avec l'IA"
-		task.AppendLog("Lancement de l'amélioration de l'article avec l'IA du site...")
-		err = chromedp.Run(chromeCtx,
-			chromedp.WaitVisible(`#enhanceBtn`, chromedp.ByID),
-			chromedp.Click(`#enhanceBtn`, chromedp.ByID),
-		)
+		// 1. Click "Améliorer avec l'IA" (désactivé par défaut quand le vérificateur factuel est actif :
+		// cette réécriture côté site interviendrait APRÈS la vérification et pourrait réintroduire des inexactitudes)
+		if !AppliYouAIEnhanceEnabled() {
+			task.AppendLog("Amélioration IA du site ignorée : le texte vérifié par l'Agent Vérificateur est publié tel quel (PIXEL_APPLIYOU_AI_ENHANCE=on pour la réactiver).")
+			err = fmt.Errorf("amélioration IA désactivée")
+		} else {
+			task.AppendLog("Lancement de l'amélioration de l'article avec l'IA du site...")
+			err = chromedp.Run(chromeCtx,
+				chromedp.WaitVisible(`#enhanceBtn`, chromedp.ByID),
+				chromedp.Click(`#enhanceBtn`, chromedp.ByID),
+			)
+		}
 		if err != nil {
-			task.AppendLog(fmt.Sprintf("Avertissement : échec du clic sur le bouton d'amélioration IA : %v", err))
+			if AppliYouAIEnhanceEnabled() {
+				task.AppendLog(fmt.Sprintf("Avertissement : échec du clic sur le bouton d'amélioration IA : %v", err))
+			}
 		} else {
 			// Wait for the AI enhancement process to start (classList does NOT contain 'hidden')
 			task.AppendLog("Attente du démarrage de l'amélioration par l'IA...")
@@ -950,7 +1081,7 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 		if errConfirm == nil && modalConfirmed {
 			task.AppendLog("Bouton de confirmation / validation de la publication cliqué avec succès !")
 		}
-		
+
 		if err != nil || !finalPublished {
 			task.AppendLog("Avertissement : échec de l'enregistrement final pour la publication.")
 			return recordFailure("Échec de l'enregistrement ou de la validation de la publication finale", err)
@@ -978,6 +1109,14 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 
 		if draft != nil {
 			formattedResponse += fmt.Sprintf("\n📦 **Cache Brouillon** : Archivé avec succès (`%s`)\n", draft.ID)
+		}
+
+		// Signalement obligatoire : l'agent vérificateur a-t-il dû ajuster les propos de Pixel ?
+		if factChecker != nil || fcReport != nil {
+			formattedResponse += FormatFactCheckSummary(fcReport)
+		}
+		if biblioAuditor != nil || biblioReport != nil {
+			formattedResponse += FormatBibliographicAuditSummary(biblioReport)
 		}
 
 		broadcaster.Broadcast(formattedResponse)
@@ -1160,7 +1299,7 @@ func analyzeImageSuitability(ctx context.Context, imageURL string, articleTitle 
 	}
 
 	content := chatResp.Choices[0].Message.Content
-	
+
 	// Parse score and description
 	lower := strings.ToLower(content)
 	scoreIdx := strings.Index(lower, "score:")

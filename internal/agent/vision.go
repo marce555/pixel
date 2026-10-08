@@ -87,7 +87,7 @@ func (va *VisionAgent) Start(ctx context.Context) {
 				return
 			case <-ticker.C:
 				// Avoid system overload by checking dynamic suspension conditions
-				
+
 				// 1. Suspension if active chat is in progress (preserve NPU loaded model for 5 minutes of inactivity)
 				lastAct := va.stm.GetLastActivity()
 				if time.Since(lastAct) < 5*time.Minute {
@@ -144,7 +144,7 @@ func (va *VisionAgent) CaptureAndAnalyze(ctx context.Context) (string, error) {
 	// -vframes 1 : capture 1 frame
 	// -video_size 640x480 : resolution (perfect compromise for fast local inference)
 	cmd := exec.CommandContext(ctx, "ffmpeg", "-y", "-f", "video4linux2", "-i", "/dev/video0", "-vframes", "1", "-video_size", "640x480", tempFile)
-	
+
 	// Capture stderr diagnostics
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -235,7 +235,7 @@ func (va *VisionAgent) CaptureAndAnalyze(ctx context.Context) (string, error) {
 			} `json:"message"`
 		} `choices`
 	}
-	
+
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", err
@@ -269,8 +269,8 @@ func (va *VisionAgent) ProcessVisualPerception(ctx context.Context, description 
 			ctx,
 			"Personal",
 			"vision",
-			"Vision : " + time.Now().Format("15:04"),
-			"Pixel a vu dans son environnement : " + description,
+			"Vision : "+time.Now().Format("15:04"),
+			"Pixel a vu dans son environnement : "+description,
 			[]string{"vision", "camera", "perception", "environnement"},
 			embedding,
 			0.65, // high importance for sensory perceptions

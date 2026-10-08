@@ -164,7 +164,7 @@ func (w *WebAgent) SearchNews(topic string) (string, error) {
 	words := strings.FieldsFunc(topicClean, func(r rune) bool {
 		return r == ' ' || r == '-' || r == '\'' || r == ',' || r == '.' || r == '/' || r == '(' || r == ')'
 	})
-	
+
 	var importantWords []string
 	for _, w := range words {
 		// Ignorer les mots trop communs ou liés à notre date future
@@ -305,7 +305,7 @@ func (w *WebAgent) SearchWeb(query string) (string, error) {
 
 	// Regex to match titles, links, and snippets
 	reResult := regexp.MustCompile(`(?s)<h2 class="result__title">\s*<a rel="nofollow" class="result__a" href="([^"]+)">(.*?)</a>.*?<a class="result__snippet"[^>]*>(.*?)</a>`)
-	
+
 	matches := reResult.FindAllStringSubmatch(body, 5)
 	if len(matches) == 0 {
 		return "", fmt.Errorf("aucun résultat web trouvé pour '%s'", query)
@@ -414,7 +414,7 @@ func (w *WebAgent) ResolveMusicURL(songQuery string) (string, string, bool, erro
 		fmt.Println("[WebAgent] Le scraper en direct n'a pas retourné de lien. Repli sur la recherche Yahoo...")
 		searchQuery := fmt.Sprintf("site:youtube.com %s", query)
 		results, err := w.SearchWeb(searchQuery)
-		
+
 		if err == nil && results != "" {
 			// Look for a link containing watch?v=, playlist?list= or shared link in the results
 			lines := strings.Split(results, "\n")
@@ -749,13 +749,13 @@ func (w *WebAgent) ReadURLContent(targetURL string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("erreur lecture body: %w", err)
 	}
-	
+
 	body := string(bodyBytes)
 
 	// Remove script and style tags completely
 	reScript := regexp.MustCompile(`(?is)<script.*?>.*?</script>`)
 	body = reScript.ReplaceAllString(body, " ")
-	
+
 	reStyle := regexp.MustCompile(`(?is)<style.*?>.*?</style>`)
 	body = reStyle.ReplaceAllString(body, " ")
 
@@ -852,7 +852,7 @@ func (w *WebAgent) ControlBrowserVisually(targetURL string) error {
 			// Attendre pour laisser l'utilisateur interagir ou voir la page
 			chromedp.Sleep(30*time.Minute),
 		)
-		
+
 		if err != nil {
 			fmt.Printf("[WebAgent] Erreur chromedp visible : %v\n", err)
 		}
@@ -879,5 +879,3 @@ func (w *WebAgent) OpenWindowsDownloadBrowser() error {
 	fmt.Printf("[WebAgent] Ouverture du navigateur Chromium sur la page de téléchargement Windows : %s\n", targetURL)
 	return w.ControlBrowserVisually(targetURL)
 }
-
-

@@ -80,32 +80,36 @@ func main() {
 	eventHub := api.NewEventHub()
 	taskScheduler := scheduler.NewScheduler()
 	taskScheduler.SetBroadcaster(eventHub)
-	
+
 	webResearcher := agent.NewWebResearcherAgent(provider, webAgent)
 	sysadminAgent := agent.NewSysadminAgent(provider)
-	
+
 	draftManager := scheduler.NewDraftManager("drafts")
 	reviewerAgent := agent.NewReviewerAgent(provider)
+	// Agent Vérificateur indépendant : modèle cloud distinct du rédacteur local, contexte isolé, sources propres
+	factCheckerAgent := agent.NewFactCheckerAgent(adaptiveProvider, webAgent)
+	// Agent de Police Bibliographique : traque les chimères statistiques, co-auteurs fictifs et affiliations erronées
+	biblioAuditorAgent := agent.NewBibliographicAuditorAgent(adaptiveProvider, webAgent)
 
 	// Register scheduler handlers
 	taskScheduler.RegisterHandler("play_music", scheduler.NewPlayMusicHandler(webAgent, taskScheduler))
 	taskScheduler.RegisterHandler("agent_task", scheduler.NewAgentTaskHandler(provider, webAgent, eventHub, stm))
 	taskScheduler.RegisterHandler("research_task", agent.NewResearchTaskHandler(webResearcher, eventHub, stm))
 	taskScheduler.RegisterHandler("sysadmin", agent.NewSysadminTaskHandler(sysadminAgent, eventHub, stm))
-	taskScheduler.RegisterHandler("publish_article", scheduler.NewPublishArticleHandlerWithReviewer(eventHub, stm, provider, webAgent, draftManager, reviewerAgent))
+	taskScheduler.RegisterHandler("publish_article", scheduler.NewPublishArticleHandlerWithBibliographicAuditor(eventHub, stm, provider, webAgent, draftManager, reviewerAgent, factCheckerAgent, biblioAuditorAgent))
 	taskScheduler.RegisterHandler("depublish_duplicates", scheduler.NewDepublishDuplicatesHandler(eventHub, stm, provider))
-	taskScheduler.RegisterHandler("audit_and_fix_articles", scheduler.NewAuditAndFixArticlesHandler(eventHub, stm, provider, draftManager, reviewerAgent))
-	
+	taskScheduler.RegisterHandler("audit_and_fix_articles", scheduler.NewAuditAndFixArticlesHandlerWithBibliographicAuditor(eventHub, stm, provider, draftManager, reviewerAgent, factCheckerAgent, biblioAuditorAgent))
+
 	codeProvider := llm.NewOpenAICompatibleProvider(
 		llmSettings.CodeBaseURL,
 		llmSettings.CloudAPIKey, // in case the user decides to use a cloud model for code later
 		llmSettings.CodeModel,
 		"", // no embedding needed for code generation
 	)
-	
+
 	skillManager := skills.NewSkillManager(codeProvider, "skills")
 	taskScheduler.RegisterHandler("build_skill", skills.NewBuildSkillHandler(skillManager, eventHub.Broadcast))
-	
+
 	taskScheduler.Start(ctx)
 
 	// Lancement de la synchronisation initiale en arrière-plan des articles publiés

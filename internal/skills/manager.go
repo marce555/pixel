@@ -129,7 +129,6 @@ func (sm *SkillManager) GetSkillsDescriptionForSystemPrompt() string {
 	return sb.String()
 }
 
-
 // ExecuteSkill runs the skill's run.py with the provided query.
 func (sm *SkillManager) ExecuteSkill(ctx context.Context, name string, query string) (string, error) {
 	sm.mu.RLock()
@@ -324,16 +323,16 @@ Ne mets aucun texte avant ou après ces deux blocs. Ton JSON doit être syntaxiq
 
 		// Test réussi ! On sauvegarde le manifest et on charge.
 		fmt.Printf("[SkillManager] Test réussi ! Sortie: %s\n", string(output))
-		
+
 		manifest := SkillManifest{
-			Name: payload.Name,
-			Description: payload.Description,
+			Name:               payload.Name,
+			Description:        payload.Description,
 			RouterInstructions: payload.RouterInstructions,
 		}
-		
+
 		manifestData, _ := json.MarshalIndent(manifest, "", "  ")
 		os.WriteFile(filepath.Join(skillPath, "manifest.json"), manifestData, 0644)
-		
+
 		sm.LoadSkills()
 		return fmt.Sprintf("Brique '%s' créée, testée avec succès, et chargée à chaud ! Le routeur peut maintenant l'utiliser.", payload.Name), payload.Name, nil
 	}

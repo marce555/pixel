@@ -433,7 +433,7 @@ func (a *SuperiorAgent) analyzeQuery(ctx context.Context, input string, history 
 			Query:  "archive: " + target,
 		}
 	}
-	if cleanInput == "nettoie ma boîte" || cleanInput == "nettoie ma boite" || 
+	if cleanInput == "nettoie ma boîte" || cleanInput == "nettoie ma boite" ||
 		cleanInput == "met de l'ordre dans mes e-mails" ||
 		cleanInput == "met de l'ordre dans mes mails" ||
 		strings.Contains(cleanInput, "nettoyer ma boîte") || strings.Contains(cleanInput, "nettoyer ma boite") ||
@@ -536,7 +536,7 @@ func (a *SuperiorAgent) analyzeQuery(ctx context.Context, input string, history 
 	}
 
 	// Fast-path for context playlist
-	if strings.HasPrefix(cleanInput, "lance cette play") || strings.HasPrefix(cleanInput, "lance la play") || 
+	if strings.HasPrefix(cleanInput, "lance cette play") || strings.HasPrefix(cleanInput, "lance la play") ||
 		strings.HasPrefix(cleanInput, "joue cette play") || strings.HasPrefix(cleanInput, "joue la play") {
 		return RouterResponse{Action: "media", Query: "cette playlist"}
 	}
@@ -545,7 +545,7 @@ func (a *SuperiorAgent) analyzeQuery(ctx context.Context, input string, history 
 	if (strings.Contains(cleanInput, "télécharge") || strings.Contains(cleanInput, "telecharge") || strings.Contains(cleanInput, "télécharger") || strings.Contains(cleanInput, "telecharger")) &&
 		(strings.Contains(cleanInput, "compilation") || strings.Contains(cleanInput, "hits") || strings.Contains(cleanInput, "titres") || strings.Contains(cleanInput, "musiques") || strings.Contains(cleanInput, "chansons")) &&
 		(strings.Contains(cleanInput, "bpm") || strings.Contains(cleanInput, "bpm")) {
-		
+
 		bpm := "120"
 		reBPM := regexp.MustCompile(`(\d{3})\s*bpm`)
 		match := reBPM.FindStringSubmatch(cleanInput)
@@ -558,14 +558,14 @@ func (a *SuperiorAgent) analyzeQuery(ctx context.Context, input string, history 
 				bpm = match2[1]
 			}
 		}
-		
+
 		decade := "années 80"
 		reDecade := regexp.MustCompile(`(19\d{2}|20\d{2}|années\s*\d{2,4}|annees\s*\d{2,4})`)
 		matchDecade := reDecade.FindStringSubmatch(cleanInput)
 		if len(matchDecade) > 1 {
 			decade = matchDecade[0] // take full match like "années 1978" or "1978"
 		}
-		
+
 		return RouterResponse{
 			Action: "skill_download_compilation",
 			Query:  fmt.Sprintf("%s ||| hits dansants %s", bpm, decade),
@@ -1559,7 +1559,7 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 
 	if len(formattedHistory) > 0 && formattedHistory[len(formattedHistory)-1].Role == llm.RoleUser {
 		lastUserMsg := formattedHistory[len(formattedHistory)-1].Content
-		
+
 		hasPrevQuestion := false
 		var prevAssistantMsg string
 		if len(formattedHistory) >= 2 && formattedHistory[len(formattedHistory)-2].Role == llm.RoleAssistant {
@@ -1863,18 +1863,22 @@ func (a *SuperiorAgent) ProcessInputStream(ctx context.Context, input string, hi
 
 	if ok, mode := detectAuditFormatIntent(input); ok && a.scheduler != nil {
 		desc := "Audit et diagnostic du formatage des articles publiés"
+		actionName := "l'audit et le diagnostic"
 		if mode == "fix" {
 			desc = "Audit et correction automatique du formatage des articles publiés"
+			actionName = "l'audit et la réparation automatique"
+		} else if mode == "audit-only" {
+			desc = "Audit en lecture seule des publications"
+			actionName = "l'audit en lecture seule"
+		} else {
+			desc = fmt.Sprintf("Audit et vérification factuelle de l'article : %s", mode)
+			actionName = fmt.Sprintf("l'audit, le contrôle factuel et la révision de \"%s\"", mode)
 		}
 		task := a.scheduler.Enqueue("audit_and_fix_articles", desc, mode, 0)
 		a.scheduler.TriggerDispatch()
 		out := make(chan string, 1)
 		errs := make(chan error, 1)
-		actionName := "l'audit et le diagnostic"
-		if mode == "fix" {
-			actionName = "l'audit et la réparation automatique"
-		}
-		out <- fmt.Sprintf("C'est parti ! J'ai missionné l'**Agent Relecteur** pour %s du formatage de nos articles publiés sur AppliYou.fr. 🧐✨\n\nTu peux suivre l'analyse de chaque publication en temps réel dans l'onglet **Tâches** ! *(ID tâche : `%s`)*\n\nDès que la revue sera terminée, je t'afficherai le rapport complet ici-même.", actionName, task.ID)
+		out <- fmt.Sprintf("C'est parti ! J'ai missionné l'**Agent Vérificateur** et l'**Agent Relecteur** pour %s sur AppliYou.fr. 🧐✨\n\nTu peux suivre l'analyse en temps réel dans l'onglet **Tâches** ! *(ID tâche : `%s`)*\n\nDès que la revue sera terminée, je t'afficherai le rapport complet ici-même.", actionName, task.ID)
 		close(out)
 		close(errs)
 		return out, errs
@@ -2313,15 +2317,15 @@ func isShortContinuation(input string) bool {
 		"avec plaisir": true,
 		"absolument":   true,
 	}
-	
+
 	if continuations[clean] {
 		return true
 	}
-	
+
 	if len(clean) < 35 && (strings.HasPrefix(clean, "oui") || strings.HasPrefix(clean, "non") || strings.HasPrefix(clean, "raconte") || strings.HasPrefix(clean, "dis") || strings.Contains(clean, "interesse") || strings.Contains(clean, "intéresse")) {
 		return true
 	}
-	
+
 	// Robust detection of French follow-up question/continuation patterns
 	if len(clean) < 55 {
 		if strings.HasPrefix(clean, "et ") ||
@@ -2336,7 +2340,7 @@ func isShortContinuation(input string) bool {
 			return true
 		}
 	}
-	
+
 	return false
 }
 
@@ -2470,7 +2474,7 @@ func (a *SuperiorAgent) handleMediaAction(ctx context.Context, input string, rou
 	cmd := strings.ToLower(strings.TrimSpace(routerResp.Query))
 	isControlCmd := false
 	mappedCmd := cmd
-	
+
 	if cmd == "play" || cmd == "pause" || cmd == "toggle" || cmd == "next" || cmd == "previous" || cmd == "stop" || cmd == "skip" {
 		isControlCmd = true
 	} else if strings.Contains(cmd, "stop") || strings.Contains(cmd, "arrêt") || strings.Contains(cmd, "arret") || strings.Contains(cmd, "coupe") {
@@ -2756,7 +2760,7 @@ func (a *SuperiorAgent) buildSchedulerContext() string {
 		}
 
 		sb.WriteString(fmt.Sprintf("- Tâche [%s] %s : %s%s\n", t.Type, statusSymbol, t.Name, timeInfo))
-		
+
 		resolvedTitle := t.GetResolvedTitle()
 		if t.Type == "play_music" && resolvedTitle != "" {
 			sb.WriteString(fmt.Sprintf("  -> Titre exact en cours de lecture : %s\n", resolvedTitle))
@@ -2845,7 +2849,7 @@ Réponds UNIQUEMENT avec la phrase, rien d'autre.`, query, knowledge)
 		if embErr == nil && len(embedding) > 0 {
 			title := fmt.Sprintf("%s : %s", source, query)
 			tags := []string{"recherche", "apprentissage", strings.ToLower(source)}
-			
+
 			// Store in the LTM
 			errStore := a.ltm.StoreMemory(bgCtx, "Technical", "curiosity", title, factSummary, tags, embedding, 0.4)
 			if errStore == nil {
@@ -2860,7 +2864,7 @@ Réponds UNIQUEMENT avec la phrase, rien d'autre.`, query, knowledge)
 						Tags:       tags,
 					})
 				}
-				
+
 				// Optional: also push it to the lateral vector/thought stream to bias current consciousness
 				if a.thoughtStream != nil && a.coreMemory != nil {
 					thoughtContent := fmt.Sprintf("[Apprentissage] %s", factSummary)
@@ -2938,18 +2942,48 @@ func detectAuditFormatIntent(input string) (bool, string) {
 
 	isAuditAction := strings.Contains(clean, "vérifie") || strings.Contains(clean, "verifie") || strings.Contains(clean, "audite") || strings.Contains(clean, "analyse") || strings.Contains(clean, "contrôle") || strings.Contains(clean, "controle") || strings.Contains(clean, "corrige") || strings.Contains(clean, "répare") || strings.Contains(clean, "repare") || strings.Contains(clean, "relecteur")
 
-	if (hasFormatKeyword && hasPublishedKeyword && isAuditAction) ||
-		strings.Contains(clean, "problème de formatage") || strings.Contains(clean, "probleme de formatage") ||
-		strings.Contains(clean, "problèmes de formatage") || strings.Contains(clean, "vérifier les publication") ||
-		strings.Contains(clean, "verifier les publication") || strings.Contains(clean, "corriger les publication") ||
-		strings.Contains(clean, "corrige la publication") || strings.Contains(clean, "corrige l'article") ||
-		strings.Contains(clean, "vérifie la publication") || strings.Contains(clean, "vérifie l'article") {
+	directTriggers := []string{
+		"corrige les autres", "vérifie les autres", "verifie les autres",
+		"corrige les articles", "corriger les articles",
+		"vérifie les articles", "verifier les articles",
+		"corrige tous les articles", "vérifie tous les articles", "verifie tous les articles",
+		"audite tous les articles", "auditer tous les articles", "audite les articles",
+		"problème de formatage", "probleme de formatage", "problèmes de formatage",
+		"vérifier les publication", "verifier les publication", "corriger les publication",
+		"corrige la publication", "corrige l'article", "corriger l'article",
+		"vérifie la publication", "vérifie l'article", "verifier l'article",
+	}
+	hasDirectTrigger := false
+	for _, dt := range directTriggers {
+		if strings.Contains(clean, dt) {
+			hasDirectTrigger = true
+			break
+		}
+	}
+
+	if (hasFormatKeyword && hasPublishedKeyword && isAuditAction) || hasDirectTrigger {
 
 		if strings.Contains(clean, "seul") || strings.Contains(clean, "uniquement") || strings.Contains(clean, "sans modifier") || strings.Contains(clean, "lecture seule") {
 			return true, "audit-only"
 		}
 
-		// Check if a specific article title is requested after a colon (e.g. "corrige l'article : Le Choc des Géants")
+		// Extract specific article title if requested after a colon, or within quotes / guillemets
+		if strings.Contains(input, `"`) {
+			parts := strings.Split(input, `"`)
+			if len(parts) >= 3 && len(strings.TrimSpace(parts[1])) > 3 {
+				return true, strings.TrimSpace(parts[1])
+			}
+		}
+		if strings.Contains(input, `«`) && strings.Contains(input, `»`) {
+			start := strings.Index(input, `«`)
+			end := strings.Index(input, `»`)
+			if end > start+1 {
+				target := strings.TrimSpace(input[start+len(`«`) : end])
+				if len(target) > 3 {
+					return true, target
+				}
+			}
+		}
 		if strings.Contains(input, ":") {
 			parts := strings.SplitN(input, ":", 2)
 			if len(parts) == 2 {
@@ -3282,7 +3316,9 @@ func (a *SuperiorAgent) generateAndScheduleArticle(ctx context.Context, rawTopic
 	}
 
 	var payloadMap map[string]string
-	result, err := llm.GenerateWithTokens(ctx, a.llmProvider, messages, 3500)
+	result, err := llm.GenerateWithContinuation(ctx, a.llmProvider, messages, 6144, func(pass int) {
+		fmt.Printf("[SuperiorAgent] Plafond de tokens atteint (finish_reason=length) : poursuite automatique #%d...\n", pass)
+	})
 	if err == nil {
 		title, keywords, content := ParseDelimitedArticle(result)
 		if title == "" {
@@ -3448,7 +3484,6 @@ func detectFaceDiscoveryIntent(cleanInput string, currentProfile string) (bool, 
 	return false, ""
 }
 
-
 func (a *SuperiorAgent) handleIntroductionStream(ctx context.Context, name string, out chan<- string, errs chan<- error) {
 	out <- fmt.Sprintf("Enchanté %s ! Un instant, je te regarde avec ma caméra pour faire ta connaissance... 📸\n\n", name)
 
@@ -3470,7 +3505,7 @@ func (a *SuperiorAgent) handleIntroductionStream(ctx context.Context, name strin
 		description = "Une nouvelle personne dont l'apparence physique n'a pas pu être capturée"
 	} else {
 		a.coreMemory.UpdateVolatileState("Apparence", description)
-		
+
 		embedding, errEmbed := a.llmProvider.CreateEmbedding(ctx, fmt.Sprintf("Pixel a rencontré %s. Description physique : %s", name, description))
 		if errEmbed == nil && len(embedding) > 0 {
 			a.ltm.StoreMemory(
@@ -3547,7 +3582,7 @@ func (a *SuperiorAgent) handleIntroduction(ctx context.Context, name string) (st
 		description = "Une nouvelle personne dont l'apparence physique n'a pas pu être capturée"
 	} else {
 		a.coreMemory.UpdateVolatileState("Apparence", description)
-		
+
 		embedding, errEmbed := a.llmProvider.CreateEmbedding(ctx, fmt.Sprintf("Pixel a rencontré %s. Description physique : %s", name, description))
 		if errEmbed == nil && len(embedding) > 0 {
 			a.ltm.StoreMemory(
@@ -3684,7 +3719,7 @@ Consignes strictes :
 func isGreeting(input string) bool {
 	clean := strings.ToLower(strings.TrimSpace(input))
 	clean = strings.Trim(clean, ".,!?* \t\n\r")
-	
+
 	greetings := []string{
 		"bonjour", "salut", "hello", "coucou", "hey", "yop", "bonsoir", "yo", "hi", "allo", "allô",
 		"bon matin", "bonne après-midi", "bonne apres-midi", "chao", "ciao",
@@ -3694,7 +3729,7 @@ func isGreeting(input string) bool {
 			return true
 		}
 	}
-	
+
 	prefixes := []string{
 		"bonjour ", "salut ", "hello ", "coucou ", "hey ", "yop ", "bonsoir ", "yo ", "hi ", "allô ", "allo ",
 	}
@@ -3706,7 +3741,7 @@ func isGreeting(input string) bool {
 			}
 		}
 	}
-	
+
 	return false
 }
 
@@ -3769,6 +3804,3 @@ func isToolProposal(msg string) bool {
 	}
 	return false
 }
-
-
-

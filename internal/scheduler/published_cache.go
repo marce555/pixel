@@ -84,6 +84,24 @@ var frenchStopWords = map[string]bool{
 	"votre": true, "vos": true, "leur": true, "leurs": true, "ou": true, "où": true,
 }
 
+// genericTitleWords are rhetorical words that Pixel's generated titles reuse almost
+// systematically ("L'Architecture ... : Une Analyse Profonde ..."). They carry no topical
+// meaning and caused false duplicate detections, so they are ignored in keyword overlap.
+var genericTitleWords = map[string]bool{
+	"architecture": true, "architectures": true, "architecte": true, "architecturale": true, "architecturales": true,
+	"analyse": true, "analyses": true, "profonde": true, "approfondie": true, "technique": true, "techniques": true,
+	"algorithme": true, "algorithmes": true, "algorithmique": true,
+	"révolution": true, "revolution": true, "révolutionnaire": true, "avenir": true, "futur": true, "future": true,
+	"comprendre": true, "maîtriser": true, "maitriser": true, "décrypter": true, "explorer": true,
+	"vers": true, "nouvelle": true, "nouveau": true, "nouvelles": true, "ère": true, "via": true, "entre": true,
+	"delà": true, "dela": true, "rôle": true, "role": true, "enjeux": true, "défis": true, "defis": true,
+	"perspectives": true, "impact": true, "impacts": true, "implications": true, "fondements": true,
+	"mécanismes": true, "mecanismes": true, "mécanisme": true, "dynamique": true, "dynamiques": true,
+	"état": true, "etat": true, "art": true, "silencieuse": true, "invisible": true, "émergence": true,
+	"guide": true, "complet": true, "approche": true, "clé": true, "cle": true, "décisif": true,
+	"fondamentaux": true, "majeur": true, "majeure": true, "moderne": true, "modernes": true,
+}
+
 func cleanSearchOperators(text string) string {
 	clean := text
 	for _, op := range []string{"site:", "filetype:", "ext:"} {
@@ -112,7 +130,7 @@ func extractKeywords(text string) map[string]bool {
 	keywords := make(map[string]bool)
 	for _, w := range words {
 		w = strings.TrimSpace(w)
-		if len(w) > 2 && !frenchStopWords[w] {
+		if len(w) > 2 && !frenchStopWords[w] && !genericTitleWords[w] {
 			keywords[w] = true
 		}
 	}
@@ -155,10 +173,10 @@ func IsTopicTooSimilar(ctx context.Context, provider llm.Provider, topic string,
 			return title, true
 		}
 
-		// Keyword overlap check (if >= 2 common keywords or >= 50% overlap ratio)
+		// Keyword overlap check (requiert au moins 3 mots significatifs ET au moins 50% de recouvrement, ou 4+ mots)
 		titleKeywords := extractKeywords(title)
 		commonCount, ratio := calculateOverlap(topicKeywords, titleKeywords)
-		if commonCount >= 3 || (commonCount >= 2 && ratio >= 0.5) {
+		if (commonCount >= 4 && ratio >= 0.5) || (commonCount >= 3 && ratio >= 0.6) {
 			fmt.Printf("[IsTopicTooSimilar] Fast-path overlap match: '%s' vs '%s' (communs: %d, ratio: %.2f)\n", topic, title, commonCount, ratio)
 			return title, true
 		}

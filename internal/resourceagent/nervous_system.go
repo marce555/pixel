@@ -64,7 +64,7 @@ func recordLiveLog(tag, cleanMsg string) {
 	defer liveLogsMu.Unlock()
 	timestamp := time.Now().Format("15:04:05")
 	formatted := fmt.Sprintf("[%s] [%s] %s", timestamp, tag, cleanMsg)
-	
+
 	// Éviter les doublons consécutifs identiques
 	if len(liveLogs) > 0 && liveLogs[len(liveLogs)-1] == formatted {
 		return
@@ -94,7 +94,7 @@ func GetLiveLogs() []string {
 
 func GetSystemStatus() SystemStatus {
 	numCPUs := runtime.NumCPU()
-	
+
 	// 1. Test Internet
 	internetActive := checkInternet()
 
@@ -137,7 +137,7 @@ func checkInternet() bool {
 	// Tester plusieurs endpoints en parallèle — un seul suffit pour confirmer la connexion
 	endpoints := []string{
 		"http://www.wikipedia.org",
-		"http://1.1.1.1",       // Cloudflare DNS (IP directe, pas de DNS requis)
+		"http://1.1.1.1",                                    // Cloudflare DNS (IP directe, pas de DNS requis)
 		"http://connectivitycheck.gstatic.com/generate_204", // Google connectivity check
 	}
 

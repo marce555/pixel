@@ -70,13 +70,18 @@ func main() {
 
 	draftManager := scheduler.NewDraftManager("drafts")
 	reviewer := agent.NewReviewerAgent(provider)
+	webAgent := agent.NewWebAgent()
+	factChecker := agent.NewFactCheckerAgent(provider, webAgent)
+	biblioAuditor := agent.NewBibliographicAuditorAgent(provider, webAgent)
 
-	handler := scheduler.NewAuditAndFixArticlesHandler(
+	handler := scheduler.NewAuditAndFixArticlesHandlerWithBibliographicAuditor(
 		&consoleBroadcaster{},
 		&dummySTM{},
 		provider,
 		draftManager,
 		reviewer,
+		factChecker,
+		biblioAuditor,
 	)
 
 	task := &scheduler.Task{

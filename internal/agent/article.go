@@ -31,7 +31,11 @@ RÈGLES IMPÉRATIVES DE RÉDACTION, DE RIGUEUR ET DE NON-HALLUCINATION :
      * Des listes à puces <ul><li>...</li></ul> ou numérotées <ol><li>...</li></ol> pour aérer la lecture.
      * RÈGLE OBLIGATOIRE : Au moins un TABLEAU HTML complet (<table>, <thead>, <tbody>, <tr>, <th>, <td>) de RÉFÉRENCES ET SOURCES DOCUMENTAIRES VÉRIFIABLES en fin d'article (colonnes : Référence / Source, Type de Ressource [ex: Spécification / RFC, Documentation officielle, Étude scientifique, Standard], Description & Thématique couverte). Ce tableau doit comporter EXCLUSIVEMENT des ressources réelles et vérifiables en lien avec le sujet (ne JAMAIS inventer de référence ou de projet fictif).
      * RÈGLE OBLIGATOIRE (si sujet technique/info/sciences) : Au moins un ou plusieurs blocs de code HTML complets formatés avec <pre><code class="language-...">...</code></pre> (ex: language-bash, language-python, language-json, language-yaml).
-5. Ne mets AUCUNE formule de politesse du type "Voici l'article", commence directement avec les délimiteurs ci-dessous.
+5. RÈGLE IMPÉRATIVE DE PLAN FINI ET DE CONCLUSION COMPLÈTE (ANTI-TRONCATURE) :
+   - Assure-toi de structurer l'article jusqu'à sa conclusion complète. Ne laisse AUCUNE phrase inachevée.
+   - Calibre ton développement pour que l'intégralité du plan et de la conclusion tienne dans la réponse sans coupure.
+   - Termine OBLIGATOIREMENT par une véritable section de conclusion explicite (avec un titre <h2>Conclusion...</h2>) résumant les perspectives d'avenir, et referme rigoureusement toutes les balises HTML ouvertes (dont impérativement </article>).
+6. Ne mets AUCUNE formule de politesse du type "Voici l'article", commence directement avec les délimiteurs ci-dessous.
 
 Formatte ta réponse EXACTEMENT avec la structure suivante :
 

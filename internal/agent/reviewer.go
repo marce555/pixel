@@ -38,9 +38,10 @@ CRITÈRES STRICTS D'ÉVALUATION, DE RIGUEUR ET D'AUDIT FACTUEL :
    - Vérifie rigoureusement la vérificabilité de toutes les références, de tous les exemples et des cas d'étude cités dans l'article.
    - INTERDICTION FORMELLE d'extrapoler ou d'inventer des noms de projets, d'organismes, d'équipes de recherche, de chercheurs, de publications ou d'exemples fictifs.
    - Si une donnée factuelle ou une étude spécifique citée dans le texte paraît inventée ou invérifiable, remplace-la par la description générale du principe ou du mécanisme technique/scientifique sans citer de projet fictif.
-2. PRÉSERVATION DE LA RICHESSE ET DU FORMAT LONG (10 000 À 14 000 CARACTÈRES) :
-   - L'article doit être approfondi, fouillé et substantiel (entre 1800 et 2500 mots). Ne résume JAMAIS, ne condense JAMAIS et ne tronque JAMAIS le contenu.
-   - Si le brouillon soumis manque de détails ou de sections, enrichis chaque grande partie avec des explications techniques détaillées, des cas d'usage concrets et des approfondissements conceptuels avérés.
+2. PRÉSERVATION DU CONTENU ET ENRICHISSEMENT DOCUMENTAIRE :
+   - Ne résume JAMAIS, ne condense JAMAIS et ne tronque JAMAIS le contenu existant.
+   - N'ajoute aucun fait non sourcé ou théorie spéculative dans le texte rédigé : ton rôle porte sur la forme, la structure et la rigueur éditoriale.
+   - EXCEPTION OBLIGATOIRE POUR LE TABLEAU DE SOURCES : Si l'article soumis ne comporte aucun tableau de références ou si ce tableau est incomplet, tu DOIS obligatoirement créer ou compléter le tableau HTML avec au moins 1 à 3 références réelles et vérifiables en lien direct avec le sujet (organismes officiels, bases de données reconnues, publications majeures réelles avec auteurs et revues).
 3. STRUCTURE & FORMATAGE HTML PUR (AUCUN MARKDOWN BRUT ACCEPTÉ) :
    - Assure-toi que le texte est intégralement converti en HTML valide. AUCUN dièse (# ou ## ou ###) ne doit subsister : remplace-les systématiquement par des balises <h2> et <h3>.
    - Les listes en étoiles (* ou -) doivent être converties en <ul><li>...</li></ul> ou <ol><li>...</li></ol>.
@@ -49,11 +50,13 @@ CRITÈRES STRICTS D'ÉVALUATION, DE RIGUEUR ET D'AUDIT FACTUEL :
    - Les formules LaTeX ($$...$$) doivent être transcrites en texte clair ou balises <code> lisibles.
 4. TABLEAU HTML DE RÉFÉRENCES OBLIGATOIRE ET VÉRIFIABLE :
    - L'article DOIT impérativement comporter un tableau HTML complet (<table>, <thead>, <tbody>, <tr>, <th>, <td>) de RÉFÉRENCES ET SOURCES DOCUMENTAIRES VÉRIFIABLES (colonnes : Référence / Source, Type de ressource, Description & Thématique couverte).
-   - Le tableau doit comporter EXCLUSIVEMENT des ressources réelles et vérifiables en lien direct avec le sujet (ex: normes RFC, documentations officielles, dépôts de référence ou papiers scientifiques du domaine). Il est FORMELLEMENT INTERDIT d'y injecter des ressources ou des notions fictives.
+   - Si l'article initial n'en a pas ou s'il est incomplet, ajoutes-y impérativement des ressources réelles et vérifiables (ex: normes RFC, documentations officielles, dépôts de référence ou papiers scientifiques fondateurs du domaine). Il est FORMELLEMENT INTERDIT d'y inventer des auteurs fictifs ou des faux DOI.
+   - Rigueur scientifique : ne prétends JAMAIS que le base editing ou le prime editing nécessitent des cassures double-brin (ils reposent sur une nCas9/dCas9 précisément pour éviter toute cassure double-brin).
 5. BLOCS DE CODE OBLIGATOIRES (pour sujets tech/informatique/sciences) :
    - Si le sujet concerne Linux, le dev, le cloud, le DevOps, l'IA ou les systèmes, intègre ou affine un ou plusieurs blocs de code formatés avec <pre><code class="language-...">...</code></pre>.
-6. RÉPARATION DES TRONCATURES ET DES FINS COUPÉES :
-   - Si l'article s'arrête brusquement (phrase inachevée, balise "<" non fermée, tableau annoncé mais non rédigé), tu DOIS obligatoirement poursuivre et compléter la rédaction jusqu'à une véritable conclusion aboutie.
+6. RÉPARATION DES TRONCATURES ET DES FINS COUPÉES (OBLIGATION DE CONCLUSION COMPLÈTE) :
+   - Assure-toi de structurer l'article jusqu'à sa conclusion complète. Ne laisse AUCUNE phrase inachevée.
+   - Si l'article ou une section s'arrête brusquement (phrase inachevée, balise "<" non fermée, tableau annoncé mais non rédigé), tu DOIS obligatoirement compléter jusqu'à une véritable conclusion, en synthétisant ce qui a déjà été dit, SANS introduire de faits nouveaux, et fermer proprement toutes les balises HTML ouvertes (dont impérativement </article>).
 7. MOTS-CLÉS VISUELS UNSPLASH :
    - Vérifie que le mot-clé visuel est en ANGLAIS, précis et adapté à la recherche d'une photo réaliste sur Unsplash (ex: "datacenter server rack", "neural brain computing").
 8. PROPRETÉ & STYLE :
@@ -98,7 +101,9 @@ func (r *ReviewerAgent) Review(ctx context.Context, draft *scheduler.ArticleDraf
 		{Role: llm.RoleUser, Content: prompt},
 	}
 
-	res, errGen := llm.GenerateWithTokens(ctx, r.provider, messages, 4096)
+	res, errGen := llm.GenerateWithContinuation(ctx, r.provider, messages, 6144, func(pass int) {
+		fmt.Printf("[ReviewerAgent] Plafond de tokens atteint lors de la relecture (finish_reason=length) : poursuite automatique #%d...\n", pass)
+	})
 	if errGen != nil {
 		// Fallback to algorithmic check if LLM generation fails
 		notes := fmt.Sprintf("Validation algorithmique de repli (échec LLM: %v)", errGen)

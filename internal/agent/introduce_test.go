@@ -69,7 +69,7 @@ func TestHandleIntroduction(t *testing.T) {
 
 	// Create vision agent (without webcam dependencies by mocking or overriding CaptureAndAnalyze)
 	visionAgent := NewVisionAgent(provider, coreMem, ltm, memory.NewSTM(8), nil, func(msg string) {})
-	
+
 	// Create superior agent
 	superior := NewSuperiorAgent(provider, coreMem, ltm, nil, nil, nil, nil, nil, nil)
 	superior.SetVisionAgent(visionAgent)
@@ -100,7 +100,7 @@ func TestIdentifyInterlocutor(t *testing.T) {
 	// Set up known interlocutor with appearance
 	coreMem.SwitchActiveProfile("Alice")
 	coreMem.UpdateVolatileState("Apparence", "Une femme blonde aux cheveux courts portant un pull rouge")
-	
+
 	// Switch back to Marcelo
 	coreMem.SwitchActiveProfile("Marcelo")
 
@@ -363,4 +363,3 @@ func TestDetectFaceDiscoveryIntent(t *testing.T) {
 		}
 	}
 }
-

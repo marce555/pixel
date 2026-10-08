@@ -66,12 +66,12 @@ Réponds UNIQUEMENT en JSON :
 	maxSteps := 15
 	for step := 1; step <= maxSteps; step++ {
 		fmt.Printf("[Researcher] Étape %d/%d...\n", step, maxSteps)
-		
+
 		resp, err := r.llmProvider.Generate(ctx, messages)
 		if err != nil {
 			return fmt.Sprintf("Erreur lors de la réflexion de recherche : %v", err)
 		}
-		
+
 		// Clean JSON
 		respClean := strings.TrimSpace(resp)
 		if strings.HasPrefix(respClean, "```json") {
@@ -82,7 +82,7 @@ Réponds UNIQUEMENT en JSON :
 			respClean = strings.TrimSuffix(respClean, "```")
 		}
 		respClean = strings.TrimSpace(respClean)
-		
+
 		// Tentative d'extraction de la partie JSON (si le LLM a bavardé avant ou après)
 		jsonStart := strings.Index(respClean, "{")
 		jsonEnd := strings.LastIndex(respClean, "}")
@@ -111,19 +111,35 @@ Réponds UNIQUEMENT en JSON :
 		if action.Type == "search" {
 			fmt.Printf("[Researcher] Recherche web : %s\n", action.Target)
 			searchRes, err := r.webAgent.SearchWeb(action.Target)
-			if err != nil { observation = fmt.Sprintf("Erreur : %v", err) } else { observation = searchRes }
+			if err != nil {
+				observation = fmt.Sprintf("Erreur : %v", err)
+			} else {
+				observation = searchRes
+			}
 		} else if action.Type == "news" {
 			fmt.Printf("[Researcher] Recherche d'actualités : %s\n", action.Target)
 			newsRes, err := r.webAgent.SearchNews(action.Target)
-			if err != nil { observation = fmt.Sprintf("Erreur : %v", err) } else { observation = newsRes }
+			if err != nil {
+				observation = fmt.Sprintf("Erreur : %v", err)
+			} else {
+				observation = newsRes
+			}
 		} else if action.Type == "scrape" {
 			fmt.Printf("[Researcher] Scraping URL : %s\n", action.Target)
 			scrapeRes, err := r.webAgent.ReadURLContent(action.Target)
-			if err != nil { observation = fmt.Sprintf("Erreur : %v", err) } else { observation = scrapeRes }
+			if err != nil {
+				observation = fmt.Sprintf("Erreur : %v", err)
+			} else {
+				observation = scrapeRes
+			}
 		} else if action.Type == "browse" {
 			fmt.Printf("[Researcher] Navigation dynamique URL : %s\n", action.Target)
 			browseRes, err := r.webAgent.ReadURLDynamic(action.Target)
-			if err != nil { observation = fmt.Sprintf("Erreur : %v", err) } else { observation = browseRes }
+			if err != nil {
+				observation = fmt.Sprintf("Erreur : %v", err)
+			} else {
+				observation = browseRes
+			}
 		} else if action.Type == "consult_gemini" {
 			fmt.Printf("[Researcher] Consultation de Gemini : %s\n", action.Target)
 			type cloudProviderGetter interface {
@@ -206,7 +222,7 @@ Extrais UNIQUEMENT les informations (faits, chiffres, explications) qui réponde
 // generateFinalReport takes the accumulated scratchpad notes and writes a beautifully formatted Markdown report.
 func (r *WebResearcherAgent) generateFinalReport(ctx context.Context, query string, scratchpad string) string {
 	fmt.Println("[Researcher] Rédaction du rapport final...")
-	
+
 	systemPrompt := fmt.Sprintf("Tu es un Analyste de Données Expert. Ta mission est de rédiger un rapport final détaillé et structuré en réponse à la requête de l'utilisateur.\nInformation importante : La date actuelle est le %s.", time.Now().Format("02/01/2006 à 15:04"))
 	userPrompt := fmt.Sprintf(`Requête initiale : "%s"
 
@@ -239,9 +255,9 @@ Consignes de rédaction :
 func NewResearchTaskHandler(researcher *WebResearcherAgent, broadcaster EventBroadcaster, stm *memory.STM) scheduler.TaskHandler {
 	return func(ctx context.Context, task *scheduler.Task) error {
 		task.AppendLog(fmt.Sprintf("Démarrage de la recherche profonde : '%s'", task.Payload))
-		
+
 		synthesis := researcher.RunResearch(ctx, task.Payload)
-		
+
 		task.AppendLog("Recherche terminée. Diffusion du rapport...")
 
 		formattedResponse := fmt.Sprintf(`🤖 **[Recherche Web Terminée]**
@@ -254,7 +270,7 @@ func NewResearchTaskHandler(researcher *WebResearcherAgent, broadcaster EventBro
 		broadcaster.Broadcast(formattedResponse)
 		stm.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: formattedResponse})
 		task.AppendLog("Rapport diffusé au chat utilisateur avec succès !")
-		
+
 		return nil
 	}
 }

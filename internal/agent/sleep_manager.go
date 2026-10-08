@@ -253,7 +253,7 @@ Réponds UNIQUEMENT avec un objet JSON strictement valide et bien formé (sans b
 
 		// Reconciliation Step: Search for existing similar memories
 		pastMemories, _ := s.ltm.SearchRawEntries(ctx, "", embedding, 3)
-		
+
 		if len(pastMemories) > 0 {
 			var pastContext strings.Builder
 			for _, pm := range pastMemories {
@@ -566,7 +566,7 @@ func repairJSON(s string) string {
 	s = strings.ReplaceAll(s, ",\n}", "}")
 	s = strings.ReplaceAll(s, ",]", "]")
 	s = strings.ReplaceAll(s, ",\n]", "]")
-	
+
 	// 3. Fix double commas or malformed colons
 	s = strings.ReplaceAll(s, `", : "`, `": "`)
 	s = strings.ReplaceAll(s, `",:`, `":`)
@@ -595,7 +595,7 @@ func repairJSON(s string) string {
 	var stack []rune
 	inQuote := false
 	escaped := false
-	
+
 	var cleanRunes []rune
 	for _, r := range s {
 		if escaped {
@@ -639,7 +639,7 @@ func repairJSON(s string) string {
 	if inQuote {
 		repaired += `"`
 	}
-	
+
 	repaired = strings.TrimSpace(repaired)
 	if strings.HasSuffix(repaired, ",") {
 		repaired = repaired[:len(repaired)-1]
@@ -776,5 +776,3 @@ Réponds UNIQUEMENT avec un JSON valide, sans formatage markdown additionnel, so
 	s.coreMemory.UpdateDynamicGoals(result.Goals)
 	fmt.Printf("[SleepManager] Objectifs dynamiques mis à jour avec succès (%d objectifs trouvés).\n", len(result.Goals))
 }
-
-

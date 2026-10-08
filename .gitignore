@@ -1,5 +1,6 @@
 # Binaries & Executables
 /pixel
+/audit_runner
 pixel_gui
 bin/pixel
 bin/pixel_gui

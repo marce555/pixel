@@ -211,7 +211,7 @@ func (c *CuriosityAgent) Start(ctx context.Context) {
 						if checker, ok := c.broadcaster.(interface{ HasClients() bool }); ok {
 							hasClients = checker.HasClients()
 						}
-						
+
 						if hasClients && !isAbsent && c.ShouldInitiateConversation(ctx, idleDuration) {
 							c.proposeToShare(ctx)
 						} else if !hasClients || isAbsent {
@@ -423,7 +423,7 @@ RÈGLES ABSOLUES :
 		c.mu.Unlock()
 		return
 	}
-	
+
 	// Garde-fou Anti-Race Condition : Si un nouveau message a été ajouté à la STM pendant la génération
 	if len(c.stm.GetMessages()) != len(msgs) {
 		log.Println("[CuriosityAgent] La conversation a repris pendant la génération de l'interpellation. Relance annulée.")
@@ -489,7 +489,8 @@ Réponds UNIQUEMENT par le mot 'true' ou 'false', rien d'autre.`, int(idle.Minut
 	}
 
 	resp, err := c.llmProvider.Generate(ctx, messages)
-	if err != nil { fmt.Printf("[CuriosityAgent] Erreur LLM: %v\n", err)
+	if err != nil {
+		fmt.Printf("[CuriosityAgent] Erreur LLM: %v\n", err)
 		return false
 	}
 
@@ -598,7 +599,7 @@ Réponds UNIQUEMENT avec la requête exacte de recherche scientifique, sans guil
 	}
 
 	topic, err := c.llmProvider.Generate(ctx, intentionMessages)
-	if err != nil { 
+	if err != nil {
 		fmt.Printf("[CuriosityAgent] Erreur LLM intention: %v\n", err)
 		return
 	}
@@ -669,9 +670,26 @@ Réponds UNIQUEMENT avec la phrase, rien d'autre.`, topic, knowledge)
 		if c.coreMemory.GetProfile().Volatile != nil {
 			lastPublishDate = c.coreMemory.GetProfile().Volatile["last_publish_date"]
 		}
-		
-		if lastPublishDate == todayStr {
-			fmt.Printf("[CuriosityAgent] Publication autonome ignorée pour '%s' : un article a déjà été planifié aujourd'hui (%s).\n", topic, todayStr)
+
+		publishedToday := false
+		dm := scheduler.NewDraftManager("drafts")
+		if dm.HasPublishedArticleOnDate(todayStr) {
+			publishedToday = true
+		} else if lastPublishDate == todayStr {
+			// Si last_publish_date est positionné mais qu'aucun article n'a été publié aujourd'hui
+			// (ex: échec ou rejet), on vérifie les tâches en cours
+			if c.scheduler != nil {
+				for _, t := range c.scheduler.GetTasks() {
+					if t.Type == "publish_article" && (t.Status == scheduler.StatusPending || t.Status == scheduler.StatusRunning) {
+						publishedToday = true
+						break
+					}
+				}
+			}
+		}
+
+		if publishedToday {
+			fmt.Printf("[CuriosityAgent] Publication autonome ignorée pour '%s' : un article a déjà été publié ou est en cours aujourd'hui (%s).\n", topic, todayStr)
 		} else {
 			published, _ := scheduler.LoadPublishedArticles()
 			if matchedTitle, tooSimilar := scheduler.IsTopicTooSimilar(ctx, c.llmProvider, topic, published); tooSimilar {
@@ -689,7 +707,9 @@ Réponds UNIQUEMENT avec la phrase, rien d'autre.`, topic, knowledge)
 				}
 
 				var payloadMap map[string]string
-				result, err := llm.GenerateWithTokens(ctx, c.llmProvider, messages, 3500)
+				result, err := llm.GenerateWithContinuation(ctx, c.llmProvider, messages, 6144, func(pass int) {
+					fmt.Printf("[CuriosityAgent] Plafond de tokens atteint (finish_reason=length) : poursuite automatique #%d...\n", pass)
+				})
 				if err == nil {
 					title, keywords, content := ParseDelimitedArticle(result)
 					if title == "" {
@@ -993,7 +1013,7 @@ func (c *CuriosityAgent) proposeToShare(ctx context.Context) {
 		if len(recentMsgs) > 4 {
 			recentMsgs = recentMsgs[len(recentMsgs)-4:]
 		}
-		
+
 		permitted, reason := c.thalamicGate.ShouldPermitThought(ctx, topic, recentMsgs)
 		if !permitted {
 			fmt.Printf("[ThalamicGate] Pensée inhibée (bloquée) ! Raison : %s\n", reason)

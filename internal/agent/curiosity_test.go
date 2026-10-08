@@ -912,9 +912,3 @@ func TestSleepManagerDynamicGoals(t *testing.T) {
 		t.Errorf("Unexpected goal consolidated: %+v", goals[0])
 	}
 }
-
-
-
-
-
-

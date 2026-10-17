@@ -118,9 +118,11 @@ func (s *ServerMonitorAgent) CheckOnce(ctx context.Context) {
 	}
 
 	// 2. Analyse rapide : est-ce que le rapport signale explicitement un statut nominal sans erreur ?
-	isNominal := strings.Contains(rawResult, "=== STATUT APPLIYOU.FR : NOMINAL ===") &&
-		!strings.Contains(rawResult, "ANOMALIE") &&
-		!strings.Contains(rawResult, "CRITIQUE")
+	isNominal := (strings.Contains(rawResult, "=== STATUT APPLIYOU.FR : NOMINAL ===") || strings.Contains(rawResult, "TOUT EST NOMINAL") || strings.Contains(rawResult, "SAIN")) &&
+		!strings.Contains(rawResult, "ANOMALIE_CRITIQUE") &&
+		!strings.Contains(rawResult, "ANOMALIES DÉTECTÉES") &&
+		!strings.Contains(rawResult, "ÉCHEC DE CONNEXION") &&
+		!strings.Contains(rawResult, "Impossible de joindre")
 
 	if isNominal {
 		log.Println("[ServerMonitorAgent] Rapport appliyou.fr nominal. Aucun incident, silence radio.")

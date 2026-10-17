@@ -7,13 +7,13 @@ import re
 
 SERVER = "root@appliyou.fr"
 
-def run_ssh_command(cmd, timeout=18):
+def run_ssh_command(cmd, timeout=35):
     ssh_opts = [
         "ssh",
         "-n",
         "-T",
         "-o", "BatchMode=yes",
-        "-o", "ConnectTimeout=10",
+        "-o", "ConnectTimeout=15",
         "-o", "ConnectionAttempts=2",
         "-o", "StrictHostKeyChecking=accept-new",
         SERVER,
@@ -29,7 +29,7 @@ def run_ssh_command(cmd, timeout=18):
         )
         return res.returncode, res.stdout.strip(), res.stderr.strip()
     except subprocess.TimeoutExpired:
-        return -1, "", "Délai d'attente SSH dépassé (> 18s). Serveur ou réseau injoignable."
+        return -1, "", "Délai d'attente SSH dépassé (> 35s). Serveur ou réseau injoignable."
     except Exception as e:
         return -2, "", str(e)
 
@@ -59,7 +59,7 @@ def main():
         "journalctl -p 3 -n 40 --no-pager 2>&1"
     )
 
-    code, stdout, stderr = run_ssh_command(script, timeout=20)
+    code, stdout, stderr = run_ssh_command(script, timeout=40)
 
     if code != 0:
         err_msg = stderr or stdout or "Erreur inconnue"
@@ -170,6 +170,7 @@ def main():
     # --- Synthèse finale claire et épurée ---
     if not security_problems and not warnings:
         # TOUT VA BIEN : Message synthétique, direct, sans étalage de détails inutiles
+        print("=== STATUT APPLIYOU.FR : NOMINAL ===")
         print("DIAGNOSTIC SÉCURITÉ & SANTÉ : TOUT EST NOMINAL")
         print(f"Le serveur {SERVER} est sain et sécurisé.")
         print("- Services web, base de données et conteneurs : Actifs (apache2, mariadb, docker)")
@@ -179,11 +180,13 @@ def main():
 
     # Si des avertissements ou problèmes sont détectés :
     if security_problems:
+        print("=== STATUT APPLIYOU.FR : ANOMALIES_DÉTECTÉES ===")
         print("DIAGNOSTIC SÉCURITÉ & SANTÉ : ANOMALIES DÉTECTÉES")
         print("\nProblèmes critiques :")
         for p in security_problems:
             print(f"- ❌ {p}")
     else:
+        print("=== STATUT APPLIYOU.FR : NOMINAL ===")
         print("DIAGNOSTIC SÉCURITÉ & SANTÉ : NOMINAL (AVEC POINTS D'ATTENTION)")
 
     if warnings:

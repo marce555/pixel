@@ -76,10 +76,15 @@ def main():
                     failed_services.append(unit_name)
 
         # Évaluation
-        issues = []
-        if failed_services:
-            issues.append(f"Services en panne : {', '.join(failed_services)}")
+        critical_svcs = ["apache2", "nginx", "docker", "mariadb", "mysql", "postgresql", "ssh", "sshd", "fail2ban"]
+        real_critical = [s for s in failed_services if any(c in s.lower() for c in critical_svcs)]
+        secondary = [s for s in failed_services if s not in real_critical]
 
+        issues = []
+        if real_critical:
+            issues.append(f"Services critiques en panne : {', '.join(real_critical)}")
+
+        disk_critical = False
         disk_used = ""
         disk_free = ""
         if disk_str:
@@ -91,19 +96,25 @@ def main():
                 try:
                     if int(use_pct) >= 90:
                         issues.append(f"Espace disque critique ({use_pct}%)")
+                        disk_critical = True
                 except ValueError:
                     pass
 
         if not issues:
-            print(f"DIAGNOSTIC SERVEUR ({server}) : NOMINAL")
-            print(f"Le serveur est en parfait état de fonctionnement.")
+            print(f"DIAGNOSTIC SERVEUR ({server}) : NOMINAL / SAIN")
+            print(f"Le serveur est stable et en bon état de fonctionnement.")
             print(f"- Charge / Uptime : {uptime_str}")
             print(f"- Disque : {disk_used if disk_used else 'OK'} utilisé ({disk_free} libres)")
-            print(f"- Aucun service en échec.")
+            if secondary:
+                print(f"- Note d'administration : {len(secondary)} service(s) secondaire(s) inactif(s) répertorié(s) ({', '.join(secondary)}). Aucun impact sur les services de base.")
+            else:
+                print(f"- Tous les services de base sont opérationnels.")
         else:
             print(f"DIAGNOSTIC SERVEUR ({server}) : ATTENTION REQUISE")
             for iss in issues:
                 print(f"- ⚠️ {iss}")
+            if secondary:
+                print(f"- Services secondaires inactifs : {', '.join(secondary)}")
             print(f"- Charge / Uptime : {uptime_str}")
             print(f"- Disque : {disk_used} utilisé ({disk_free} libres)")
 

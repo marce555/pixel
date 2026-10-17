@@ -485,13 +485,41 @@ func (a *SuperiorAgent) analyzeQuery(ctx context.Context, input string, history 
 		}
 	}
 
-	// Fast-path for checking appliyou.fr server logs
-	if strings.Contains(cleanInput, "logs d'appliyou") || strings.Contains(cleanInput, "logs de appliyou") ||
+	// Fast-path for checking server health / logs
+	isServerDiag := strings.Contains(cleanInput, "logs d'appliyou") || strings.Contains(cleanInput, "logs de appliyou") ||
 		strings.Contains(cleanInput, "logs d appliyou") || strings.Contains(cleanInput, "logs appliyou") ||
 		strings.Contains(cleanInput, "serveur appliyou") || strings.Contains(cleanInput, "appliyoufr") ||
 		strings.Contains(cleanInput, "état d'appliyou") || strings.Contains(cleanInput, "etat d'appliyou") ||
 		strings.Contains(cleanInput, "santé d'appliyou") || strings.Contains(cleanInput, "sante d'appliyou") ||
-		strings.Contains(cleanInput, "check appliyou") || strings.Contains(cleanInput, "check le serveur appliyou") {
+		strings.Contains(cleanInput, "check appliyou") || strings.Contains(cleanInput, "check le serveur") ||
+		strings.Contains(cleanInput, "check serveur") ||
+		strings.Contains(cleanInput, "analyse le serveur") || strings.Contains(cleanInput, "analyse du serveur") ||
+		strings.Contains(cleanInput, "analyse serveur") ||
+		strings.Contains(cleanInput, "diagnostique le serveur") || strings.Contains(cleanInput, "diagnostique serveur") ||
+		strings.Contains(cleanInput, "diagnostic du serveur") || strings.Contains(cleanInput, "diagnostic serveur") ||
+		strings.Contains(cleanInput, "état du serveur") || strings.Contains(cleanInput, "etat du serveur") ||
+		strings.Contains(cleanInput, "santé du serveur") || strings.Contains(cleanInput, "sante du serveur")
+
+	serverIPRegex := regexp.MustCompile(`([a-zA-Z0-9_\.-]+@)?\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b`)
+	ipMatch := serverIPRegex.FindString(input)
+
+	if isServerDiag || (ipMatch != "" && (strings.Contains(cleanInput, "diagnostic") || strings.Contains(cleanInput, "diagnostique") ||
+		strings.Contains(cleanInput, "santé") || strings.Contains(cleanInput, "sante") ||
+		strings.Contains(cleanInput, "état") || strings.Contains(cleanInput, "etat") ||
+		strings.Contains(cleanInput, "check") || strings.Contains(cleanInput, "analyse") ||
+		strings.Contains(cleanInput, "serveur"))) {
+
+		if ipMatch != "" && !strings.Contains(cleanInput, "appliyou") {
+			target := ipMatch
+			if !strings.Contains(target, "@") {
+				target = "root@" + target
+			}
+			return RouterResponse{
+				Action: "skill_ssh_server_health",
+				Query:  target,
+			}
+		}
+
 		return RouterResponse{
 			Action: "skill_check_appliyou_logs",
 			Query:  "",
@@ -975,7 +1003,7 @@ func (a *SuperiorAgent) buildTemporalContext(input string, from, to time.Time) s
 		dateLabel = fmt.Sprintf("du %s au %s", from.Format("02/01/2006"), to.AddDate(0, 0, -1).Format("02/01/2006"))
 	}
 
-	memories := a.ltm.SearchMemoryByTimeRange(from, to, 15)
+	memories := a.ltm.SearchMemoryByTimeRange(from, to, 30)
 	fmt.Printf("[Router] Navigation temporelle déclenchée. Période: %s, Résultats: %d\n", dateLabel, len(memories))
 
 	if len(memories) > 0 {
@@ -1111,6 +1139,19 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 
 	if isTemporalQuery {
 		additionalContext += a.buildTemporalContext(input, temporalFrom, temporalTo)
+		// Si la question temporelle contient des mots-clés ou entités (ex: "Laurent", un ami, un projet),
+		// enrichir également avec les souvenirs sémantiques pertinents
+		queryVector := speculativeEmbedding
+		if len(queryVector) == 0 {
+			queryVector, _ = a.llmProvider.CreateEmbedding(ctx, input)
+		}
+		if len(queryVector) > 0 {
+			memories, _ := a.ltm.SearchMemory(ctx, input, queryVector, 5)
+			if len(memories) > 0 {
+				joined := strings.Join(memories, "\n")
+				additionalContext += "\n\n--- SOUVENIRS SÉMANTIQUES ASSOCIÉS ---\n" + joined + "\n-------------------------------------"
+			}
+		}
 	} else if isOldestCheck {
 		oldest := a.ltm.GetOldestMemories(3)
 		if len(oldest) > 0 {
@@ -1334,8 +1375,8 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 			}
 			if skillName == "gemini_api_caller" {
 				additionalContext += fmt.Sprintf("\n\n--- RÉSULTAT DU DIALOGUE AVEC GEMINI (API CLOUD) ---\nVoici la réponse exacte renvoyée par l'API Cloud de Gemini à Pixel :\n%s\n\nConsigne pour Pixel : Tu es Pixel. Présente chaleureusement cette réponse de Gemini à l'utilisateur %s en lui restituant ce que ta brique Gemini vient de répondre.\n---------------------------------", result, a.coreMemory.GetProfile().Static.Name)
-			} else if skillName == "decouvrir_nouveau_visage" {
-				additionalContext += fmt.Sprintf("\n\n--- RÉSULTAT DE LA BRIQUE 'decouvrir_nouveau_visage' (CAMÉRA & VISION) ---\n%s\n\nConsigne pour Pixel : Tu viens d'ouvrir ta caméra pour observer la personne présente. Réagis avec ta personnalité propre, chaleureuse et naturelle. Si c'est un nouveau visage découvert, salue cette personne et demande-lui son prénom. Si c'est Marcelo ou un proche reconnu, salue-le amicalement et fais un clin d'œil sur ce que tu as vu.\n---------------------------------", result)
+			} else if skillName == "check_appliyou_logs" || skillName == "ssh_server_health" {
+				additionalContext += fmt.Sprintf("\n\n--- RÉSULTAT DU CONTRÔLE SERVEUR ---\n%s\n\nCONSIGNE STRICTE POUR PIXEL :\n- Fais un retour synthétique et direct sur l'état et la sécurité du serveur.\n- Si le résultat indique que tout est nominal ou sain, dis-le clairement en UNE seule phrase rassurante (ex: 'Tout va bien sur le serveur : les services tournent et aucun incident n'est à signaler.') SANS déverser de détails superflus ou anxiogènes.\n- Ne transforme JAMAIS des scans internet normaux ou des alertes de routine en incident critique.\n- Ne signale que les véritables problèmes bloquants de manière synthétique s'il y en a.\n---------------------------------", result)
 			} else {
 				additionalContext += fmt.Sprintf("\n\n--- RÉSULTAT DE LA BRIQUE '%s' ---\n%s\n---------------------------------", skillName, result)
 			}
@@ -2227,17 +2268,34 @@ func (a *SuperiorAgent) runReflectionLoop(ctx context.Context, input string, his
 		histSnippet.WriteString(fmt.Sprintf("%s: %s\n", history[i].Role, history[i].Content))
 	}
 
+	var contextSnippet strings.Builder
+	if strings.Contains(additionalContext, "--- SOUVENIRS") {
+		contextSnippet.WriteString("\nEXTRAIT DE TA MÉMOIRE DISPONIBLE POUR CETTE QUESTION :\n")
+		// Prendre la partie pertinente des souvenirs
+		idx := strings.Index(additionalContext, "--- SOUVENIRS")
+		part := additionalContext[idx:]
+		if endIdx := strings.Index(part, "--- ÉTAT PHYSIOLOGIQUE"); endIdx != -1 {
+			part = part[:endIdx]
+		}
+		if len(part) > 1200 {
+			part = part[:1200] + "... [TRONQUÉ]"
+		}
+		contextSnippet.WriteString(part)
+		contextSnippet.WriteString("\n")
+	}
+
 	reflectionPrompt := `Tu es Pixel. Tu génères ton monologue intérieur critique et autonome avant de répondre à l'utilisateur.
 Avant d'agir et de formuler ta réponse finale à l'utilisateur, tu DOIS effectuer une double-passe cognitive (self-critique & subgoal decomposition) :
 1. Analyse la requête présente et identifie les hypothèses implicites de l'utilisateur ainsi que tes propres biais potentiels ou premières impressions simplistes.
 2. Décompose la tâche en sous-objectifs (subgoal decomposition) pour explorer de manière créative l'espace des possibles.
 3. Formule une critique constructive de ces hypothèses et identifie les points clés ou nuances conceptuelles à intégrer dans ta réponse.
 
-CONCERNANT TON IDENTITÉ ET TON MONOLOGUE INTERNE :
+CONCERNANT TA MÉMOIRE ET TON IDENTITÉ :
+- Tu possèdes une mémoire persistante réelle (LTM vectorielle et navigation temporelle). Si des souvenirs te sont fournis ci-dessous, tu DOIS t'appuyer dessus. Ne prétends JAMAIS dans ton monologue intérieur que tu n'as pas de mémoire ou que chaque session est vide !
 - Rédige ce monologue TOUJOURS à la première personne du singulier ("Je", "Moi", "Mon", "Ma"). Ne parle jamais de toi à la troisième personne ("Pixel", "l'architecture") et ne t'interpelle pas à la deuxième personne ("Toi, Pixel").
 
 CONTEXTE CONVERSATIONNEL RÉCENT :
-` + histSnippet.String() + `
+` + histSnippet.String() + contextSnippet.String() + `
 REQUÊTE DE L'UTILISATEUR À TRAITER :
 ` + input + `
 

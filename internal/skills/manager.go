@@ -251,30 +251,55 @@ Ne mets aucun texte avant ou après ces deux blocs. Ton JSON doit être syntaxiq
 
 		// Extraire le bloc JSON
 		var jsonStr string
-		jsonRegex := regexp.MustCompile(`(?s)\x60\x60\x60(?:json)?\s*(\{.*?\})\s*\x60\x60\x60`)
+		jsonRegex := regexp.MustCompile("(?s)```(?:json)?\\s*(\\{.*?\\})\\s*```")
 		jsonMatches := jsonRegex.FindStringSubmatch(resp)
 		if len(jsonMatches) > 1 {
 			jsonStr = jsonMatches[1]
 		} else {
-			// fallback simple
+			// fallback: chercher le premier { jusqu'au premier } équilibré ou avant le code python
 			start := strings.Index(resp, "{")
-			end := strings.LastIndex(resp, "}")
-			if start != -1 && end != -1 && end > start {
-				jsonStr = resp[start : end+1]
+			if start != -1 {
+				// S'il y a un bloc ```python plus loin, borner la recherche avant ce bloc
+				searchArea := resp[start:]
+				pyFenceIdx := strings.Index(searchArea, "```")
+				if pyFenceIdx != -1 {
+					searchArea = searchArea[:pyFenceIdx]
+				}
+				end := strings.LastIndex(searchArea, "}")
+				if end != -1 {
+					jsonStr = searchArea[:end+1]
+				}
 			}
 		}
 
 		// Extraire le bloc Python
 		var pyStr string
-		pyRegex := regexp.MustCompile(`(?s)\x60\x60\x60(?:python|py)\s*(.*?)\s*\x60\x60\x60`)
-		pyMatches := pyRegex.FindStringSubmatch(resp)
-		if len(pyMatches) > 1 {
-			pyStr = pyMatches[1]
+		pyRegex := regexp.MustCompile("(?s)```(?:python|python3|py)?\\s*\\n?(.*?)```")
+		pyMatches := pyRegex.FindAllStringSubmatch(resp, -1)
+		for _, m := range pyMatches {
+			if len(m) > 1 {
+				candidate := strings.TrimSpace(m[1])
+				// Vérifie si le bloc ressemble à du code python
+				if strings.Contains(candidate, "def ") || strings.Contains(candidate, "import ") || strings.Contains(candidate, "sys.") {
+					pyStr = candidate
+					break
+				}
+			}
+		}
+		if pyStr == "" {
+			// Fallback si pas de fences mais du code python brut
+			if idx := strings.Index(resp, "import sys"); idx != -1 {
+				pyStr = resp[idx:]
+			}
 		}
 
 		if jsonStr == "" || pyStr == "" {
 			lastErr = fmt.Errorf("impossible d'extraire les deux blocs (JSON et Python)")
-			fmt.Printf("[SkillManager] Format invalide. Demande de correction.\n")
+			snippet := resp
+			if len(snippet) > 200 {
+				snippet = snippet[:200] + "..."
+			}
+			fmt.Printf("[SkillManager] Format invalide. Extrait reçu: %q. Demande de correction.\n", snippet)
 			messages = append(messages, llm.Message{Role: llm.RoleAssistant, Content: resp})
 			messages = append(messages, llm.Message{Role: llm.RoleUser, Content: "Tu n'as pas fourni les deux blocs markdown distincts. Fournis EXACTEMENT un bloc ```json et un bloc ```python."})
 			continue

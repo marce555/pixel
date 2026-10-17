@@ -299,3 +299,51 @@ func TestShouldTriggerRAG(t *testing.T) {
 		}
 	}
 }
+
+func TestAnalyzeQueryServerDiagnosticFastPath(t *testing.T) {
+	agent := &SuperiorAgent{}
+	ctx := context.Background()
+
+	tests := []struct {
+		input       string
+		wantAction  string
+		wantQuery   string
+	}{
+		{
+			input:      "Pixel, fais un diagnostic du serveur 87.106.120.28",
+			wantAction: "skill_ssh_server_health",
+			wantQuery:  "root@87.106.120.28",
+		},
+		{
+			input:      "check le serveur root@87.106.120.28",
+			wantAction: "skill_ssh_server_health",
+			wantQuery:  "root@87.106.120.28",
+		},
+		{
+			input:      "diagnostique 87.106.120.28",
+			wantAction: "skill_ssh_server_health",
+			wantQuery:  "root@87.106.120.28",
+		},
+		{
+			input:      "Pixel, fais un diagnostic du serveur",
+			wantAction: "skill_check_appliyou_logs",
+			wantQuery:  "",
+		},
+		{
+			input:      "logs d'appliyou",
+			wantAction: "skill_check_appliyou_logs",
+			wantQuery:  "",
+		},
+	}
+
+	for _, tt := range tests {
+		resp := agent.analyzeQuery(ctx, tt.input, nil)
+		if resp.Action != tt.wantAction {
+			t.Errorf("analyzeQuery(%q) Action = %q, want %q", tt.input, resp.Action, tt.wantAction)
+		}
+		if resp.Query != tt.wantQuery {
+			t.Errorf("analyzeQuery(%q) Query = %q, want %q", tt.input, resp.Query, tt.wantQuery)
+		}
+	}
+}
+

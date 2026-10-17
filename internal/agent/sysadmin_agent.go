@@ -159,23 +159,21 @@ Pour terminer l'investigation (OBLIGATOIRE QUAND TU AS FINI) :
 func (s *SysadminAgent) generateFinalReport(ctx context.Context, server string, problem string, scratchpad string) string {
 	fmt.Println("[SysadminAgent] Rédaction du rapport de diagnostic final...")
 
-	systemPrompt := "Tu es un Administrateur Système Senior. Ta mission est de rédiger un rapport d'incident détaillé basé sur les données brutes extraites d'un serveur."
-	userPrompt := fmt.Sprintf(`Date du rapport : %s
+	systemPrompt := "Tu es un Administrateur Système et Expert en Sécurité. Ta mission est de rédiger un diagnostic synthétique, calme et factuel basé sur les commandes extraites d'un serveur."
+	userPrompt := fmt.Sprintf(`Date du diagnostic : %s
 Serveur cible : %s
-Problème initial : "%s"
+Demande initiale : "%s"
 
-Voici les commandes exécutées et leurs résultats :
+Voici les données collectées sur le serveur :
 %s
 
-RÈGLES D'OR ANT-HALLUCINATION :
-1. N'invente **jamais** de logs ou d'incidents qui ne figurent pas dans les résultats ci-dessus.
-2. Si le résultat indique "Permission denied" ou une erreur SSH, ton rapport DOIT simplement dire que tu n'as pas pu te connecter au serveur. Ne simule pas de diagnostic Apache dans ce cas !
-
-Rédige un rapport Markdown structuré comprenant :
-1. **Symptômes** : Ce qui a été observé.
-2. **Diagnostic** : L'analyse technique (seulement si tu as pu lire les logs).
-3. **Recommandations** : Les actions à entreprendre.
-N'inclus que des informations pertinentes et vraies.`, time.Now().Format("2006-01-02"), server, problem, scratchpad)
+CONSIGNES STRICTES :
+1. RÈGLE NOMINALE : Si les services tournent, que la charge et le disque sont normaux, et qu'il n'y a pas de panne, dis CLAIREMENT et DIRECTEMENT que TOUT VA BIEN et que la situation est nominale. Évite les détails superflus ou les longues descriptions d'éléments normaux.
+2. DISTINCTION BRUIT VS FAILLE : Sur Internet, des tentatives de scan ou connexions fermées sur SSH/Apache par des bots sont un bruit de fond normal rejeté par le pare-feu/SSH. Ne les qualifie JAMAIS d'incident majeur ou d'attaque réussie.
+3. SYNTHÈSE : Reste très synthétique et va à l'essentiel.
+- **État global** : (ex: Nominal / Tout va bien, ou Anomalie détectée)
+- **Points de sécurité / Problèmes réels** : (Uniquement s'il y a de véritables pannes, vulnérabilités ouvertes ou disques saturés. S'il n'y en a pas, écris simplement : 'Aucun problème détecté.')
+- **Recommandation** : (1 phrase max, ou 'Aucune action requise.')`, time.Now().Format("2006-01-02"), server, problem, scratchpad)
 
 	messages := []llm.Message{
 		{Role: llm.RoleSystem, Content: systemPrompt},

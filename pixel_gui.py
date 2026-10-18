@@ -509,17 +509,29 @@ class MainWindow(QMainWindow):
     def ensure_duplex_profile(self):
         print("[GUI] Configuration audio native PipeWire (serveur par défaut CachyOS)...")
         try:
-            # 1. Utilisation du serveur par défaut de CachyOS : PipeWire / WirePlumber
+            # 1. Forcer le profil stéréo analogique sur le contrôleur Ryzen HD Audio (évite le basculement sur surround-40)
+            subprocess.run(["pactl", "set-card-profile", "alsa_card.pci-0000_64_00.1", "off"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["pactl", "set-card-profile", "alsa_card.pci-0000_65_00.6", "output:analog-stereo+input:analog-stereo"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["pactl", "set-default-sink", "alsa_output.pci-0000_65_00.6.analog-stereo"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            # 2. Utilisation du serveur par défaut de CachyOS : PipeWire / WirePlumber
             subprocess.run(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "0"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             subprocess.run(["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "1.0"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             subprocess.run(["wpctl", "set-mute", "@DEFAULT_AUDIO_SOURCE@", "0"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             subprocess.run(["wpctl", "set-volume", "@DEFAULT_AUDIO_SOURCE@", "1.0"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            # 2. Sécurité matérielle : s'assurer que les canaux physiques ALSA Master et Speaker ne sont pas verrouillés sur [off]
-            subprocess.run(["amixer", "-c", "Generic_1", "sset", "Speaker", "unmute", "80%"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            subprocess.run(["amixer", "-c", "Generic_1", "sset", "Bass Speaker", "unmute"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            subprocess.run(["amixer", "-c", "Generic_1", "sset", "Headphone", "unmute", "80%"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            subprocess.run(["amixer", "-c", "Generic_1", "sset", "Master", "unmute", "80%"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # 3. Sécurité matérielle ALC285 (ROG Zephyrus G14) via le script dédié s'il existe
+            fix_script = os.path.expanduser("~/.bin/audio-fix.sh")
+            if os.path.exists(fix_script):
+                sinks_out = subprocess.run(["pactl", "list", "sinks"], capture_output=True, text=True).stdout
+                if "Active Port: analog-output-headphones" in sinks_out:
+                    subprocess.run(["bash", fix_script, "headphones"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                else:
+                    subprocess.run(["bash", fix_script, "speakers"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                subprocess.run(["amixer", "-c", "Generic_1", "sset", "Speaker", "unmute", "100%"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(["amixer", "-c", "Generic_1", "sset", "Bass Speaker", "unmute"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(["amixer", "-c", "Generic_1", "sset", "Master", "unmute", "100%"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception as e:
             print(f"[GUI] Erreur configuration audio PipeWire : {e}")
             

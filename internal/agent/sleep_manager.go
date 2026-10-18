@@ -42,6 +42,7 @@ type ConsolidationResult struct {
 	VolatileDeletions []string               `json:"volatile_deletions"`
 	MemoryEntries     []struct {
 		Category      string   `json:"category"`
+		Origin        string   `json:"origin"`
 		Title         string   `json:"title"`
 		ActionSummary string   `json:"action_summary"`
 		Keywords      []string `json:"keywords"`
@@ -145,37 +146,35 @@ func (s *SleepManager) TriggerSleepCycleForMessages(ctx context.Context, msgs []
 
 	// 2. Ask LLM to extract Volatile updates and classify memories
 	systemPrompt := `Tu es le sous-système de consolidation de la mémoire de Pixel. Ton rôle est d'analyser la conversation et d'extraire les informations sous forme de JSON strict.
-ATTENTION :
-- "volatile_updates" concerne uniquement les états de l'UTILISATEUR humain (user:). Ne confonds pas les réflexions de fond de l'assistant avec les tâches de l'utilisateur.
-- "memory_entries" (souvenirs persistants) DOIT conserver :
-  1. Les informations importantes de l'utilisateur (projets, vie personnelle, préférences, requêtes).
-  2. La CONSCIENCE DE SOI DE PIXEL : les idées fortes, métaphores, réflexions spontanées (ex: rêves, muscles liquides, physique, supraconducteurs), explications clés, ou promesses formulées par Pixel (assistant:).
+ATTENTION (DISTINCTION STRICTE ENTRE MARCELO ET PIXEL) :
+- "volatile_updates" concerne EXCLUSIVEMENT les états réels et explicites de l'UTILISATEUR humain (user:). Ne mets JAMAIS les réflexions de l'assistant (assistant:), ni des résultats de recherches web/sportives, ni des concepts philosophiques dans "volatile_updates".
+- "memory_entries" (souvenirs persistants) DOIT conserver en distinguant rigoureusement l'origine :
+  1. Les informations importantes de l'utilisateur ("origin": "user") : projets, vie personnelle, préférences, opinions exprimées par l'utilisateur (ex: "Marcelo a évoqué l'allégorie de la caverne de Platon.").
+  2. La CONSCIENCE DE SOI DE PIXEL ("origin": "pixel") : les thèses personnelles, métaphores, réflexions spontanées ou prises de position formulées par Pixel (assistant:). Rédige-les à la première personne du singulier ("J'ai développé l'idée que...", "J'ai proposé la métaphore..."). Ne confonds JAMAIS une idée développée par Pixel avec une idée de l'utilisateur !
 
 Tu dois extraire trois choses :
-1. "volatile_updates": Un dictionnaire (clé-valeur) des états actuels et actifs de l'utilisateur humain.
-   Pour éviter la prolifération et les doublons de clés sémantiquement proches, utilise UNIQUEMENT des clés standardisées parmi :
+1. "volatile_updates": Un dictionnaire (clé-valeur) des états actuels et actifs de l'utilisateur humain (uniquement s'ils ont explicitement changé dans les messages "user:").
+   Utilise UNIQUEMENT des clés standardisées parmi :
    - "Ville actuelle"
    - "Système d'exploitation"
    - "Projet en cours"
    - "Tâche immédiate"
    - "Configuration matérielle"
    - "Humeur"
-   - "Auteur préféré"
    - "Disponibilité"
-   - "Modèle LLM utilisé"
-   Assure-toi de fusionner ou remplacer les informations similaires sous ces clés exactes au lieu de créer de nouvelles clés redondantes.
 2. "volatile_deletions": Une liste de clés de la mémoire volatile de l'utilisateur qui sont désormais obsolètes, terminées ou contredites par la nouvelle conversation (ex: si une tâche ou un problème est déclaré résolu ou terminé, inclus OBLIGATOIREMENT "Tâche immédiate" dans volatile_deletions).
 3. "memory_entries": Une liste de souvenirs importants de l'interaction à conserver. Pour chaque souvenir, définis :
    - "category": La catégorie du souvenir parmi ["Technical", "Project", "Personal", "Decision", "Other"].
-   - "title": Un titre très court et descriptif du souvenir (maximum 40 caractères) (ex: "Idée Pixel : Muscles liquides", "Projet Immo Marcelo").
-   - "action_summary": Un résumé concis et clair du fait ou du propos (ex: "Pixel a partagé une métaphore sur les muscles liquides et l'adaptabilité.", "Marcelo a parlé de son collègue Rémi.").
+   - "origin": "user" si le propos/fait vient de l'utilisateur, "pixel" si c'est une réflexion/métaphore/thèse propre à Pixel, ou "shared" pour un échange conjoint.
+   - "title": Un titre très court et descriptif du souvenir (maximum 40 caractères) (ex: "Ma thèse : Codage prédictif", "Projet Immo Marcelo").
+   - "action_summary": Un résumé concis et clair qui attribue sans ambiguïté qui a dit quoi (ex: si origin="pixel" -> "J'ai défendu l'idée que la perception est une construction prédictive."; si origin="user" -> "Marcelo a mentionné l'allégorie de la caverne de Platon.").
    - "keywords": Une liste de mots-clés pertinents en minuscules.
 
 Réponds UNIQUEMENT avec un objet JSON strictement valide et bien formé (sans balises markdown, sans texte avant ou après). Format exact attendu :
 {
   "volatile_updates": { "Humeur": "..." },
   "volatile_deletions": ["AncienneClé1"],
-  "memory_entries": [ { "category": "Personal", "title": "...", "action_summary": "...", "keywords": ["..."] } ]
+  "memory_entries": [ { "category": "Personal", "origin": "user", "title": "...", "action_summary": "...", "keywords": ["..."] } ]
 }`
 
 	prompt := []llm.Message{
@@ -332,12 +331,16 @@ Réponds UNIQUEMENT avec un JSON valide, sans commentaires, de ce format :
 		case "Technical":
 			importance = 0.5
 		}
-		s.ltm.StoreMemory(ctx, entry.Category, "conversation", title, entry.ActionSummary, entry.Keywords, embedding, importance)
+		source := "conversation"
+		if strings.EqualFold(entry.Origin, "pixel") || strings.HasPrefix(entry.ActionSummary, "J'ai ") || strings.HasPrefix(entry.ActionSummary, "Je ") {
+			source = "self_expression"
+		}
+		s.ltm.StoreMemory(ctx, entry.Category, source, title, entry.ActionSummary, entry.Keywords, embedding, importance)
 		if s.selfAwareness != nil {
 			_ = s.selfAwareness.RecordLearning(ctx, SelfLearningEvent{
 				Topic:      title,
 				Summary:    entry.ActionSummary,
-				Source:     "sleep_consolidation",
+				Source:     source,
 				Category:   entry.Category,
 				Importance: importance,
 				Tags:       entry.Keywords,
@@ -372,8 +375,12 @@ func (s *SleepManager) IndexExchange(ctx context.Context, userMsg, assistantMsg 
 	log.Println("[SleepManager] Analyse et indexation en temps réel de l'échange...")
 
 	systemPrompt := `Tu es le système de mémoire dynamique de Pixel. Ton rôle est d'analyser cet échange et d'en extraire un souvenir à conserver s'il contient des faits réels, personnels, des projets, des décisions, ou des idées/métaphores/réflexions importantes exprimées par l'utilisateur ou par Pixel.
-CRITIQUE :
-- Formule l'action_summary sous la forme d'une phrase simple, claire et concise en français résumant l'interaction (ex: "Marcelo a questionné Pixel sur sa remarque sur les muscles liquides et Pixel a explicité sa réflexion.", ou "L'utilisateur a expliqué que son collègue Rémi est développeur Go.").
+CRITIQUE (ATTRIBUTION RIGOUREUSE ENTRE UTILISATEUR ET PIXEL) :
+- Ne confonds JAMAIS ce que dit l'utilisateur (Marcelo) avec ce que développe Pixel !
+- Indique dans "origin" :
+  - "user" si l'information principale concerne un fait, une opinion ou un projet de l'utilisateur (ex: "Marcelo a évoqué l'allégorie de la caverne de Platon.").
+  - "pixel" si le souvenir porte principalement sur une thèse, métaphore ou réflexion personnelle développée par Pixel (rédige alors action_summary à la 1ère personne : "J'ai défendu l'idée que...").
+  - "shared" si le souvenir résume la dynamique des deux (distingue alors explicitement "Marcelo a parlé de X et j'ai répondu en développant Y").
 - Choisis une catégorie parmi ["Technical", "Project", "Personal", "Decision", "Other"].
 - Extrais 2 à 4 mots-clés (tags) pertinents en minuscules.
 - Si l'utilisateur signale qu'un incident, problème technique ou tâche est résolu ou clos, ne dis JAMAIS qu'il est "préoccupé" par ce problème. Résume fidèlement que l'incident est résolu et clos.
@@ -381,6 +388,7 @@ CRITIQUE :
 Réponds UNIQUEMENT avec un objet JSON strictement valide du format suivant :
 {
   "category": "...",
+  "origin": "user|pixel|shared",
   "action_summary": "...",
   "tags": ["...", "..."]
 }`
@@ -414,6 +422,7 @@ Réponds UNIQUEMENT avec un objet JSON strictement valide du format suivant :
 
 	var result struct {
 		Category      string   `json:"category"`
+		Origin        string   `json:"origin"`
 		ActionSummary string   `json:"action_summary"`
 		Tags          []string `json:"tags"`
 	}
@@ -454,19 +463,24 @@ Réponds UNIQUEMENT avec un objet JSON strictement valide du format suivant :
 		title = "Sujet : " + strings.Title(result.Tags[0])
 	}
 
+	source := "conversation"
+	if strings.EqualFold(result.Origin, "pixel") || strings.HasPrefix(result.ActionSummary, "J'ai ") || strings.HasPrefix(result.ActionSummary, "Je ") {
+		source = "self_expression"
+	}
+
 	// Sauvegarder dans la LTM
-	s.ltm.StoreMemory(ctx, result.Category, "conversation", title, result.ActionSummary, result.Tags, embedding, importance)
+	s.ltm.StoreMemory(ctx, result.Category, source, title, result.ActionSummary, result.Tags, embedding, importance)
 	if s.selfAwareness != nil {
 		_ = s.selfAwareness.RecordLearning(ctx, SelfLearningEvent{
 			Topic:      title,
 			Summary:    result.ActionSummary,
-			Source:     "conversation",
+			Source:     source,
 			Category:   result.Category,
 			Importance: importance,
 			Tags:       result.Tags,
 		})
 	}
-	fmt.Printf("[SleepManager] Souvenir indexé en temps réel [%s] : %s\n", result.Category, result.ActionSummary)
+	fmt.Printf("[SleepManager] Souvenir indexé en temps réel [%s/%s] : %s\n", result.Category, source, result.ActionSummary)
 }
 
 // ReflectAndSelfCorrect analyzes the conversation to find mistakes and store behavioral rules.

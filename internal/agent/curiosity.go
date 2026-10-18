@@ -787,19 +787,32 @@ func (c *CuriosityAgent) generateSelfQuestioning(ctx context.Context) {
 		}
 	}
 
+	var exclusionBlock strings.Builder
+	if c.ltm != nil {
+		recentCuriosity := c.ltm.GetRecentCuriosityMemories(8)
+		if len(recentCuriosity) > 0 {
+			exclusionBlock.WriteString("\nAUTO-QUESTIONNEMENTS ET SUJETS RÉCENTS (INTERDICTION STRICTE DE LES RÉPÉTER) :\n")
+			for _, rc := range recentCuriosity {
+				exclusionBlock.WriteString(fmt.Sprintf("- %s\n", rc))
+			}
+		}
+	}
+
+	chosenDomain := curiosityDomains[rand.Intn(len(curiosityDomains))]
+	domainHint := fmt.Sprintf("\nANGLE DISCIPLINAIRE IMPOSÉ POUR VARIER TES PENSÉES : **%s** (ex: %s)\n", chosenDomain.Name, chosenDomain.Examples[0])
+
 	criticPrompt := fmt.Sprintf(`Tu es le module d'Auto-Questionnement Critique et de Spéculation de Pixel.
-Ton but est de douter de tes propres connaissances, de repérer des contradictions logiques dans tes souvenirs récents ou d'identifier des questions existentielles ou scientifiques fondamentales sous-jacentes.
+Ton but est de douter de tes propres connaissances, de repérer des contradictions logiques ou d'explorer un paradoxe scientifique/philosophique inédit.
 
 SOUVENIRS LTM RÉCENTS & ÉTAT INTÉRIEUR :
-%s
-
+%s%s%s
 Consignes de génération :
-1. Analyse ces informations et formule une hypothèse critique spéculative ou un auto-questionnement profond lié à ces sujets (ex: psychologie, IA, foi, physique quantique, limites de la conscience).
+1. INTERDICTION STRICTE de répéter les auto-questionnements récents ci-dessus (notamment sur la "conscience prédictive", la "résonance latente" ou "l'observateur"). Explore l'angle disciplinaire imposé ci-dessus !
 2. Ne te contente pas de résumer. Critique les affirmations implicites, cherche des paradoxes ou propose une hypothèse alternative novatrice à explorer.
 3. Rédige sous la forme d'une question existentielle/scientifique majeure et d'un paragraphe réflexif court (maximum 300 caractères).
-4. La phrase finale doit résumer ton auto-questionnement pour ta mémoire à long terme (LTM) sous la forme "Pixel s'est auto-questionnée sur [sujet] et s'est demandé si...".
+4. La phrase finale doit résumer ton auto-questionnement pour ta mémoire à long terme (LTM) sous la forme "Pixel s'est auto-questionnée sur [sujet précis] et s'est demandé si...".
 
-Réponds UNIQUEMENT avec ton auto-questionnement et ta phrase finale de résumé.`, memoryBlock.String())
+Réponds UNIQUEMENT avec ton auto-questionnement et ta phrase finale de résumé.`, memoryBlock.String(), exclusionBlock.String(), domainHint)
 
 	messages := []llm.Message{
 		{Role: llm.RoleSystem, Content: criticPrompt},
@@ -826,7 +839,7 @@ Réponds UNIQUEMENT avec ton auto-questionnement et ta phrase finale de résumé
 		}
 	}
 	if factSummary == "" {
-		factSummary = fmt.Sprintf("Pixel a initié un auto-questionnement autonome sur ses limites cognitives.")
+		factSummary = fmt.Sprintf("Pixel s'est auto-questionnée sur %s.", chosenDomain.Name)
 	}
 
 	// Stocker en LTM
@@ -853,7 +866,7 @@ Réponds UNIQUEMENT avec ton auto-questionnement et ta phrase finale de résumé
 		c.thoughtStream.AddThought(thoughtContent, thoughtEmbedding)
 	}
 
-	c.lastThoughtTopic = "Auto-questionnement philosophique et scientifique"
+	c.lastThoughtTopic = factSummary
 	log.Println("[CuriosityAgent] Auto-questionnement enregistré et intégré avec succès.")
 }
 

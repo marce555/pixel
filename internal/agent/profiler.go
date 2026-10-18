@@ -29,21 +29,34 @@ func (p *ProfilingAgent) AnalyzeAndProfile(ctx context.Context, stmMsgs []llm.Me
 		return
 	}
 
+	// CRITIQUE : N'analyser QUE les messages de l'utilisateur (RoleUser) !
+	// Ne jamais inclure les messages de l'assistant (Pixel), sinon ses propres
+	// réflexions philosophiques et recherches scientifiques contaminent le profil de l'utilisateur.
 	var conversation strings.Builder
+	userMsgCount := 0
 	for _, m := range stmMsgs {
-		conversation.WriteString(string(m.Role) + ": " + m.Content + "\n")
+		if m.Role == llm.RoleUser {
+			conversation.WriteString("user: " + m.Content + "\n")
+			userMsgCount++
+		}
+	}
+	if userMsgCount == 0 {
+		return
 	}
 
 	currentProfile := p.coreMemory.GetProfile().Static
 	currentProfileStr := fmt.Sprintf("- Nom: %s\n- Rôle: %s\n- Tech Stack: %s", currentProfile.Name, currentProfile.Role, currentProfile.TechStack)
 
-	systemPrompt := `Tu es le ProfilingAgent. Ton rôle est d'analyser une conversation et d'extraire l'identité et les faits marquants de l'utilisateur.
-Fusionne les nouvelles informations avec le profil statique existant.
+	systemPrompt := `Tu es le ProfilingAgent. Ton rôle est d'analyser UNIQUEMENT les propos de l'utilisateur humain pour extraire son identité et ses outils techniques concrets.
+RÈGLES STRICTES :
+1. "tech_stack" ne doit contenir QUE des langages de programmation, systèmes d'exploitation, frameworks, serveurs ou logiciels concrets explicitement utilisés par l'utilisateur (ex: "Go, Python, Django, Linux, CachyOS, Bash, SSH").
+2. INTERDICTION ABSOLUE d'ajouter dans "tech_stack" des sujets de discussion philosophiques, scientifiques, neuroscientifiques, sportifs ou des concepts abstraits (ex: jamais de "conscience", "philosophie", "neurogenèse", "football", "modèles prédictifs", "résonance", etc.).
+3. Si l'utilisateur ne mentionne aucun nouvel outil informatique concret, conserve exactement le "tech_stack" actuel sans rien ajouter.
 Retourne UNIQUEMENT du JSON valide avec ce format, sans commentaires ni balises markdown :
 {
   "name": "Nom de l'utilisateur (ou 'Inconnu')",
   "role": "Son métier ou rôle (ou 'Utilisateur')",
-  "tech_stack": "Technologies utilisées sous forme de chaîne de caractères simple séparée par des virgules (ex: 'Go, Linux, système' - RÈGLE STRICTE : ne retourne jamais de tableau/array JSON ici, uniquement du texte brut)"
+  "tech_stack": "Technologies concrètes séparées par des virgules"
 }
 
 PROFIL ACTUEL :
@@ -51,7 +64,7 @@ PROFIL ACTUEL :
 
 	messages := []llm.Message{
 		{Role: llm.RoleSystem, Content: systemPrompt},
-		{Role: llm.RoleUser, Content: "Voici la dernière conversation à analyser :\n" + conversation.String()},
+		{Role: llm.RoleUser, Content: "Voici les messages de l'utilisateur à analyser :\n" + conversation.String()},
 	}
 
 	responseJSON, err := p.llmProvider.Generate(ctx, messages)

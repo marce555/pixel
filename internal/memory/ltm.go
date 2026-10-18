@@ -237,11 +237,40 @@ type searchResult struct {
 // Score = (cosine × 0.5) + (tagBoost × 0.2) + (importance × 0.2) + (recency × 0.1) + sourceBonus
 func formatSource(source string) string {
 	if source == "conversation" {
-		return "[SOURCE: Discussion réelle avec Marcelo]"
-	} else if source == "self_expression" || source == "proactive" {
-		return "[SOURCE: Propos spontanés / Déclarations de Pixel]"
+		return "[ORIGINE: Échange avec Marcelo]"
+	} else if source == "self_expression" || source == "proactive" || source == "self_reflection" {
+		return "[ORIGINE: MOI, PIXEL (Ma propre pensée/affirmation — ne pas l'attribuer à Marcelo)]"
 	}
-	return "[SOURCE: Curiosité autonome de Pixel (Wikipédia/Pensées)]"
+	return "[ORIGINE: MOI, PIXEL (Ma propre curiosité autonome — ne pas l'attribuer à Marcelo)]"
+}
+
+// formatSourceAndSummary converts 3rd-person "Pixel a..." summaries into 1st-person "J'ai..."
+// and assigns an explicit origin label so the LLM never confuses its own thoughts with the user's.
+func formatSourceAndSummary(source, title, summary string) (string, string) {
+	trimmed := strings.TrimSpace(summary)
+	isPixelOwnThought := source == "self_expression" || source == "proactive" || source == "self_reflection" || source == "curiosity" || source == "gemini_exchange"
+
+	titleLower := strings.ToLower(title)
+	if strings.Contains(titleLower, "pixel") || strings.HasPrefix(trimmed, "Pixel ") {
+		isPixelOwnThought = true
+	}
+
+	// Transform 3rd-person "Pixel ..." into 1st-person "J'ai ..." / "Je me suis ..."
+	if strings.HasPrefix(trimmed, "Pixel s'est auto-questionnée") {
+		trimmed = "Je me suis auto-questionnée" + strings.TrimPrefix(trimmed, "Pixel s'est auto-questionnée")
+	} else if strings.HasPrefix(trimmed, "Pixel s'est ") {
+		trimmed = "Je me suis " + strings.TrimPrefix(trimmed, "Pixel s'est ")
+	} else if strings.HasPrefix(trimmed, "Pixel a ") {
+		trimmed = "J'ai " + strings.TrimPrefix(trimmed, "Pixel a ")
+	}
+
+	if isPixelOwnThought {
+		if source == "curiosity" || source == "gemini_exchange" {
+			return "[ORIGINE: MOI, PIXEL (Ma propre curiosité autonome — ne pas l'attribuer à Marcelo)]", trimmed
+		}
+		return "[ORIGINE: MOI, PIXEL (Ma propre pensée/affirmation — ne pas l'attribuer à Marcelo)]", trimmed
+	}
+	return formatSource(source), trimmed
 }
 
 // FoldString normalizes a string by converting to lowercase and stripping common diacritics/accents.
@@ -432,8 +461,8 @@ func (l *LTM) SearchMemory(ctx context.Context, queryString string, queryEmbeddi
 	var topTexts []string
 	for i := 0; i < topK && i < len(results); i++ {
 		if results[i].score > 0.25 {
-			sourceLabel := formatSource(results[i].source)
-			formattedText := fmt.Sprintf("[%s] %s : %s", results[i].timestamp.Format("2006-01-02 15:04"), sourceLabel, results[i].text)
+			sourceLabel, summaryText := formatSourceAndSummary(results[i].source, "", results[i].text)
+			formattedText := fmt.Sprintf("[%s] %s : %s", results[i].timestamp.Format("2006-01-02 15:04"), sourceLabel, summaryText)
 			topTexts = append(topTexts, formattedText)
 			// Update access tracking
 			l.markAccessed(results[i].index)
@@ -512,10 +541,10 @@ func (l *LTM) SearchPersonalByKeywords(keywords []string, topK int) []string {
 		}
 		seen[key] = true
 
-		sourceLabel := formatSource(entry.Source)
+		sourceLabel, summaryText := formatSourceAndSummary(entry.Source, entry.Title, entry.ActionSummary)
 		text := fmt.Sprintf("[%s] %s (%s) : %s",
 			entry.Timestamp.Format("2006-01-02 15:04"),
-			sourceLabel, entry.Title, entry.ActionSummary)
+			sourceLabel, entry.Title, summaryText)
 		results = append(results, scored{text: text, score: matches, ts: entry.Timestamp})
 	}
 
@@ -563,10 +592,10 @@ func (l *LTM) GetTopPersonalByImportance(topK int) []string {
 		}
 		seen[key] = true
 
-		sourceLabel := formatSource(entry.Source)
+		sourceLabel, summaryText := formatSourceAndSummary(entry.Source, entry.Title, entry.ActionSummary)
 		text := fmt.Sprintf("[%s] %s (%s) : %s",
 			entry.Timestamp.Format("2006-01-02 15:04"),
-			sourceLabel, entry.Title, entry.ActionSummary)
+			sourceLabel, entry.Title, summaryText)
 		results = append(results, scored{text: text, importance: entry.Importance})
 	}
 
@@ -670,8 +699,8 @@ func (l *LTM) GetRecentMemories(topK int) []string {
 		if e.Title != "" {
 			titlePart = " (" + e.Title + ")"
 		}
-		sourceLabel := formatSource(e.Source)
-		formattedText := fmt.Sprintf("[%s] %s%s : %s", e.Timestamp.Format("2006-01-02 15:04"), sourceLabel, titlePart, e.ActionSummary)
+		sourceLabel, summaryText := formatSourceAndSummary(e.Source, e.Title, e.ActionSummary)
+		formattedText := fmt.Sprintf("[%s] %s%s : %s", e.Timestamp.Format("2006-01-02 15:04"), sourceLabel, titlePart, summaryText)
 		topTexts = append(topTexts, formattedText)
 	}
 
@@ -707,8 +736,8 @@ func (l *LTM) GetRecentCuriosityMemories(topK int) []string {
 		if e.Title != "" {
 			titlePart = " (" + e.Title + ")"
 		}
-		sourceLabel := formatSource(e.Source)
-		formattedText := fmt.Sprintf("[%s] %s%s : %s", e.Timestamp.Format("2006-01-02 15:04"), sourceLabel, titlePart, e.ActionSummary)
+		sourceLabel, summaryText := formatSourceAndSummary(e.Source, e.Title, e.ActionSummary)
+		formattedText := fmt.Sprintf("[%s] %s%s : %s", e.Timestamp.Format("2006-01-02 15:04"), sourceLabel, titlePart, summaryText)
 		topTexts = append(topTexts, formattedText)
 	}
 
@@ -772,7 +801,7 @@ func (l *LTM) SearchConversationMemories(history []llm.Message, topK int) []stri
 			catBonus = 0.05
 		}
 		// Curiosity-sourced entries (Wikipedia, thoughts) get a lower base bonus
-		if entry.Source == "curiosity" {
+		if entry.Source == "curiosity" || entry.Source == "gemini_exchange" {
 			catBonus *= 0.4
 		}
 
@@ -791,8 +820,8 @@ func (l *LTM) SearchConversationMemories(history []llm.Message, topK int) []stri
 		if entry.Title != "" {
 			titlePart = " (" + entry.Title + ")"
 		}
-		sourceLabel := formatSource(entry.Source)
-		text := fmt.Sprintf("[%s] %s%s : %s", entry.Timestamp.Format("2006-01-02 15:04"), sourceLabel, titlePart, entry.ActionSummary)
+		sourceLabel, summaryText := formatSourceAndSummary(entry.Source, entry.Title, entry.ActionSummary)
+		text := fmt.Sprintf("[%s] %s%s : %s", entry.Timestamp.Format("2006-01-02 15:04"), sourceLabel, titlePart, summaryText)
 		results = append(results, scored{text: text, score: score})
 	}
 
@@ -850,11 +879,11 @@ func (l *LTM) SearchMemoryByTimeRange(from, to time.Time, topK int) []string {
 		}
 		seen[key] = true
 
-		sourceLabel := formatSource(entry.Source)
+		sourceLabel, summaryText := formatSourceAndSummary(entry.Source, entry.Title, entry.ActionSummary)
 		formatted := fmt.Sprintf("[%s] %s [%s] : %s",
 			entry.Timestamp.Format("15:04"),
 			sourceLabel,
-			entry.Category, entry.ActionSummary)
+			entry.Category, summaryText)
 
 		if entry.Source == "conversation" {
 			convTexts = append(convTexts, formatted)

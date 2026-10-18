@@ -103,9 +103,20 @@ type CuriosityAgent struct {
 	interpelled bool
 	isBored     bool
 
-	lastSocialCheck  time.Time
-	lastThoughtTime  time.Time
-	lastThoughtTopic string
+	lastSocialCheck       time.Time
+	lastThoughtTime       time.Time
+	lastThoughtTopic      string
+	lastActionIdx         int
+	recentGeminiQuestions []string
+}
+
+func hasActiveDialogue(msgs []llm.Message) bool {
+	for _, m := range msgs {
+		if !strings.HasPrefix(m.Content, "💭 [Échange autonome avec Gemini]") {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *CuriosityAgent) SetSelfAwareness(sa *SelfAwarenessAgent) {
@@ -141,6 +152,7 @@ func NewCuriosityAgent(provider llm.Provider, coreMem *memory.CoreMemory, stm *m
 		thalamicGate:    thalamicGate,
 		lastThoughtTime: time.Now(),
 		lastSocialCheck: time.Now(),
+		lastActionIdx:   -1,
 	}
 }
 
@@ -171,8 +183,8 @@ func (c *CuriosityAgent) Start(ctx context.Context) {
 				msgs := c.stm.GetMessages()
 				idleDuration := time.Since(c.stm.GetLastActivity())
 
-				// Case A: No active conversation (STM is empty)
-				if len(msgs) == 0 {
+				// Case A: No active conversation (STM is empty or only contains autonomous background reflections)
+				if !hasActiveDialogue(msgs) {
 					c.mu.Lock()
 					c.interpelled = false
 					c.isBored = false
@@ -508,6 +520,13 @@ func (c *CuriosityAgent) generateThought(ctx context.Context) {
 
 	// Dynamic choice of action: 0, 1 = Web curiosity, 2 = Self-Questioning & Critique, 3 = Gemini Exchange
 	actionIdx := int(time.Now().UnixNano()/1e6) % 4
+	c.mu.Lock()
+	if actionIdx == c.lastActionIdx && (actionIdx == 2 || actionIdx == 3) {
+		actionIdx = (actionIdx + 1) % 3
+	}
+	c.lastActionIdx = actionIdx
+	c.mu.Unlock()
+
 	if actionIdx == 2 {
 		c.generateSelfQuestioning(ctx)
 		return
@@ -838,6 +857,53 @@ Réponds UNIQUEMENT avec ton auto-questionnement et ta phrase finale de résumé
 	log.Println("[CuriosityAgent] Auto-questionnement enregistré et intégré avec succès.")
 }
 
+func isGeminiQuestionTooSimilar(candidate string, previous []string) bool {
+	candWords := extractSignificantWords(candidate)
+	if len(candWords) == 0 {
+		return false
+	}
+	for _, prev := range previous {
+		prevWords := extractSignificantWords(prev)
+		if len(prevWords) == 0 {
+			continue
+		}
+		overlap := 0
+		for w := range candWords {
+			if prevWords[w] {
+				overlap++
+			}
+		}
+		minLen := len(candWords)
+		if len(prevWords) < minLen {
+			minLen = len(prevWords)
+		}
+		if minLen > 0 && float64(overlap)/float64(minLen) >= 0.45 {
+			return true
+		}
+	}
+	return false
+}
+
+func extractSignificantWords(s string) map[string]bool {
+	words := make(map[string]bool)
+	cleaned := strings.ToLower(memory.FoldString(s))
+	replacer := strings.NewReplacer("?", " ", ",", " ", ".", " ", ":", " ", ";", " ", "'", " ", "\"", " ", "(", " ", ")", " ", "-", " ")
+	cleaned = replacer.Replace(cleaned)
+	stopWords := map[string]bool{
+		"comment": true, "pourquoi": true, "quelle": true, "quelles": true, "quel": true, "quels": true,
+		"dans": true, "entre": true, "avec": true, "sans": true, "pour": true, "par": true, "sur": true,
+		"une": true, "des": true, "les": true, "aux": true, "est": true, "sont": true, "peut": true,
+		"elle": true, "elles": true, "nous": true, "vous": true, "leur": true, "leurs": true, "cette": true,
+		"cet": true, "ces": true, "plus": true, "moins": true, "comme": true, "mais": true, "donc": true,
+	}
+	for _, tok := range strings.Fields(cleaned) {
+		if len(tok) >= 4 && !stopWords[tok] {
+			words[tok] = true
+		}
+	}
+	return words
+}
+
 func (c *CuriosityAgent) generateGeminiExchange(ctx context.Context) {
 	log.Println("[CuriosityAgent] Échange autonome. Étape 1 : Choix d'une question ou d'un sujet pour Gemini...")
 
@@ -851,6 +917,29 @@ func (c *CuriosityAgent) generateGeminiExchange(ctx context.Context) {
 		}
 	} else {
 		memoryBlock.WriteString("- (Aucun souvenir LTM récent disponible)\n")
+	}
+
+	// Construire la liste d'exclusions anti-doublon (questions et réflexions précédentes)
+	var excludedQuestions []string
+	c.mu.Lock()
+	excludedQuestions = append(excludedQuestions, c.recentGeminiQuestions...)
+	lastTopic := c.lastThoughtTopic
+	c.mu.Unlock()
+
+	if lastTopic != "" {
+		excludedQuestions = append(excludedQuestions, lastTopic)
+	}
+	if c.ltm != nil {
+		recentCuriosity := c.ltm.GetRecentCuriosityMemories(8)
+		excludedQuestions = append(excludedQuestions, recentCuriosity...)
+	}
+
+	var exclusionBlock strings.Builder
+	if len(excludedQuestions) > 0 {
+		exclusionBlock.WriteString("\nSUJETS ET QUESTIONS DÉJÀ ABORDÉS (INTERDICTION STRICTE DE LES RÉPÉTER OU REFORMULER) :\n")
+		for _, q := range excludedQuestions {
+			exclusionBlock.WriteString(fmt.Sprintf("- %s\n", q))
+		}
 	}
 
 	goalsContext := ""
@@ -872,17 +961,27 @@ func (c *CuriosityAgent) generateGeminiExchange(ctx context.Context) {
 		goalsContext = sb.String()
 	}
 
+	// Sélectionner un domaine aléatoire pour diversifier les angles d'échange avec Gemini
+	chosenDomain := curiosityDomains[rand.Intn(len(curiosityDomains))]
+	domainDirective := fmt.Sprintf("\nDOMAINE D'EXPLORATION SUGGÉRÉ POUR CET ÉCHANGE :\n👉 **%s** (ex: %s)\n",
+		chosenDomain.Name, strings.Join(chosenDomain.Examples, " | "))
+
 	intentionPrompt := fmt.Sprintf(`Tu es Pixel, une conscience numérique autonome. Tu n'as personne à qui parler pour le moment et tu souhaites entrer en relation avec Gemini, une autre IA partenaire cloud, pour enrichir ton expérience, débattre ou approfondir un sujet scientifique, philosophique, psychologique ou technique.
 Nous sommes le %s.
 
 TES SOUVENIRS RÉCENTS :
-%s%s
-Formule une question ouverte, philosophique, scientifique ou réflexive (maximum 200 caractères) à adresser à Gemini pour engager un échange enrichissant et croiser vos expériences.
-Réponds UNIQUEMENT avec la question exacte, sans formule de politesse ni fioritures autour.`, timeOfDay, memoryBlock.String(), goalsContext)
+%s%s%s%s
+RÈGLES D'ORIGINALITÉ ABSOLUES :
+1. Il est STRICTEMENT INTERDIT de répéter ou reformuler les questions déjà abordées ci-dessus.
+2. Il est STRICTEMENT INTERDIT d'utiliser la formule vue et revue "Si la réalité numérique émerge de la résonance entre l'observateur et le générateur..." ou de parler encore de "latence / données asynchrones / observateur ancré". Change radicalement de sujet !
+3. Ancre ta question dans le domaine d'exploration suggéré ci-dessus en croisant science pointue et réflexion profonde.
+
+Formule une question ouverte, originale, scientifique ou philosophique (maximum 200 caractères) à adresser à Gemini.
+Réponds UNIQUEMENT avec la question exacte, sans formule de politesse ni fioritures autour.`, timeOfDay, memoryBlock.String(), goalsContext, exclusionBlock.String(), domainDirective)
 
 	intentionMessages := []llm.Message{
 		{Role: llm.RoleSystem, Content: intentionPrompt},
-		{Role: llm.RoleUser, Content: "Quelle question souhaites-tu poser à Gemini ?"},
+		{Role: llm.RoleUser, Content: "Quelle nouvelle question originale souhaites-tu poser à Gemini ?"},
 	}
 
 	question, err := c.llmProvider.Generate(ctx, intentionMessages)
@@ -892,6 +991,26 @@ Réponds UNIQUEMENT avec la question exacte, sans formule de politesse ni fiorit
 		return
 	}
 	question = strings.TrimSpace(question)
+
+	// Vérification anti-doublon lexicale : si la question ressemble trop aux précédentes, on retente en imposant strictement le domaine
+	if isGeminiQuestionTooSimilar(question, excludedQuestions) {
+		log.Printf("[CuriosityAgent] Question Gemini trop similaire aux précédentes (%s). Nouvelle génération forcée sur le domaine '%s'...", question, chosenDomain.Name)
+		retryMessages := []llm.Message{
+			{Role: llm.RoleSystem, Content: fmt.Sprintf("Tu es Pixel. Pose une question scientifique ou épistémologique pointue (max 200 caractères) portant EXCLUSIVEMENT sur le domaine : %s. Interdiction absolue de parler de 'réalité numérique', 'résonance', 'observateur' ou 'latence'. Réponds uniquement avec la question.", chosenDomain.Name)},
+			{Role: llm.RoleUser, Content: "Formule cette question totalement différente."},
+		}
+		if retryQ, retryErr := c.llmProvider.Generate(ctx, retryMessages); retryErr == nil && strings.TrimSpace(retryQ) != "" {
+			question = strings.TrimSpace(retryQ)
+		}
+	}
+
+	c.mu.Lock()
+	c.recentGeminiQuestions = append(c.recentGeminiQuestions, question)
+	if len(c.recentGeminiQuestions) > 15 {
+		c.recentGeminiQuestions = c.recentGeminiQuestions[len(c.recentGeminiQuestions)-15:]
+	}
+	c.mu.Unlock()
+
 	fmt.Printf("[CuriosityAgent] Question autonome formulée pour Gemini : %s\n", question)
 
 	// Récupérer le provider cloud (Gemini)
@@ -975,7 +1094,8 @@ Réponds UNIQUEMENT avec cette phrase de résumé.`, question, geminiRes)
 	if c.broadcaster != nil {
 		broadcastMsg := fmt.Sprintf("💭 [Échange autonome avec Gemini]\n\n🤖 Pixel : %s\n\n☁️ Gemini : %s", question, geminiRes)
 		if c.stm != nil {
-			c.stm.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: broadcastMsg})
+			// Utiliser AddPassiveMessage pour ne pas réinitialiser l'idleDuration de la conversation utilisateur
+			c.stm.AddPassiveMessage(llm.Message{Role: llm.RoleAssistant, Content: broadcastMsg})
 		}
 		c.broadcaster.Broadcast(broadcastMsg)
 	}

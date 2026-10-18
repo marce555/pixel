@@ -662,8 +662,8 @@ func (l *LTM) GetRecentMemories(topK int) []string {
 		if len(topTexts) >= topK {
 			break
 		}
-		// Skip curiosity-only entries for ambient context
-		if e.Source == "curiosity" {
+		// Skip curiosity-only and autonomous Gemini exchange entries for ambient context
+		if e.Source == "curiosity" || e.Source == "gemini_exchange" {
 			continue
 		}
 		titlePart := ""
@@ -678,7 +678,7 @@ func (l *LTM) GetRecentMemories(topK int) []string {
 	return topTexts
 }
 
-// GetRecentCuriosityMemories returns the most recent curiosity-sourced memory entries.
+// GetRecentCuriosityMemories returns the most recent curiosity-sourced and autonomous Gemini exchange memory entries.
 func (l *LTM) GetRecentCuriosityMemories(topK int) []string {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -700,7 +700,7 @@ func (l *LTM) GetRecentCuriosityMemories(topK int) []string {
 		if len(topTexts) >= topK {
 			break
 		}
-		if e.Source != "curiosity" {
+		if e.Source != "curiosity" && e.Source != "gemini_exchange" {
 			continue
 		}
 		titlePart := ""

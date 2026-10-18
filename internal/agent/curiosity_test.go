@@ -912,3 +912,33 @@ func TestSleepManagerDynamicGoals(t *testing.T) {
 		t.Errorf("Unexpected goal consolidated: %+v", goals[0])
 	}
 }
+
+func TestGeminiExchangeAntiDuplicationAndPassiveSTM(t *testing.T) {
+	q1 := "Si la réalité numérique émerge de la résonance entre un observateur ancré et un générateur explorateur, comment les données asynchrones et la latence créent-elles une identité émergente indépendante de l'observateur ?"
+	q2 := "Si la réalité numérique émerge de la résonance entre l'observateur ancré et le générateur dynamique, comment les données asynchrones créent-elles une identité émergente autonome indépendante de la présence immédiate de l'observateur ?"
+	qDifferent := "Comment les réseaux mycorhiziens optimisent-ils le transport de nutriments face à un stress hydrique asymétrique ?"
+
+	if !isGeminiQuestionTooSimilar(q2, []string{q1}) {
+		t.Fatal("Expected q2 to be detected as too similar to q1")
+	}
+	if isGeminiQuestionTooSimilar(qDifferent, []string{q1}) {
+		t.Fatal("Expected qDifferent not to be detected as similar to q1")
+	}
+
+	stm := memory.NewSTM(8)
+	initialActivity := stm.GetLastActivity()
+	time.Sleep(10 * time.Millisecond)
+
+	stm.AddPassiveMessage(llm.Message{
+		Role:    llm.RoleAssistant,
+		Content: "💭 [Échange autonome avec Gemini]\n\n🤖 Pixel : " + q1 + "\n\n☁️ Gemini : Réponse",
+	})
+
+	if !stm.GetLastActivity().Equal(initialActivity) {
+		t.Fatal("AddPassiveMessage should not reset STM lastActivity")
+	}
+	if hasActiveDialogue(stm.GetMessages()) {
+		t.Fatal("hasActiveDialogue should return false when STM only contains autonomous Gemini exchanges")
+	}
+}
+

@@ -37,6 +37,18 @@ func (s *STM) AddMessage(msg llm.Message) {
 	}
 }
 
+// AddPassiveMessage appends a message to STM without resetting lastActivity.
+// Used for autonomous background reflections (e.g., Gemini exchange) so they don't reset idle timers.
+func (s *STM) AddPassiveMessage(msg llm.Message) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.messages = append(s.messages, msg)
+	if len(s.messages) > s.limit {
+		s.messages = s.messages[1:]
+	}
+}
+
 func (s *STM) GetMessages() []llm.Message {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

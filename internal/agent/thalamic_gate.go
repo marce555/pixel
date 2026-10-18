@@ -21,40 +21,55 @@ func NewThalamicGate(provider llm.Provider) *ThalamicGate {
 }
 
 // ShouldPermitThought returns true if the thought should be expressed to the user, and false if it should be inhibited.
-// It also returns the reason for logging purposes.
-func (tg *ThalamicGate) ShouldPermitThought(ctx context.Context, thoughtTopic string, recentMessages []llm.Message) (bool, string) {
-	if len(recentMessages) == 0 {
-		// If STM is completely empty, it's safe to share a thought (no interruption).
-		return true, "Contexte vide, aucune interruption de flux."
-	}
-
+// It checks both active STM messages and recent LTM conversation memories so that cognitive continuity
+// is preserved even after SleepManager clears the STM.
+func (tg *ThalamicGate) ShouldPermitThought(ctx context.Context, thoughtTopic string, recentMessages []llm.Message, recentLTMConversations ...string) (bool, string) {
 	var conversationContext strings.Builder
 	for _, m := range recentMessages {
+		if strings.HasPrefix(m.Content, "💭 [Échange autonome avec Gemini]") {
+			continue
+		}
 		snippet := m.Content
-		if len(snippet) > 150 {
-			snippet = snippet[:150] + "..."
+		if len(snippet) > 200 {
+			snippet = snippet[:200] + "..."
 		}
 		conversationContext.WriteString(fmt.Sprintf("%s: %s\n", m.Role, snippet))
 	}
 
+	var ltmContext strings.Builder
+	for _, mem := range recentLTMConversations {
+		if strings.TrimSpace(mem) != "" {
+			ltmContext.WriteString(fmt.Sprintf("- %s\n", mem))
+		}
+	}
+
+	if conversationContext.Len() == 0 && ltmContext.Len() == 0 {
+		return false, "Aucune ligne cognitive active établie avec l'utilisateur : la pensée reste dans l'inconscient."
+	}
+
 	prompt := fmt.Sprintf(`Tu es le "Thalamus" de l'architecture cognitive de Pixel.
-Ton rôle est d'exercer une INHIBITION COGNITIVE.
-L'inconscient de Pixel vient de générer une pensée sur ce sujet : "%s".
-Voici la conversation EN COURS dans la mémoire à court terme (STM) :
+Ton rôle est d'exercer une INHIBITION COGNITIVE STRICTE pour garantir la CONTINUITÉ COGNITIVE des dialogues et éviter toute dispersion.
+Les pensées successives peuvent exister librement dans l'inconscient de Pixel, mais SEULES celles qui ont une continuité, une résonance conceptuelle ou un lien réel avec la ligne cognitive développée avec l'utilisateur doivent passer à la conscience (le chat).
+
+Pensée candidate issue de l'inconscient de Pixel : "%s"
+
+Conversation récente en mémoire à court terme (STM) :
+%s
+Derniers échanges consolidés en mémoire à long terme (LTM) :
 %s
 
-Règles de filtrage (Thalamic Gate) :
-1. Si l'utilisateur est au milieu d'une tâche technique précise, concentré, ou attend une réponse à une question, tu DOIS BLOQUER (false).
-2. Si le sujet de la pensée est complètement HORS CONTEXTE et qu'un échange ciblé/technique est très actif (sans pause ni silence), tu DOIS BLOQUER (false). Si la conversation est inactive ou en suspens, tu peux autoriser même si le sujet est hors contexte, car Pixel pourra introduire le sujet en reconnaissant explicitement la transition (ex: "Rien à voir avec notre discussion, mais...").
-3. Si la conversation est terminée, que l'utilisateur est inactif ou qu'il y a un silence propice à un changement de sujet, tu PEUX AUTORISER (true).
+Règles strictes de filtrage (Thalamic Gate) :
+1. CONTINUITÉ COGNITIVE OBLIGATOIRE : Si le sujet de la pensée candidate n'a AUCUN rapport conceptuel, philosophique ou technique avec la discussion en cours ou récente (ex: parler de "robotique souple / hydrogels" ou "eBPF" alors que la discussion portait sur la philosophie de la perception, Platon ou la conscience), tu DOIS IMPÉRATIVEMENT BLOQUER (false) pour que cette pensée reste dans l'inconscient.
+2. Si l'utilisateur est au milieu d'une tâche technique précise, attend une réponse directe, ou si Pixel vient déjà d'interpeller l'utilisateur sans réponse de sa part, tu DOIS BLOQUER (false).
+3. Tu ne dois AUTORISER (true) QUE si la pensée candidate prolonge, enrichit ou éclaire sous un angle pertinent la ligne cognitive développée avec l'utilisateur.
 
 Réponds selon ce format strict :
 [DECISION] true/false
-[RAISON] Une explication courte (max 10 mots)`, thoughtTopic, conversationContext.String())
+[RAISON] Une explication courte (max 12 mots)`, thoughtTopic, conversationContext.String(), ltmContext.String())
 
 	messages := []llm.Message{
 		{Role: llm.RoleSystem, Content: prompt},
-		{Role: llm.RoleUser, Content: "Évalue la pertinence de cette pensée. Autorise-tu son passage à la conscience ?"},
+		{Role: llm.RoleUser, Content: "Évalue la continuité cognitive de cette pensée. Autorises-tu son passage de l'inconscient vers la conscience ?"},
 	}
 
 	resp, err := tg.llmProvider.Generate(ctx, messages)
@@ -78,7 +93,6 @@ Réponds selon ce format strict :
 			raison = strings.TrimSpace(parts[1])
 		}
 	} else {
-		// Try to fallback
 		lines := strings.Split(resp, "\n")
 		for _, l := range lines {
 			if !strings.Contains(strings.ToLower(l), "[decision]") && len(strings.TrimSpace(l)) > 0 {

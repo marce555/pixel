@@ -375,7 +375,7 @@ func (s *Scheduler) runTask(parentCtx context.Context, task *Task, handler TaskH
 		} else {
 			task.Status = StatusCompleted
 			task.Log += fmt.Sprintf("[%s] Exécution terminée avec succès.\n", task.FinishedAt.Format("15:04:05"))
-			if b != nil && task.Type != "play_music" {
+			if b != nil && task.Type != "play_music" && task.Type != "research_task" {
 				b.Broadcast(fmt.Sprintf("✅ **Tâche terminée avec succès** : %s 🚀", task.Name))
 			}
 		}

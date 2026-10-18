@@ -94,7 +94,7 @@ func main() {
 	// Register scheduler handlers
 	taskScheduler.RegisterHandler("play_music", scheduler.NewPlayMusicHandler(webAgent, taskScheduler))
 	taskScheduler.RegisterHandler("agent_task", scheduler.NewAgentTaskHandler(provider, webAgent, eventHub, stm))
-	taskScheduler.RegisterHandler("research_task", agent.NewResearchTaskHandler(webResearcher, eventHub, stm))
+	taskScheduler.RegisterHandler("research_task", agent.NewResearchTaskHandler(webResearcher, eventHub, stm, ltm))
 	taskScheduler.RegisterHandler("sysadmin", agent.NewSysadminTaskHandler(sysadminAgent, eventHub, stm))
 	taskScheduler.RegisterHandler("publish_article", scheduler.NewPublishArticleHandlerWithBibliographicAuditor(eventHub, stm, provider, webAgent, draftManager, reviewerAgent, factCheckerAgent, biblioAuditorAgent))
 	taskScheduler.RegisterHandler("depublish_duplicates", scheduler.NewDepublishDuplicatesHandler(eventHub, stm, provider))

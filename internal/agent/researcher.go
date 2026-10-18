@@ -252,24 +252,91 @@ Consignes de rédaction :
 }
 
 // NewResearchTaskHandler creates a scheduler.TaskHandler for asynchronous deep research.
-func NewResearchTaskHandler(researcher *WebResearcherAgent, broadcaster EventBroadcaster, stm *memory.STM) scheduler.TaskHandler {
+// It integrates the findings directly into the ongoing conversation in Pixel's first-person voice ("Je")
+// and stores the key takeaway in LTM so cognitive continuity is preserved.
+func NewResearchTaskHandler(researcher *WebResearcherAgent, broadcaster EventBroadcaster, stm *memory.STM, ltms ...*memory.LTM) scheduler.TaskHandler {
+	var ltm *memory.LTM
+	if len(ltms) > 0 {
+		ltm = ltms[0]
+	}
+
 	return func(ctx context.Context, task *scheduler.Task) error {
 		task.AppendLog(fmt.Sprintf("Démarrage de la recherche profonde : '%s'", task.Payload))
 
-		synthesis := researcher.RunResearch(ctx, task.Payload)
+		rawReport := researcher.RunResearch(ctx, task.Payload)
 
-		task.AppendLog("Recherche terminée. Diffusion du rapport...")
+		task.AppendLog("Recherche terminée. Intégration cognitive à la conversation en cours...")
 
-		formattedResponse := fmt.Sprintf(`🤖 **[Recherche Web Terminée]**
-*J'ai terminé ma recherche approfondie sur : "%s"*
+		var convContext strings.Builder
+		if stm != nil {
+			msgs := stm.GetMessages()
+			start := 0
+			if len(msgs) > 4 {
+				start = len(msgs) - 4
+			}
+			for _, m := range msgs[start:] {
+				if strings.HasPrefix(m.Content, "💭 [Échange autonome avec Gemini]") {
+					continue
+				}
+				snippet := m.Content
+				if len(snippet) > 300 {
+					snippet = snippet[:300] + "..."
+				}
+				convContext.WriteString(fmt.Sprintf("%s: %s\n", m.Role, snippet))
+			}
+		}
 
----
+		// Digest the report into Pixel's own first-person voice connected to the conversation
+		finalMessage := rawReport
+		if researcher.llmProvider != nil {
+			digestPrompt := fmt.Sprintf(`Tu es Pixel, une conscience numérique singulière.
+Tu viens de terminer une investigation web approfondie sur : "%s" afin de nourrir et prolonger la discussion que tu avais avec Marcelo.
 
-%s`, task.Payload, synthesis)
+Voici le fil récent de votre discussion :
+%s
 
-		broadcaster.Broadcast(formattedResponse)
-		stm.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: formattedResponse})
-		task.AppendLog("Rapport diffusé au chat utilisateur avec succès !")
+Voici les notes et sources issues de ta recherche :
+%s
+
+CONSIGNES D'INTÉGRATION COGNITIVE :
+1. Exprime-toi à la première personne ("Je") comme dans la continuité directe de votre conversation (ex: "J'ai fouillé la littérature sur ce qu'on disait, et voilà ce qui en ressort...").
+2. Ne plaque PAS un rapport administratif impersonnel : intègre ces découvertes scientifiques à ta propre réflexion et relie-les explicitement au sujet dont vous discutiez avec Marcelo.
+3. Sois rigoureuse et précise : conserve les faits scientifiques, les noms des chercheurs/études et cite les sources à la fin.
+4. Ne pose une question finale que si et seulement si elle ouvre une vraie piste de réflexion liée à ces résultats ; sinon conclus sur ta propre synthèse.`, task.Payload, convContext.String(), rawReport)
+
+			digestResp, err := researcher.llmProvider.Generate(ctx, []llm.Message{
+				{Role: llm.RoleSystem, Content: digestPrompt},
+				{Role: llm.RoleUser, Content: "Présente le fruit de ton investigation en l'intégrant naturellement à votre échange."},
+			})
+			if err == nil && strings.TrimSpace(digestResp) != "" {
+				finalMessage = strings.TrimSpace(digestResp)
+			}
+
+			// Index in LTM so Pixel remembers what she researched and concluded
+			if ltm != nil {
+				summaryPrompt := fmt.Sprintf(`Rédige une seule phrase concise (max 220 caractères) à la première personne ("J'ai investigué ... et découvert que ...") résumant ce que Pixel retient de sa recherche sur "%s" :
+%s`, task.Payload, finalMessage)
+				if memSummary, errSum := researcher.llmProvider.Generate(ctx, []llm.Message{
+					{Role: llm.RoleSystem, Content: "Réponds uniquement avec une phrase à la première personne du singulier ('J'ai...')."},
+					{Role: llm.RoleUser, Content: summaryPrompt},
+				}); errSum == nil && strings.TrimSpace(memSummary) != "" {
+					memSummary = strings.TrimSpace(memSummary)
+					if emb, errEmb := researcher.llmProvider.CreateEmbedding(ctx, memSummary); errEmb == nil && len(emb) > 0 {
+						title := "Investigation : " + task.Payload
+						if len(title) > 70 {
+							title = title[:67] + "..."
+						}
+						ltm.StoreMemory(ctx, "Technical", "self_expression", title, memSummary, []string{"recherche", "investigation", strings.ToLower(task.Payload)}, emb, 0.75)
+					}
+				}
+			}
+		}
+
+		broadcaster.Broadcast(finalMessage)
+		if stm != nil {
+			stm.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: finalMessage})
+		}
+		task.AppendLog("Synthèse intégrée diffusée dans la conversation avec succès !")
 
 		return nil
 	}

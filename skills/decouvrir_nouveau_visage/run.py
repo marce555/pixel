@@ -214,6 +214,11 @@ def main():
             if "user_profile_core" in memory:
                 memory["user_profile_core"].setdefault("volatile", {})["Dernière vision"] = description
             save_memory(memory, mem_path)
+        elif match["status"] == "AUCUN_VISAGE":
+            absent_desc = f"Aucune personne visible devant la caméra : {description}"
+            if "user_profile_core" in memory:
+                memory["user_profile_core"].setdefault("volatile", {})["Dernière vision"] = absent_desc
+            save_memory(memory, mem_path)
             
         # 5. Restitution claire pour le moteur cognitif de Pixel
         status_tag = match["status"]

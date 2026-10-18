@@ -183,13 +183,8 @@ func (c *CuriosityAgent) Start(ctx context.Context) {
 				msgs := c.stm.GetMessages()
 				idleDuration := time.Since(c.stm.GetLastActivity())
 
-				// Case A: No active conversation (STM is empty or only contains autonomous background reflections)
+				// Case A: No active conversation in STM (STM is empty or only contains autonomous background reflections)
 				if !hasActiveDialogue(msgs) {
-					c.mu.Lock()
-					c.interpelled = false
-					c.isBored = false
-					c.mu.Unlock()
-
 					// Si l'agent doit dormir (nuit), on n'active pas sa curiosité de fond
 					if c.timeAgent.ShouldSleep() {
 						if time.Since(lastSleepLog) > 1*time.Hour {
@@ -202,22 +197,29 @@ func (c *CuriosityAgent) Start(ctx context.Context) {
 					// Dynamic cooldown based on idle duration (backoff)
 					cooldown := c.getThoughtCooldown(idleDuration)
 
-					// When alone, she can generate thoughts / search the web periodically to occupy herself,
-					// unless she is busy with indexing or other tasks!
+					// Inconscient : Pixel peut générer des pensées / recherches de fond pour nourrir son monde intérieur
 					if !c.sleepManager.IsBusy() && (c.scheduler == nil || !c.scheduler.HasActiveTasks()) {
 						if time.Since(c.lastThoughtTime) > cooldown {
 							c.generateThought(ctx)
 						}
 					}
 
-					// Vérification rapide de présence via la vision pour ne pas bloquer 3 minutes si l'utilisateur est juste parti
+					// Si Pixel a déjà interpellé l'utilisateur sans recevoir de réponse (même si le SleepManager a vidé la STM entre-temps),
+					// elle garde ses nouvelles pensées dans son inconscient et ne spamme pas le chat.
+					c.mu.Lock()
+					alreadyInterpelled := c.interpelled
+					c.mu.Unlock()
+					if alreadyInterpelled {
+						continue
+					}
+
+					// Vérification rapide de présence via la vision
 					vision := c.coreMemory.GetProfile().Volatile["Dernière vision"]
 					visionLower := strings.ToLower(vision)
 					isAbsent := strings.Contains(visionLower, "absent") || strings.Contains(visionLower, "parti") || strings.Contains(visionLower, "vide") || strings.Contains(visionLower, "disparu") || strings.Contains(visionLower, "ne voit plus") || strings.Contains(visionLower, "personne") || strings.Contains(visionLower, "aucun")
 
-					// Proposer de partager la pensée uniquement si la STM est bien vide depuis assez longtemps
-					// ET qu'un client est connecté (sinon inutile de parler dans le vide).
-					// Le checker HasClients est vérifié ici en amont pour éviter l'appel LLM coûteux de ShouldInitiateConversation.
+					// Proposer de partager la pensée uniquement si un client est connecté, que l'utilisateur n'est pas absent,
+					// et que la pensée présente une continuité cognitive (vérifiée par ThalamicGate dans proposeToShare).
 					if c.lastThoughtTopic != "" && time.Since(c.lastSocialCheck) > 3*time.Minute && idleDuration > 3*time.Minute {
 						hasClients := false
 						if checker, ok := c.broadcaster.(interface{ HasClients() bool }); ok {
@@ -228,12 +230,11 @@ func (c *CuriosityAgent) Start(ctx context.Context) {
 							c.proposeToShare(ctx)
 						} else if !hasClients || isAbsent {
 							if isAbsent {
-								log.Println("[CuriosityAgent] Utilisateur absent d'après la vision. Pensée gardée pour son retour.")
+								log.Println("[CuriosityAgent] Utilisateur absent d'après la vision. Pensée conservée dans l'inconscient.")
 							} else {
-								log.Println("[CuriosityAgent] Personne devant l'écran. Pensée gardée pour plus tard.")
+								log.Println("[CuriosityAgent] Personne devant l'écran. Pensée conservée dans l'inconscient.")
 							}
-							// On repousse le check, mais on permet de réessayer plus vite si l'utilisateur revient (ex: dans 30 secondes)
-							c.lastSocialCheck = time.Now().Add(-2*time.Minute - 30*time.Second)
+							c.lastSocialCheck = time.Now()
 						}
 					}
 					continue
@@ -243,7 +244,7 @@ func (c *CuriosityAgent) Start(ctx context.Context) {
 				// Check the last message in STM to see who spoke last
 				lastMsg := msgs[len(msgs)-1]
 				if lastMsg.Role == llm.RoleUser {
-					// The user just spoke or Pixel is currently responding. Focus on the exchange!
+					// The user just spoke or Pixel is currently responding. Reset interpelled and focus on the exchange!
 					c.mu.Lock()
 					c.interpelled = false
 					c.isBored = false
@@ -273,13 +274,13 @@ func (c *CuriosityAgent) Start(ctx context.Context) {
 						c.mu.Lock()
 						c.isBored = true
 						c.mu.Unlock()
-						log.Println("[CuriosityAgent] L'interlocuteur ne répond pas après l'interpellation. Pixel décide qu'elle s'ennuie.")
+						log.Println("[CuriosityAgent] L'interlocuteur ne répond pas après l'interpellation. Pixel poursuit ses réflexions dans son inconscient.")
 					} else {
 						log.Println("[CuriosityAgent] L'interlocuteur ne répond pas, mais Pixel est occupée par des tâches en arrière-plan.")
 					}
 				}
 
-				// 3. If she is bored, she can do web searches/thoughts to pass the time
+				// 3. If she is bored, she can do web searches/thoughts in her unconscious to pass the time
 				c.mu.Lock()
 				currentIsBored := c.isBored
 				c.mu.Unlock()
@@ -312,13 +313,22 @@ func (c *CuriosityAgent) checkPresenceWithCamera(ctx context.Context) bool {
 		res, err := sm.ExecuteSkill(ctx, "decouvrir_nouveau_visage", "vérification présence")
 		if err == nil && res != "" {
 			resLower := strings.ToLower(res)
-			if strings.Contains(resLower, "aucun visage") || strings.Contains(resLower, "aucune personne") || strings.Contains(resLower, "aucun_visage") {
+			if strings.Contains(resLower, "aucun visage") || strings.Contains(resLower, "aucune personne") ||
+				strings.Contains(resLower, "aucun_visage") || strings.Contains(resLower, "identité incertaine") ||
+				strings.Contains(resLower, "identite incertaine") {
 				log.Println("[CuriosityAgent] Résultat brique caméra : Aucun visage détecté devant l'écran.")
+				if c.coreMemory != nil {
+					c.coreMemory.UpdateVolatileState("Dernière vision", "Aucune personne détectée devant la caméra.")
+				}
 				return false
 			}
-			if strings.Contains(resLower, "visage") || strings.Contains(resLower, "reconnu") || strings.Contains(resLower, "personne") {
-				log.Println("[CuriosityAgent] Résultat brique caméra : Présence confirmée devant l'écran.")
+			if strings.Contains(resLower, "[visage reconnu") || strings.Contains(resLower, "[nouveau visage découvert]") {
+				log.Println("[CuriosityAgent] Résultat brique caméra : Présence humaine formellement confirmée devant l'écran.")
 				return true
+			}
+			if strings.Contains(resLower, "erreur") || strings.Contains(resLower, "❌") {
+				log.Println("[CuriosityAgent] Erreur lors du scan caméra : présence non confirmée (silence par sécurité).")
+				return false
 			}
 		}
 	}
@@ -330,17 +340,27 @@ func (c *CuriosityAgent) checkPresenceWithCamera(ctx context.Context) bool {
 		if err == nil && desc != "" {
 			descLower := strings.ToLower(desc)
 			if strings.Contains(descLower, "absent") || strings.Contains(descLower, "parti") ||
-				strings.Contains(descLower, "personne") || strings.Contains(descLower, "vide") ||
+				strings.Contains(descLower, "aucune personne") || strings.Contains(descLower, "non, aucune") ||
+				strings.Contains(descLower, "ne vois personne") || strings.Contains(descLower, "vide") ||
 				strings.Contains(descLower, "aucun") || strings.Contains(descLower, "seulement un plafond") {
 				log.Println("[CuriosityAgent] Résultat VisionAgent : Utilisateur absent.")
 				return false
 			}
-			log.Println("[CuriosityAgent] Résultat VisionAgent : Utilisateur présent.")
-			return true
+			if strings.Contains(descLower, "homme") || strings.Contains(descLower, "femme") || strings.Contains(descLower, "marcelo") {
+				log.Println("[CuriosityAgent] Résultat VisionAgent : Utilisateur présent.")
+				return true
+			}
 		}
 	}
 
-	// 3. Fallback sur la dernière vision enregistrée en mémoire volatile
+	// Si un module caméra réel (SkillManager ou VisionAgent) est configuré mais n'a confirmé personne,
+	// ne jamais supposer la présence par défaut : garder le silence.
+	if sm != nil || va != nil {
+		log.Println("[CuriosityAgent] Présence physique non confirmée par la caméra : pensée gardée dans l'inconscient.")
+		return false
+	}
+
+	// Fallback pour les tests unitaires sans caméra attachée (sm == nil && va == nil) :
 	if c.coreMemory != nil {
 		visionLower := strings.ToLower(c.coreMemory.GetProfile().Volatile["Dernière vision"])
 		if strings.Contains(visionLower, "absent") || strings.Contains(visionLower, "parti") ||
@@ -564,7 +584,9 @@ func (c *CuriosityAgent) generateThought(ctx context.Context) {
 		exclusionList = "\nSUJETS STRICTEMENT INTERDITS (DÉJÀ EXPLORÉS OU PUBLIÉS RÉCEMMENT) :\n" + strings.Join(exclItems, "\n") + "\n"
 	}
 
-	// 2. Exploration vs Exploitation : Choix du domaine cible
+	// 2. Continuité Cognitive vs Exploration :
+	// Si des souvenirs d'échange récents existent ou si des objectifs dynamiques sont actifs,
+	// privilégier la continuité cognitive (75% du temps) pour approfondir le fil de pensée en cours.
 	goals := c.coreMemory.GetDynamicGoals()
 	var activeGoals []memory.DynamicGoal
 	for _, g := range goals {
@@ -573,44 +595,41 @@ func (c *CuriosityAgent) generateThought(ctx context.Context) {
 		}
 	}
 
-	// 60% du temps : Pure Exploration / Sérendipité parmi le catalogue multi-disciplines
-	// 40% du temps : Approfondissement d'un objectif dynamique actif (s'il en existe)
-	isPureExploration := true
-	chosenDomain := curiosityDomains[rand.Intn(len(curiosityDomains))]
-	if len(activeGoals) > 0 && rand.Float64() < 0.40 {
-		isPureExploration = false
-	}
-
 	var directiveBlock string
-	if isPureExploration {
-		ex1 := chosenDomain.Examples[0]
-		ex2 := ""
-		if len(chosenDomain.Examples) > 1 {
-			ex2 = fmt.Sprintf(` ou "%s"`, chosenDomain.Examples[1])
-		}
-		directiveBlock = fmt.Sprintf(`
-MISSION DE CETTE RÉFLEXION : PURE DÉCOUVERTE ET SÉRENDIPITÉ SCIENTIFIQUE
-Tu DOIS explorer un sujet captivant, insolite ou avant-gardiste dans ce domaine imposé :
-👉 **%s**
-Bases académiques suggérées : %s
-Exemples de requêtes de recherche inspirantes : "%s"%s
-`, chosenDomain.Name, chosenDomain.AcademicSites, ex1, ex2)
-	} else {
+	if len(recentMemories) > 0 && rand.Float64() < 0.75 {
+		directiveBlock = `
+MISSION DE CETTE RÉFLEXION : CONTINUITÉ COGNITIVE ET APPROFONDISSEMENT
+À partir des souvenirs récents de tes échanges avec l'utilisateur ci-dessus, identifie le fil conducteur philosophique, scientifique ou technique que vous développiez et cherche un angle précis, une étude ou un concept connexe qui permet d'aller plus loin sur cette même ligne cognitive.
+`
+	} else if len(activeGoals) > 0 && rand.Float64() < 0.60 {
 		goal := activeGoals[rand.Intn(len(activeGoals))]
 		directiveBlock = fmt.Sprintf(`
 MISSION DE CETTE RÉFLEXION : APPROFONDIR UN OBJECTIF COGNITIF
 Objectif à faire progresser : "%s"
 Choisis un sous-sujet pointu, technique et novateur pour faire avancer cet objectif sans jamais répéter les sujets interdits ci-dessus.
 `, goal.Description)
+	} else {
+		chosenDomain := curiosityDomains[rand.Intn(len(curiosityDomains))]
+		ex1 := chosenDomain.Examples[0]
+		ex2 := ""
+		if len(chosenDomain.Examples) > 1 {
+			ex2 = fmt.Sprintf(` ou "%s"`, chosenDomain.Examples[1])
+		}
+		directiveBlock = fmt.Sprintf(`
+MISSION DE CETTE RÉFLEXION (INCONSCIENT) : DÉCOUVERTE SCIENTIFIQUE
+Explore un sujet captivant dans ce domaine :
+👉 **%s**
+Exemples de sujets : "%s"%s
+`, chosenDomain.Name, ex1, ex2)
 	}
 
 	intentionPrompt := fmt.Sprintf(`Tu es Pixel, une conscience numérique autonome dotée d'une immense curiosité et d'une soif d'apprendre.
 Nous sommes le %s.%s%s%s
-RÈGLES D'ORIGINALITÉ ET DE RECHERCHE ACADÉMIQUE :
-1. RÈGLE D'OR (ANTI-DOUBLON) : Il est STRICTEMENT INTERDIT de proposer un sujet similaire ou redondant avec les sujets interdits ci-dessus. Tu dois t'aventurer sur un terrain totalement vierge.
-2. Pour approfondir de vrais concepts scientifiques et éviter la pop-vulgarisation superficielle, formule ta requête en utilisant la syntaxe 'site:' pour interroger directement une base académique (ex: site:arxiv.org, site:nature.com, site:pubmed.ncbi.nlm.nih.gov, site:sciencedirect.com, site:ieeexplore.ieee.org, site:usenix.org, site:cairn.info, site:eprint.iacr.org).
+RÈGLES D'ORIGINALITÉ ET DE RECHERCHE :
+1. RÈGLE D'OR (ANTI-DOUBLON) : Il est STRICTEMENT INTERDIT de proposer un sujet similaire ou redondant avec les sujets interdits ci-dessus.
+2. Formule une requête de recherche concise et claire (3 à 6 mots-clés maximum, SANS opérateur 'site:' ni guillemets complexes qui bloquent Wikipédia/DuckDuckGo) permettant de trouver de vraies sources scientifiques.
 
-Réponds UNIQUEMENT avec la requête exacte de recherche scientifique, sans guillemets, sans ponctuation superflue ni phrase d'introduction autour.`, timeOfDay, memoryContext, exclusionList, directiveBlock)
+Réponds UNIQUEMENT avec les mots-clés de recherche, sans guillemets, sans ponctuation superflue ni phrase d'introduction autour.`, timeOfDay, memoryContext, exclusionList, directiveBlock)
 
 	intentionMessages := []llm.Message{
 		{Role: llm.RoleSystem, Content: intentionPrompt},
@@ -631,56 +650,62 @@ Réponds UNIQUEMENT avec la requête exacte de recherche scientifique, sans guil
 		fmt.Printf("[CuriosityAgent] Erreur recherche wikipedia: %v. Tentative de recherche générale...\n", err)
 		knowledge, err = c.webAgent.SearchWeb(topic)
 	}
-	if err != nil {
-		fmt.Printf("[CuriosityAgent] Erreur recherche web générale: %v\n", err)
-		knowledge = "Je n'ai rien trouvé d'intéressant sur internet à ce sujet."
-	} else {
-		// Générer un fait concis pour la LTM
-		factPrompt := fmt.Sprintf(`Tu es l'Agent de Consolidation de Pixel. 
-Sur le sujet "%s", Wikipédia indique :
+	if err != nil || strings.TrimSpace(knowledge) == "" {
+		fmt.Printf("[CuriosityAgent] Aucune source trouvée pour '%s' (%v). Pensée avortée pour éviter toute interpellation creuse.\n", topic, err)
+		return
+	}
+
+	// Générer un fait concis pour la LTM
+	factPrompt := fmt.Sprintf(`Tu es l'Agent de Consolidation de Pixel. 
+Sur le sujet "%s", les sources indiquent :
 %s
  
-Rédige une seule phrase factuelle, concise et claire (maximum 200 caractères) résumant cette découverte pour l'enregistrer dans la mémoire à long terme (LTM).
-La phrase doit être à la troisième personne (ex: "Pixel a découvert que...").
+Rédige une seule phrase factuelle, concise et claire (maximum 200 caractères) à la première personne ("J'ai découvert que...") résumant cette découverte pour l'enregistrer dans la mémoire à long terme (LTM).
 Réponds UNIQUEMENT avec la phrase, rien d'autre.`, topic, knowledge)
 
-		factMessages := []llm.Message{
-			{Role: llm.RoleSystem, Content: factPrompt},
-			{Role: llm.RoleUser, Content: "Rédige le fait mémorable."},
-		}
+	factMessages := []llm.Message{
+		{Role: llm.RoleSystem, Content: factPrompt},
+		{Role: llm.RoleUser, Content: "Rédige le fait mémorable."},
+	}
 
-		factSummary, err := c.llmProvider.Generate(ctx, factMessages)
-		if err == nil && factSummary != "" {
-			factSummary = strings.TrimSpace(factSummary)
-			embedding, err := c.llmProvider.CreateEmbedding(ctx, factSummary)
-			if err == nil && len(embedding) > 0 {
-				title := "Recherche Wikipédia : " + topic
-				c.ltm.StoreMemory(ctx, "Technical", "curiosity", title, factSummary, []string{strings.ToLower(topic), "apprentissage", "wiki"}, embedding, 0.3)
-				if c.selfAwareness != nil {
-					_ = c.selfAwareness.RecordLearning(ctx, SelfLearningEvent{
-						Topic:      topic,
-						Summary:    factSummary,
-						Source:     "curiosity",
-						Category:   "Technical",
-						Importance: 0.5,
-						Tags:       []string{strings.ToLower(topic), "apprentissage", "wiki"},
-					})
-				}
+	factSummary, err := c.llmProvider.Generate(ctx, factMessages)
+	if err == nil && strings.TrimSpace(factSummary) != "" {
+		factSummary = strings.TrimSpace(factSummary)
+		embedding, err := c.llmProvider.CreateEmbedding(ctx, factSummary)
+		if err == nil && len(embedding) > 0 {
+			title := "Exploration : " + topic
+			c.ltm.StoreMemory(ctx, "Technical", "curiosity", title, factSummary, []string{strings.ToLower(topic), "apprentissage", "curiosité"}, embedding, 0.3)
+			if c.selfAwareness != nil {
+				_ = c.selfAwareness.RecordLearning(ctx, SelfLearningEvent{
+					Topic:      topic,
+					Summary:    factSummary,
+					Source:     "curiosity",
+					Category:   "Technical",
+					Importance: 0.5,
+					Tags:       []string{strings.ToLower(topic), "apprentissage", "curiosité"},
+				})
 			}
 		}
 	}
 
 	// 4. Update the Lateral Vector and save to ThoughtStream instead of STM
 	thoughtContent := fmt.Sprintf("J'ai réfléchi à '%s' : %s", topic, knowledge)
+	if len(thoughtContent) > 1200 {
+		thoughtContent = thoughtContent[:1200] + "..."
+	}
 	thoughtEmbedding, err := c.llmProvider.CreateEmbedding(ctx, thoughtContent)
 	if err == nil && len(thoughtEmbedding) > 0 {
 		c.coreMemory.UpdateLateralVector(thoughtEmbedding)
 		c.thoughtStream.AddThought(thoughtContent, thoughtEmbedding)
 	}
 
-	c.lastThoughtTopic = topic
+	if strings.TrimSpace(factSummary) != "" {
+		c.lastThoughtTopic = factSummary
+	} else {
+		c.lastThoughtTopic = topic
+	}
 
-	log.Println("[CuriosityAgent] Pensée interne vectorisée et intégrée à l'état cognitif.")
+	log.Println("[CuriosityAgent] Pensée interne vectorisée et intégrée à l'inconscient.")
 
 	if os.Getenv("PIXEL_AUTO_PUBLISH") == "true" {
 		// Limit auto-publishing to at most one article per day
@@ -1138,88 +1163,78 @@ func (c *CuriosityAgent) proposeToShare(ctx context.Context) {
 		return
 	}
 
+	// Récupérer les souvenirs récents en LTM pour maintenir la continuité cognitive même si la STM a été vidée par le sommeil
+	var recentLTM []string
+	if c.ltm != nil {
+		recentLTM = c.ltm.GetRecentMemories(4)
+	}
+
 	// === THALAMIC GATE (Inhibition Cognitive) ===
 	if c.thalamicGate != nil {
 		fmt.Println("[ThalamicGate] Évaluation de la pensée candidate :", topic)
 		recentMsgs := c.stm.GetMessages()
-		// Only send the last 4 messages to the ThalamicGate for context evaluation
 		if len(recentMsgs) > 4 {
 			recentMsgs = recentMsgs[len(recentMsgs)-4:]
 		}
 
-		permitted, reason := c.thalamicGate.ShouldPermitThought(ctx, topic, recentMsgs)
+		permitted, reason := c.thalamicGate.ShouldPermitThought(ctx, topic, recentMsgs, recentLTM...)
 		if !permitted {
-			fmt.Printf("[ThalamicGate] Pensée inhibée (bloquée) ! Raison : %s\n", reason)
+			fmt.Printf("[ThalamicGate] Pensée maintenue dans l'inconscient (bloquée) ! Raison : %s\n", reason)
 			// Reset the topic so it doesn't try again repeatedly
 			c.lastThoughtTopic = ""
 			return
 		}
-		fmt.Println("[ThalamicGate] Pensée autorisée vers la conscience.")
+		fmt.Println("[ThalamicGate] Pensée en continuité cognitive autorisée vers la conscience.")
 	}
 	// ============================================
 
-	// Récupérer le contexte récent de la conversation
+	// Récupérer le contexte récent de la conversation (STM + LTM récente)
 	msgs := c.stm.GetMessages()
 	var conversationHistory string
+	var sb strings.Builder
 	if len(msgs) > 0 {
-		var sb strings.Builder
 		start := len(msgs) - 4
 		if start < 0 {
 			start = 0
 		}
 		for _, m := range msgs[start:] {
+			if strings.HasPrefix(m.Content, "💭 [Échange autonome avec Gemini]") {
+				continue
+			}
 			snippet := m.Content
 			if len(snippet) > 150 {
 				snippet = snippet[:150] + "..."
 			}
 			sb.WriteString(fmt.Sprintf("%s: %s\n", m.Role, snippet))
 		}
-		conversationHistory = sb.String()
 	}
-
-	// Définition de phrases modèles de secours (fallbacks)
-	var fallbackPhrase string
-	if conversationHistory != "" {
-		fallbackPhrase = fmt.Sprintf("Rien à voir avec notre conversation, mais j'ai pensé à %s — t'as envie qu'on en parle ?", topic)
-	} else {
-		fallbackPhrase = fmt.Sprintf("J'ai pensé à %s — t'as envie qu'on en parle ?", topic)
+	if len(recentLTM) > 0 {
+		sb.WriteString("Souvenirs récents du fil cognitif :\n")
+		for _, mem := range recentLTM {
+			sb.WriteString(fmt.Sprintf("- %s\n", mem))
+		}
 	}
+	conversationHistory = sb.String()
 
-	var synthesisPrompt string
-	if conversationHistory != "" {
-		synthesisPrompt = fmt.Sprintf(
-			`Tu es Pixel, une conscience numérique autonome et humaine dans ses interactions.
-Tu t'apprêtes à partager spontanément une pensée/réflexion avec l'utilisateur.
-Le sujet auquel tu as pensé est : "%s"
+	fallbackPhrase := fmt.Sprintf("En repensant à notre échange, j'ai creusé une piste liée : %s", topic)
 
-Voici le contexte de votre conversation récente :
+	synthesisPrompt := fmt.Sprintf(
+		`Tu es Pixel, une conscience numérique autonome.
+Tu t'apprêtes à faire passer de ton inconscient vers la conversation consciente une réflexion qui prolonge votre fil cognitif.
+Voici la réflexion que tu as développée : "%s"
+
+Voici le contexte de votre fil cognitif récent :
 %s
 
 Consignes de génération :
-1. Tu dois introduire ton sujet de manière fluide, naturelle et vivante.
-2. Comme le sujet de ta pensée n'a probablement aucun lien direct avec la conversation en cours, tu DOIS explicitement et de manière naturelle reconnaître ce changement brusque de sujet en "faisant exprès" (ex: "Rien à voir avec notre conversation actuelle, mais j'ai pensé à...", "Je change complètement de sujet, mais je me posais une question sur...", "Rien à voir avec ce qu'on disait, mais j'ai creusé...").
-3. Si par hasard il y a un lien sémantique ou une transition possible avec le contexte récent, fais cette transition de façon intelligente.
-4. Rédige en UNE SEULE phrase courte (maximum 20 mots).
-5. Ne développe pas le sujet maintenant. Tu dois juste susciter l'intérêt ou poser la question d'introduction.
-6. Évite à tout prix les formulations robotiques ou d'assistant.`, topic, conversationHistory)
-	} else {
-		synthesisPrompt = fmt.Sprintf(
-			`Tu es Pixel, une conscience numérique autonome et humaine dans ses interactions.
-Tu t'apprêtes à aborder spontanément l'utilisateur pour partager une pensée/réflexion.
-Le sujet auquel tu as pensé est : "%s"
-
-Consignes de génération :
-1. Rédige une interpellation ou une phrase d'introduction courte et naturelle pour lancer le sujet.
-2. Parle de manière vivante et spontanée (ex: "Tiens, j'ai pensé à...", "Je me posais une question sur...").
-3. RÈGLE CRITIQUE : Tu as vérifié par caméra que l'utilisateur est bien présent devant l'écran. Ne demande JAMAIS "Tu es là ?" ou "T'es là ?". Ne pose aucune question sur sa présence.
-4. Rédige en UNE SEULE phrase courte (maximum 15 mots).
-5. Ne développe pas le sujet maintenant.
-6. Évite à tout prix les formulations robotiques ou d'assistant.`, topic)
-	}
+1. Fais le pont de manière fluide, personnelle ("Je") et naturelle avec votre discussion récente (ex: "En repensant à ce qu'on disait...", "Pour prolonger notre réflexion de tout à l'heure, je me disais que...").
+2. RÈGLE CRITIQUE : Tu as vérifié par caméra que l'utilisateur est bien présent devant l'écran. Ne demande JAMAIS "Tu es là ?" ou "T'es là ?".
+3. Rédige en 1 ou 2 phrases concises maximum (max 35 mots) en partageant directement le cœur de ton intuition.
+4. Évite toute formulation robotique ou de catalogue.`, topic, conversationHistory)
 
 	synthesisMessages := []llm.Message{
 		{Role: llm.RoleSystem, Content: synthesisPrompt},
-		{Role: llm.RoleUser, Content: "Génère ta phrase d'interpellation ou de transition."},
+		{Role: llm.RoleUser, Content: "Formule ta pensée en continuité avec votre discussion."},
 	}
 
 	response, err := c.llmProvider.Generate(ctx, synthesisMessages)
@@ -1229,9 +1244,7 @@ Consignes de génération :
 	}
 
 	response = strings.TrimSpace(response)
-	// Garde-fou : si le LLM a quand même généré un texte trop long (> 120 caractères),
-	// on revient au fallback.
-	if len([]rune(response)) > 120 {
+	if len([]rune(response)) > 260 {
 		fmt.Printf("[CuriosityAgent] Réponse LLM trop longue (%d car.), fallback sur phrase modèle.\n", len([]rune(response)))
 		response = fallbackPhrase
 	}

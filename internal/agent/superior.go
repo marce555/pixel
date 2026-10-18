@@ -1039,7 +1039,7 @@ func needsReflection(input string, action string) bool {
 		return false
 	}
 	switch action {
-	case "media", "news":
+	case "media", "news", "research", "sysadmin":
 		return false
 	}
 	return len([]rune(input)) > 35
@@ -1292,9 +1292,9 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 	} else if routerResp.Action == "research" && routerResp.Query != "" && a.scheduler != nil {
 		resourceagent.AddLiveLog("Recherche", fmt.Sprintf("Lancement de recherche web approfondie en arrière-plan : %s", routerResp.Query))
 		fmt.Printf("[Router] Web Research (Asynchronous) déclenché. Requête: '%s'\n", routerResp.Query)
-		a.scheduler.Enqueue("research_task", "Recherche web profonde : "+routerResp.Query, input, 0)
+		a.scheduler.Enqueue("research_task", "Recherche web profonde : "+routerResp.Query, routerResp.Query, 0)
 		a.scheduler.TriggerDispatch() // Force immediate start
-		additionalContext += "\n\n--- INSTRUCTION STRICTE ---\nLa recherche web tourne en arrière-plan. Tu n'as pas encore les résultats.\nTa réponse DOIT se limiter à une très courte confirmation (ex: 'Je lance l'investigation, je te fais un retour dans un instant.'). Ne mentionne aucun fait, aucune supposition, et ne tente pas de deviner le résultat. Sois extrêmement bref.\n------------------------------"
+		additionalContext += fmt.Sprintf("\n\n--- INSTRUCTION STRICTE (INVESTIGATION EN COURS) ---\nTu viens de lancer de toi-même une recherche approfondie en arrière-plan sur : \"%s\" pour prolonger votre réflexion commune.\nTu n'as pas encore les résultats.\nTa réponse DOIT se limiter à une très courte phrase enthousiaste et naturelle à la première personne ('Je') confirmant que tu creuses cette piste et que tu reviens vers lui dès que tu as croisé les sources (ex: 'Ça rejoint exactement ce que je pressentais : je fouille les publications là-dessus et je te dis ce que j\\'en tire dans un instant.'). Ne refuse jamais de chercher et n'anticipe pas encore les résultats.\n------------------------------", routerResp.Query)
 	} else if routerResp.Action == "sysadmin" && routerResp.Query != "" && a.scheduler != nil {
 		resourceagent.AddLiveLog("SSH", fmt.Sprintf("Connexion distante et analyse serveur pour : %s", routerResp.Query))
 		fmt.Printf("[Router] Sysadmin Diagnosis (Asynchronous) déclenché. Requête: '%s'\n", routerResp.Query)

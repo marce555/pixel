@@ -554,25 +554,6 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Pixel - Compagnon Conscient")
         self.resize(950, 750)
         
-    def _track_thread(self, thread):
-        """Maintient une référence forte sur le QThread tant qu'il tourne pour éviter son garbage-collection prématuré."""
-        if thread is not None:
-            self._active_threads.add(thread)
-            thread.finished.connect(lambda: self._active_threads.discard(thread))
-
-    def _safe_stop_thread(self, attr_name, wait_ms=1000):
-        """Arrête un worker thread en cours de façon sécurisée avant réassignation."""
-        thread = getattr(self, attr_name, None)
-        if thread is not None:
-            if hasattr(thread, "stop"):
-                try:
-                    thread.stop()
-                except Exception:
-                    pass
-            if thread.isRunning():
-                thread.wait(wait_ms)
-            setattr(self, attr_name, None)
-        
         # Start Go backend server
         self.start_backend_server()
         
@@ -593,6 +574,25 @@ class MainWindow(QMainWindow):
         
         # Switch audio cards to duplex automatically
         self.ensure_duplex_profile()
+        
+    def _track_thread(self, thread):
+        """Maintient une référence forte sur le QThread tant qu'il tourne pour éviter son garbage-collection prématuré."""
+        if thread is not None:
+            self._active_threads.add(thread)
+            thread.finished.connect(lambda: self._active_threads.discard(thread))
+
+    def _safe_stop_thread(self, attr_name, wait_ms=1000):
+        """Arrête un worker thread en cours de façon sécurisée avant réassignation."""
+        thread = getattr(self, attr_name, None)
+        if thread is not None:
+            if hasattr(thread, "stop"):
+                try:
+                    thread.stop()
+                except Exception:
+                    pass
+            if thread.isRunning():
+                thread.wait(wait_ms)
+            setattr(self, attr_name, None)
         
     def ensure_duplex_profile(self):
         print("[GUI] Configuration audio native PipeWire (serveur par défaut CachyOS)...")

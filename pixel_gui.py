@@ -30,13 +30,22 @@ class SSEReaderThread(QThread):
     def __init__(self):
         super().__init__()
         self.running = True
+        self.response = None
         
+    def stop(self):
+        self.running = False
+        if self.response:
+            try:
+                self.response.close()
+            except Exception:
+                pass
+                
     def run(self):
         while self.running:
             try:
                 # SSE request using stream=True and no timeout (long-lived)
-                response = requests.get(f"{API_BASE}/api/events", stream=True, timeout=None)
-                for line in response.iter_lines():
+                self.response = requests.get(f"{API_BASE}/api/events", stream=True, timeout=None)
+                for line in self.response.iter_lines():
                     if not self.running:
                         break
                     if line:
@@ -44,7 +53,7 @@ class SSEReaderThread(QThread):
                         if decoded.startswith("data: "):
                             try:
                                 payload = json.loads(decoded[6:].strip())
-                                if "proactive_message" in payload:
+                                if "proactive_message" in payload and self.running:
                                     self.proactive_received.emit(payload["proactive_message"])
                             except Exception:
                                 pass
@@ -61,41 +70,65 @@ class ChatStreamThread(QThread):
         super().__init__()
         self.message = message
         self.sender = sender
+        self.running = True
+        self.response = None
+        
+    def stop(self):
+        self.running = False
+        if self.response:
+            try:
+                self.response.close()
+            except Exception:
+                pass
         
     def run(self):
         try:
-            response = requests.post(
+            self.response = requests.post(
                 f"{API_BASE}/api/chat", 
                 json={"message": self.message, "sender": self.sender}, 
                 stream=True, 
                 timeout=(10, None)
             )
-            for line in response.iter_lines():
+            for line in self.response.iter_lines():
+                if not self.running:
+                    break
                 if line:
                     decoded = line.decode('utf-8')
                     if decoded.startswith("data: "):
                         try:
                             payload = json.loads(decoded[6:].strip())
                             if "error" in payload:
-                                self.error_received.emit(payload["error"])
+                                if self.running:
+                                    self.error_received.emit(payload["error"])
                             elif "chunk" in payload:
-                                self.token_received.emit(payload["chunk"])
+                                if self.running:
+                                    self.token_received.emit(payload["chunk"])
                         except Exception:
                             pass
         except Exception as e:
-            self.error_received.emit(str(e))
+            if self.running:
+                self.error_received.emit(str(e))
         finally:
-            self.finished_stream.emit()
+            if self.running:
+                self.finished_stream.emit()
 
 class SleepThread(QThread):
     finished_signal = pyqtSignal()
     
+    def __init__(self):
+        super().__init__()
+        self.running = True
+        
+    def stop(self):
+        self.running = False
+        
     def run(self):
         try:
             requests.post(f"{API_BASE}/api/force_sleep", timeout=30)
         except Exception:
             pass
-        self.finished_signal.emit()
+        if self.running:
+            self.finished_signal.emit()
 
 class TranscribeThread(QThread):
     finished_signal = pyqtSignal(str)
@@ -104,6 +137,10 @@ class TranscribeThread(QThread):
         super().__init__()
         self.wav_path = wav_path
         self.engine = engine
+        self.running = True
+        
+    def stop(self):
+        self.running = False
         
     def _transcribe_google_speech(self, wav_path):
         """Reconnaissance vocale cloud officielle du navigateur (Chromium / Google Web Speech API)."""
@@ -118,6 +155,8 @@ class TranscribeThread(QThread):
             req = urllib.request.Request(url, data=flac_data, headers={"Content-Type": "audio/x-flac; rate=16000"})
             with urllib.request.urlopen(req, timeout=10) as resp:
                 for line in resp:
+                    if not self.running:
+                        break
                     line = line.decode('utf-8').strip()
                     if line:
                         data = json.loads(line)
@@ -134,7 +173,7 @@ class TranscribeThread(QThread):
         text = ""
         
         # 1. Moteur Navigateur Web (Google Speech API - par défaut)
-        if self.engine == "browser":
+        if self.engine == "browser" and self.running:
             try:
                 text = self._transcribe_google_speech(self.wav_path)
                 if text:
@@ -144,7 +183,7 @@ class TranscribeThread(QThread):
                 text = ""
 
         # 2. Fallback ou mode Whisper local
-        if not text:
+        if not text and self.running:
             try:
                 with open(self.wav_path, 'rb') as f:
                     files = {'file': ('mic.wav', f, 'audio/wav')}
@@ -163,7 +202,8 @@ class TranscribeThread(QThread):
         try: os.unlink(self.wav_path)
         except Exception: pass
             
-        self.finished_signal.emit(text)
+        if self.running:
+            self.finished_signal.emit(text)
 
 class TTSDownloadThread(QThread):
     finished_signal = pyqtSignal(str) # Emits local_wav_path
@@ -174,19 +214,40 @@ class TTSDownloadThread(QThread):
         self.rate = rate
         self.pitch = pitch
         self.temp_file = os.path.join(tempfile.gettempdir(), f"tts_{int(time.time()*1000)}.wav")
+        self.running = True
+        self.response = None
+        
+    def stop(self):
+        self.running = False
+        if self.response:
+            try:
+                self.response.close()
+            except Exception:
+                pass
         
     def run(self):
         try:
             url = f"{API_BASE}/api/voice/speak?text={requests.utils.quote(self.sentence)}&rate={self.rate}&pitch={self.pitch}"
-            r = requests.get(url, timeout=40)
-            if r.status_code == 200:
+            self.response = requests.get(url, timeout=40, stream=True)
+            if self.running and self.response.status_code == 200:
                 with open(self.temp_file, 'wb') as f:
-                    f.write(r.content)
-                self.finished_signal.emit(self.temp_file)
-                return
+                    for chunk in self.response.iter_content(chunk_size=4096):
+                        if not self.running:
+                            break
+                        f.write(chunk)
+                if self.running:
+                    self.finished_signal.emit(self.temp_file)
+                    return
         except Exception as e:
-            print(f"[GUI] Erreur téléchargement TTS : {e}")
-        self.finished_signal.emit("")
+            if self.running:
+                print(f"[GUI] Erreur téléchargement TTS : {e}")
+        try:
+            if os.path.exists(self.temp_file):
+                os.unlink(self.temp_file)
+        except Exception:
+            pass
+        if self.running:
+            self.finished_signal.emit("")
 
 class RecordReaderThread(QThread):
     finished_signal = pyqtSignal(str) # Emits wav_path
@@ -300,6 +361,9 @@ class RecordReaderThread(QThread):
             except Exception:
                 pass
                 
+        if self.should_stop:
+            return
+
         # Write WAV file
         if len(audio_data) > 44:
             if AudioWavWriter.write_wav_header_from_bytes(audio_data, self.temp_wav_path):
@@ -457,8 +521,13 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.server_process = None
+        self._active_threads = set()
         self.sse_thread = None
         self.chat_thread = None
+        self.record_thread = None
+        self.transcribe_thread = None
+        self.tts_thread = None
+        self.sleep_thread = None
         self.is_recording = False
         self.audio_source = None
         self.temp_raw_file = None
@@ -484,6 +553,25 @@ class MainWindow(QMainWindow):
         
         self.setWindowTitle("Pixel - Compagnon Conscient")
         self.resize(950, 750)
+        
+    def _track_thread(self, thread):
+        """Maintient une référence forte sur le QThread tant qu'il tourne pour éviter son garbage-collection prématuré."""
+        if thread is not None:
+            self._active_threads.add(thread)
+            thread.finished.connect(lambda: self._active_threads.discard(thread))
+
+    def _safe_stop_thread(self, attr_name, wait_ms=1000):
+        """Arrête un worker thread en cours de façon sécurisée avant réassignation."""
+        thread = getattr(self, attr_name, None)
+        if thread is not None:
+            if hasattr(thread, "stop"):
+                try:
+                    thread.stop()
+                except Exception:
+                    pass
+            if thread.isRunning():
+                thread.wait(wait_ms)
+            setattr(self, attr_name, None)
         
         # Start Go backend server
         self.start_backend_server()
@@ -576,7 +664,9 @@ class MainWindow(QMainWindow):
             self.poll_timer.start(10000) # Every 10 seconds for general stats
             
             # Start SSE thread
+            self._safe_stop_thread("sse_thread", 500)
             self.sse_thread = SSEReaderThread()
+            self._track_thread(self.sse_thread)
             self.sse_thread.proactive_received.connect(self.handle_proactive_message, Qt.ConnectionType.QueuedConnection)
             self.sse_thread.start()
         except Exception:
@@ -1424,7 +1514,9 @@ class MainWindow(QMainWindow):
         self.btn_sleep.setEnabled(False)
         self.btn_sleep.setText("Consolidation en cours...")
         
+        self._safe_stop_thread("sleep_thread", 1000)
         self.sleep_thread = SleepThread()
+        self._track_thread(self.sleep_thread)
         self.sleep_thread.finished_signal.connect(self.handle_sleep_finished, Qt.ConnectionType.QueuedConnection)
         self.sleep_thread.start()
         
@@ -1560,7 +1652,9 @@ class MainWindow(QMainWindow):
         self.btn_send.setEnabled(False)
         
         # Start streaming thread
+        self._safe_stop_thread("chat_thread", 1000)
         self.chat_thread = ChatStreamThread(msg, getattr(self, 'user_name', 'Marcelo'))
+        self._track_thread(self.chat_thread)
         self.chat_thread.token_received.connect(self.handle_stream_chunk, Qt.ConnectionType.QueuedConnection)
         self.chat_thread.error_received.connect(self.handle_stream_error, Qt.ConnectionType.QueuedConnection)
         self.chat_thread.finished_stream.connect(self.handle_stream_finished, Qt.ConnectionType.QueuedConnection)
@@ -1716,7 +1810,9 @@ class MainWindow(QMainWindow):
         self.input_field.setPlaceholderText("Pixel vous écoute... Cliquez sur 🔴 ou parlez.")
         
         # Start QThread-based recording with real-time silence detection
+        self._safe_stop_thread("record_thread", 1000)
         self.record_thread = RecordReaderThread(is_handsfree=self.continuous_voice)
+        self._track_thread(self.record_thread)
         self.record_thread.finished_signal.connect(self.handle_record_finished, Qt.ConnectionType.QueuedConnection)
         self.record_thread.speech_started_signal.connect(self.stop_speaking, Qt.ConnectionType.QueuedConnection)
         self.record_thread.start()
@@ -1730,8 +1826,7 @@ class MainWindow(QMainWindow):
         self.btn_mic.setStyleSheet("")
         self.input_field.setPlaceholderText("Écrivez un message ou parlez...")
         
-        if hasattr(self, "record_thread") and self.record_thread:
-            self.record_thread.stop()
+        self._safe_stop_thread("record_thread", 1000)
 
     def handle_record_finished(self, wav_path):
         self.is_recording = False
@@ -1751,7 +1846,9 @@ class MainWindow(QMainWindow):
         self.input_field.setText("... (Pixel décode votre voix) ...")
         self.input_field.setEnabled(False)
         
+        self._safe_stop_thread("transcribe_thread", 1000)
         self.transcribe_thread = TranscribeThread(wav_path, engine=self.stt_engine)
+        self._track_thread(self.transcribe_thread)
         self.transcribe_thread.finished_signal.connect(self.handle_transcription_finished, Qt.ConnectionType.QueuedConnection)
         self.transcribe_thread.start()
         
@@ -1908,7 +2005,9 @@ class MainWindow(QMainWindow):
         pitch_val = self.sld_pitch.value() / 100.0 if hasattr(self, 'sld_pitch') else 1.0
         
         # Download synthesis in background QThread to avoid player buffering glitched starts
+        self._safe_stop_thread("tts_thread", 500)
         self.tts_thread = TTSDownloadThread(sentence, rate_val, pitch_val)
+        self._track_thread(self.tts_thread)
         self.tts_thread.finished_signal.connect(self.handle_tts_download_finished, Qt.ConnectionType.QueuedConnection)
         self.tts_thread.start()
 
@@ -1936,6 +2035,7 @@ class MainWindow(QMainWindow):
 
     def stop_speaking(self):
         self.media_player.stop()
+        self._safe_stop_thread("tts_thread", 500)
         if hasattr(self, "current_tts_file") and self.current_tts_file:
             try: os.unlink(self.current_tts_file)
             except Exception: pass
@@ -1947,16 +2047,31 @@ class MainWindow(QMainWindow):
 
     # ── CLEAN EXIT ──
     def closeEvent(self, event):
-        # Terminate backend process on window close
+        # Terminate backend and worker threads on window close
         self.stop_speaking()
-        if self.sse_thread:
-            self.sse_thread.running = False
-            self.sse_thread.wait()
+        self.stop_microphone_recording()
+        
+        self._safe_stop_thread("tts_thread", 500)
+        self._safe_stop_thread("transcribe_thread", 500)
+        self._safe_stop_thread("chat_thread", 500)
+        self._safe_stop_thread("sleep_thread", 500)
+        self._safe_stop_thread("sse_thread", 500)
+        
+        # Wait on any remaining active threads
+        for t in list(self._active_threads):
+            if t.isRunning():
+                if hasattr(t, "stop"):
+                    try: t.stop()
+                    except Exception: pass
+                t.wait(500)
             
         if self.server_process:
             print("[GUI] Arrêt du serveur backend Pixel...")
             self.server_process.terminate()
-            self.server_process.wait()
+            try:
+                self.server_process.wait(timeout=2)
+            except Exception:
+                self.server_process.kill()
         event.accept()
 
 if __name__ == "__main__":

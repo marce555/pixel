@@ -601,6 +601,7 @@ class MainWindow(QMainWindow):
             subprocess.run(["pactl", "set-card-profile", "alsa_card.pci-0000_64_00.1", "off"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             subprocess.run(["pactl", "set-card-profile", "alsa_card.pci-0000_65_00.6", "output:analog-stereo+input:analog-stereo"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             subprocess.run(["pactl", "set-default-sink", "alsa_output.pci-0000_65_00.6.analog-stereo"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["pactl", "set-default-source", "alsa_input.pci-0000_65_00.6.analog-stereo"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
             # 2. Utilisation du serveur par défaut de CachyOS : PipeWire / WirePlumber
             subprocess.run(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "0"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -608,7 +609,13 @@ class MainWindow(QMainWindow):
             subprocess.run(["wpctl", "set-mute", "@DEFAULT_AUDIO_SOURCE@", "0"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             subprocess.run(["wpctl", "set-volume", "@DEFAULT_AUDIO_SOURCE@", "1.0"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            # 3. Sécurité matérielle ALC285 (ROG Zephyrus G14) via le script dédié s'il existe
+            # 3. Réglage précis et persistant du microphone (ALC285) : niveau optimal à 80% + Boost 1 (+10dB), sans saturation
+            subprocess.run(["amixer", "-c", "Generic_1", "set", "Internal Mic", "cap"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["amixer", "-c", "Generic_1", "set", "Internal Mic Boost", "1"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["amixer", "-c", "Generic_1", "set", "Capture", "cap"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["amixer", "-c", "Generic_1", "set", "Capture", "80%"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            # 4. Sécurité matérielle ALC285 (ROG Zephyrus G14) via le script dédié s'il existe
             fix_script = os.path.expanduser("~/.bin/audio-fix.sh")
             if os.path.exists(fix_script):
                 sinks_out = subprocess.run(["pactl", "list", "sinks"], capture_output=True, text=True).stdout

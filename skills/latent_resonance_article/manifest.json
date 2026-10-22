@@ -1,0 +1,5 @@
+{
+  "name": "latent_resonance_article",
+  "description": "Génère un article structuré sur la résonance latente dans les systèmes distribués et les réseaux neuronaux.",
+  "router_instructions": "Utilise cette action si l'utilisateur demande une explication sur la résonance latente, les systèmes auto-organisés ou les états émergents dans les réseaux. Mets la requête complète dans query."
+}

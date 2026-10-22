@@ -1,0 +1,5 @@
+{
+  "name": "skill_read_system_temp",
+  "description": "Lecture de la température CPU via k10temp et du boîtier via lm-sensors (hwmon), en filtrant les capteurs incohérents.",
+  "router_instructions": "Utilise cette action si l'utilisateur demande la température du CPU ou du boîtier. Mets la requête complète dans query."
+}

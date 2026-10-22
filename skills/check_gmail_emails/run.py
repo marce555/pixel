@@ -907,7 +907,12 @@ def main():
         mail.logout()
 
     except Exception as e:
-        print(f"Erreur d'accès à Gmail : {e}")
+        if "AUTHENTICATIONFAILED" in str(e) or "Invalid credentials" in str(e):
+            print(f"ÉCHEC : connexion refusée par Gmail pour la boîte de Marcelo ({email_addr}) — identifiants invalides "
+                  "(mot de passe d'application révoqué ou expiré). AUCUN e-mail n'a pu être lu. "
+                  "Il faut que Marcelo génère un nouveau mot de passe d'application Google et le saisisse dans les paramètres Gmail.")
+        else:
+            print(f"ÉCHEC : erreur d'accès à la boîte Gmail de Marcelo ({email_addr}) : {e}. AUCUN e-mail n'a pu être lu.")
 
 
 if __name__ == '__main__':

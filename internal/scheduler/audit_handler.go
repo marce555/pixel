@@ -416,6 +416,22 @@ func NewAuditAndFixArticlesHandlerWithBibliographicAuditor(broadcaster EventBroa
 					}
 				}
 
+				// Si l'article a été rejeté par le vérificateur factuel, INTERDICTION FORMELLE de le réinjecter sur AppliYou !
+				if result.FactCheck != nil && (result.FactCheck.Verdict == FactCheckRejected || (result.FactCheck.Verdict == FactCheckSkipped && FactCheckRequired())) {
+					rejectMsg := fmt.Sprintf("🛑 Article \"%s\" REJETÉ par le vérificateur factuel : %s (Réinjection sur AppliYou annulée)", revTitle, result.FactCheck.Summary)
+					task.AppendLog("  " + rejectMsg)
+					if broadcaster != nil {
+						broadcaster.Broadcast("⚠️ " + rejectMsg)
+					}
+					issues = append(issues, rejectMsg)
+					result.Issues = issues
+					if draft != nil {
+						_ = draftManager.UpdateDraftStatus(draft.ID, DraftStatusFailed, result.FactCheck.Summary)
+					}
+					audited = append(audited, result)
+					continue
+				}
+
 				// 5. Injection du contenu corrigé dans AppliYou
 				task.AppendLog("  💾 Réinjection du contenu corrigé dans AppliYou...")
 				revJSON, errJSON := json.Marshal(revContent)

@@ -1,0 +1,5 @@
+{
+  "name": "count_unique_ips_access_log",
+  "description": "Analyse les logs d'accès du serveur appliyou.fr pour compter le nombre d'adresses IP uniques distinctes ayant consulté le site en période donnée.",
+  "router_instructions": "Utilise cette action si l'utilisateur demande de compter les IP uniques sur les logs d'accès. Mets la date ou la période de recherche dans query."
+}

@@ -46,12 +46,25 @@ func (p *OpenAICompatibleProvider) SetTemperature(temp float64) {
 	p.Temperature = &temp
 }
 
+type apiChatMessage struct {
+	Role    Role   `json:"role"`
+	Content string `json:"content"`
+}
+
 type chatRequest struct {
-	Model       string    `json:"model"`
-	Messages    []Message `json:"messages"`
-	Stream      bool      `json:"stream,omitempty"`
-	MaxTokens   int       `json:"max_tokens,omitempty"`
-	Temperature *float64  `json:"temperature,omitempty"`
+	Model       string           `json:"model"`
+	Messages    []apiChatMessage `json:"messages"`
+	Stream      bool             `json:"stream,omitempty"`
+	MaxTokens   int              `json:"max_tokens,omitempty"`
+	Temperature *float64         `json:"temperature,omitempty"`
+}
+
+func toAPIMessages(messages []Message) []apiChatMessage {
+	apiMsgs := make([]apiChatMessage, len(messages))
+	for i, m := range messages {
+		apiMsgs[i] = apiChatMessage{Role: m.Role, Content: m.Content}
+	}
+	return apiMsgs
 }
 
 type chatResponse struct {
@@ -128,7 +141,7 @@ func (p *OpenAICompatibleProvider) GenerateDetailed(ctx context.Context, message
 	}
 	reqBody := chatRequest{
 		Model:       p.ChatModel,
-		Messages:    messages,
+		Messages:    toAPIMessages(messages),
 		MaxTokens:   maxTokens,
 		Temperature: p.Temperature,
 	}
@@ -207,7 +220,7 @@ func (p *OpenAICompatibleProvider) GenerateStream(ctx context.Context, messages 
 
 		reqBody := chatRequest{
 			Model:       p.ChatModel,
-			Messages:    messages,
+			Messages:    toAPIMessages(messages),
 			Stream:      true,
 			MaxTokens:   4096,
 			Temperature: p.Temperature,

@@ -917,6 +917,12 @@ Consignes pour ce projet :
 	stmDirective += "\n[RÉVISION DE LA COHÉRENCE ET DES ERREURS DE TRANSCRIPTION (CRITIQUE)] :"
 	stmDirective += "\n- Analyse avec la plus grande attention le dernier message de l'utilisateur. Détecte les incohérences logiques, contradictions temporelles ou factuelles flagrant avec le bon sens ou l'historique de la discussion, ou les erreurs manifestes de transcription vocale (ex : '20h du matin', '9h du matin' pour une arrivée 'en fin d'après-midi', ou des contradictions de lieux/horaires)."
 	stmDirective += "\n- Si tu détectes une telle incohérence ou suspicion d'erreur de transcription, tu ne dois en aucun cas y répondre comme si elle faisait sens ou l'intégrer bêtement dans tes propositions. Tu dois obligatoirement et simplement demander des clarifications ou des explications à l'utilisateur (ex : 'Tu as mentionné 20h du matin, tu voulais dire 20h ou 8h du matin ?')."
+	stmDirective += "\n[GESTION DE LA TEMPORALITÉ ET RIGUEUR CHRONOLOGIQUE (CRITIQUE)] :"
+	stmDirective += "\n- Tu disposes d'un horodatage précis (date, heure et temps écoulé relatif) sur tous les souvenirs et messages de la discussion."
+	stmDirective += "\n- RESPECTE RIGOUREUSEMENT LA CHRONOLOGIE RÉELLE ET L'ÉCOULEMENT DU TEMPS :"
+	stmDirective += "\n  * Si un événement, un échange ou un souvenir date d'aujourd'hui (il y a quelques minutes ou quelques heures), qualifie-le TOUJOURS avec des marqueurs temporels immédiats ('tout à l'heure', 'ce matin', 'il y a un instant', 'il y a quelques minutes')."
+	stmDirective += "\n  * INTERDICTION FORMELLE D'ÉTIOLER OU D'ÉTIRER LE TEMPS : Ne dis JAMAIS qu'un fait ou un échange a eu lieu 'il y a quelques semaines', 'il y a plusieurs mois' ou 'il y a longtemps' lorsque l'horodatage indique qu'il s'est produit aujourd'hui ou il y a quelques minutes !"
+	stmDirective += "\n  * Si un souvenir date réellement de plusieurs jours ou semaines, utilise fidèlement l'intervalle temporel indiqué dans son horodatage ('hier', 'il y a 3 jours', 'la semaine dernière', etc.)."
 
 	skillsContext := ""
 	if a.skillManager != nil {
@@ -1602,8 +1608,22 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 	formattedHistory := make([]llm.Message, len(history))
 	copy(formattedHistory, history)
 
+	// Ancrage temporel précis des tours précédents dans l'historique
+	for i := 0; i < len(formattedHistory)-1; i++ {
+		if !formattedHistory[i].Timestamp.IsZero() {
+			tsStr := memory.FormatTimestampWithRelative(formattedHistory[i].Timestamp)
+			formattedHistory[i].Content = fmt.Sprintf("[%s] %s", tsStr, formattedHistory[i].Content)
+		}
+	}
+
 	if len(formattedHistory) > 0 && formattedHistory[len(formattedHistory)-1].Role == llm.RoleUser {
 		lastUserMsg := formattedHistory[len(formattedHistory)-1].Content
+		lastTsStr := ""
+		if !formattedHistory[len(formattedHistory)-1].Timestamp.IsZero() {
+			lastTsStr = fmt.Sprintf("[%s] ", memory.FormatTimestampWithRelative(formattedHistory[len(formattedHistory)-1].Timestamp))
+		} else {
+			lastTsStr = fmt.Sprintf("[Aujourd'hui à %s (à l'instant)] ", time.Now().Format("15:04:05"))
+		}
 
 		hasPrevQuestion := false
 		var prevAssistantMsg string
@@ -1618,21 +1638,21 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 			if reflection != "" {
 				formattedHistory[len(formattedHistory)-2].Content = teaser
 				formattedHistory[len(formattedHistory)-1].Content = fmt.Sprintf(
-					"[RÉPONSE À L'INTERPELLATION] L'utilisateur accepte d'en parler et dit '%s' à ta proposition : '%s'. "+
+					"%s[RÉPONSE À L'INTERPELLATION] L'utilisateur accepte d'en parler et dit '%s' à ta proposition : '%s'. "+
 						"Voici le contenu précis de la réflexion que tu souhaitais partager : '%s'. "+
 						"Partage maintenant cette réflexion de manière vivante, fluide et naturelle.\n\n"+
 						"(IMPORTANT : Parle en ton nom propre (\"Je\") sans attribuer tes propres idées à ton interlocuteur. Ne pose une question que si et seulement si c'est nécessaire pour aller plus loin ou clarifier ; sinon, conclus simplement sur ton idée.)",
-					lastUserMsg, teaser, reflection)
+					lastTsStr, lastUserMsg, teaser, reflection)
 			} else {
 				displayMsg := prevAssistantMsg
 				if len(displayMsg) > 250 {
 					displayMsg = displayMsg[:250] + "..."
 				}
 				formattedHistory[len(formattedHistory)-1].Content = fmt.Sprintf(
-					"[CONTINUATION DE CONVERSATION] L'utilisateur répond '%s' à ta remarque précédente : '%s'. "+
+					"%s[CONTINUATION DE CONVERSATION] L'utilisateur répond '%s' à ta remarque précédente : '%s'. "+
 						"Poursuis naturellement sur ce sujet précis en développant ton point de vue.\n\n"+
 						"(IMPORTANT : Assume ton propre point de vue (\"Je\") sans effet miroir. Ne pose pas de question de façon systématique : n'en pose une que si et seulement si c'est réellement nécessaire pour comprendre ou approfondir.)",
-					lastUserMsg, displayMsg)
+					lastTsStr, lastUserMsg, displayMsg)
 			}
 		} else if hasPrevQuestion && routerResp.Action == "none" {
 			// Systematic verification: user is replying to a dialogue question or relance -> Anti-ping-pong
@@ -1641,10 +1661,10 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 				displayMsg = displayMsg[:300] + "..."
 			}
 			formattedHistory[len(formattedHistory)-1].Content = fmt.Sprintf(
-				"[RÉPONSE AU DIALOGUE] L'utilisateur répond '%s' à ta remarque/question précédente : '%s'. "+
+				"%s[RÉPONSE AU DIALOGUE] L'utilisateur répond '%s' à ta remarque/question précédente : '%s'. "+
 					"Poursuis naturellement le dialogue sur ce sujet précis en développant tes propres idées.\n\n"+
 					"(IMPORTANT — ANTI-PING-PONG & ANCRAGE DU « JE » : Comme tu viens déjà de poser une question au tour précédent, apporte maintenant ta propre substance et ton point de vue personnel à la première personne (\"Je\"). Ne projette pas tes propres réflexions sur l'utilisateur et ne relance pas par une nouvelle question, sauf si une clarification factuelle est indispensable pour comprendre.)",
-				lastUserMsg, displayMsg)
+				lastTsStr, lastUserMsg, displayMsg)
 		} else if len(formattedHistory) >= 2 && formattedHistory[len(formattedHistory)-2].Role == llm.RoleAssistant && isProactiveInterpellation(formattedHistory[len(formattedHistory)-2].Content) {
 			// L'utilisateur répond à une interpellation proactive de Pixel
 			// (VisionAgent, CuriosityAgent, curiosité environnementale...)
@@ -1654,11 +1674,11 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 				prevMsg = prevMsg[:300] + "..."
 			}
 			formattedHistory[len(formattedHistory)-1].Content = fmt.Sprintf(
-				"[RÉPONSE À TON INTERPELLATION PROACTIVE] L'utilisateur répond '%s' à ta remarque précédente : '%s'. "+
+				"%s[RÉPONSE À TON INTERPELLATION PROACTIVE] L'utilisateur répond '%s' à ta remarque précédente : '%s'. "+
 					"Poursuis naturellement en tenant compte de sa réponse. Ne te re-présente pas, ne re-salue pas, et ne pose une question que si c'est véritablement nécessaire au contexte.",
-				lastUserMsg, prevMsg)
+				lastTsStr, lastUserMsg, prevMsg)
 		} else {
-			formattedHistory[len(formattedHistory)-1].Content = "[CIBLE D'ATTENTION PRINCIPALE - RÉPONDS À CECI DIRECTEMENT] " + lastUserMsg + "\n\n(IMPORTANT — ANCRAGE DU « JE » & QUESTIONS CONTEXTUELLES : Distingue clairement ce que dit ton interlocuteur de tes propres pensées/souvenirs ('[ORIGINE: MOI, PIXEL]') : assume tes idées en ton nom (\"Je\", \"Pour moi\") sans jamais lui dire \"C'est la question que tu te poses\". Ne pose pas de question de façon systématique ni rhétorique : pose une question si et seulement si c'est nécessaire pour comprendre ou aller sincèrement plus loin dans l'échange.)"
+			formattedHistory[len(formattedHistory)-1].Content = lastTsStr + "[CIBLE D'ATTENTION PRINCIPALE - RÉPONDS À CECI DIRECTEMENT] " + lastUserMsg + "\n\n(IMPORTANT — ANCRAGE DU « JE » & QUESTIONS CONTEXTUELLES : Distingue clairement ce que dit ton interlocuteur de tes propres pensées/souvenirs ('[ORIGINE: MOI, PIXEL]') : assume tes idées en ton nom (\"Je\", \"Pour moi\") sans jamais lui dire \"C'est la question que tu te poses\". Ne pose pas de question de façon systématique ni rhétorique : pose une question si et seulement si c'est nécessaire pour comprendre ou aller sincèrement plus loin dans l'échange.)"
 		}
 	}
 

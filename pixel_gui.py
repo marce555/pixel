@@ -4,6 +4,7 @@
 import os
 import sys
 import time
+from datetime import datetime
 import json
 import struct
 import tempfile
@@ -411,6 +412,26 @@ class AudioWavWriter:
         except Exception as e:
             print(f"[GUI] Erreur écriture WAV en mémoire : {e}")
             return False
+
+def format_timestamp(ts=None):
+    if not ts:
+        return datetime.now().strftime("%H:%M")
+    if isinstance(ts, str):
+        try:
+            if "T" in ts:
+                date_part, rest = ts.split("T", 1)
+                time_part = rest[:5]
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                if date_part == today_str:
+                    return time_part
+                else:
+                    d_split = date_part.split("-")
+                    return f"{d_split[2]}/{d_split[1]} {time_part}"
+            elif len(ts) >= 5:
+                return ts[:5]
+        except Exception:
+            return str(ts)
+    return datetime.now().strftime("%H:%M")
 
 def parse_markdown(text):
     if not text:
@@ -1512,7 +1533,7 @@ class MainWindow(QMainWindow):
                 # Render initial chat
                 for msg in messages:
                     sender = "pixel" if msg.get("role") == "assistant" else "user"
-                    self.append_chat_bubble(msg.get("content", ""), sender)
+                    self.append_chat_bubble(msg.get("content", ""), sender, msg.get("timestamp"))
         except Exception as e:
             print(f"[GUI] Erreur fetch history : {e}")
 
@@ -1639,12 +1660,16 @@ class MainWindow(QMainWindow):
         
         # Prepare bubble for streaming response
         self.stream_accumulated = ""
+        curr_time = format_timestamp()
         self.chat_display.append(
             f'<table width="100%" border="0" cellspacing="0" cellpadding="0" style="margin-bottom: 14px; margin-top: 6px;">'
             f'<tr><td align="left">'
             f'<table border="0" cellspacing="0" cellpadding="0" style="background-color: #1e293b; border: 1px solid #0284c7; border-left: 4px solid #38bdf8; border-radius: 16px 16px 16px 4px;">'
             f'<tr><td style="padding: 12px 18px;">'
-            f'<div style="color: #38bdf8; font-weight: 700; font-size: 0.8em; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">✨ Pixel</div>'
+            f'<div style="color: #38bdf8; font-weight: 700; font-size: 0.8em; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">'
+            f'<span>✨ Pixel</span>'
+            f'<span style="color: rgba(56, 189, 248, 0.6); font-weight: 400; font-size: 0.9em; margin-left: 8px;">{curr_time}</span>'
+            f'</div>'
             f'<div style="color: #94a3b8; font-size: 14px;"><i>Pixel réfléchit...</i></div>'
             f'</td></tr></table>'
             f'</td></tr></table>'
@@ -1702,7 +1727,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "stream_accumulated") and self.stream_accumulated:
             if not hasattr(self, "chat_history_cache"):
                 self.chat_history_cache = []
-            self.chat_history_cache.append((self.stream_accumulated, "pixel"))
+            self.chat_history_cache.append((self.stream_accumulated, "pixel", format_timestamp()))
             
         self.poll_server_data()
 
@@ -1711,10 +1736,14 @@ class MainWindow(QMainWindow):
             self.chat_history_cache = []
             
         html = ""
-        for msg, sender in self.chat_history_cache:
-            html += self.build_bubble_html(msg, sender)
+        for item in self.chat_history_cache:
+            msg = item[0]
+            sender = item[1]
+            ts = item[2] if len(item) > 2 else None
+            html += self.build_bubble_html(msg, sender, ts)
             
         # Active stream bubble
+        curr_ts = format_timestamp()
         html += f"""
         <table width="100%" border="0" cellspacing="0" cellpadding="0" style="margin-bottom: 14px; margin-top: 6px;">
           <tr>
@@ -1722,7 +1751,10 @@ class MainWindow(QMainWindow):
               <table border="0" cellspacing="0" cellpadding="0" style="background-color: #1e293b; border: 1px solid #0284c7; border-left: 4px solid #38bdf8; border-radius: 16px 16px 16px 4px;">
                 <tr>
                   <td style="padding: 12px 18px;">
-                    <div style="color: #38bdf8; font-weight: 700; font-size: 0.8em; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">✨ Pixel <i style="color: #94a3b8; font-weight: normal; font-size: 0.9em;">(Réponse en cours...)</i></div>
+                    <div style="color: #38bdf8; font-weight: 700; font-size: 0.8em; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">
+                      <span>✨ Pixel <i style="color: #94a3b8; font-weight: normal; font-size: 0.9em;">(Réponse en cours...)</i></span>
+                      <span style="color: rgba(56, 189, 248, 0.6); font-weight: 400; font-size: 0.9em; margin-left: 8px;">{curr_ts}</span>
+                    </div>
                     <div style="color: #f8fafc; font-size: 14px; line-height: 1.5;">{active_html}</div>
                   </td>
                 </tr>
@@ -1734,17 +1766,19 @@ class MainWindow(QMainWindow):
         self.chat_display.setHtml(html)
         self.chat_display.moveCursor(QTextCursor.MoveOperation.End)
 
-    def append_chat_bubble(self, content, sender):
+    def append_chat_bubble(self, content, sender, timestamp=None):
         if not hasattr(self, "chat_history_cache"):
             self.chat_history_cache = []
             
-        self.chat_history_cache.append((content, sender))
-        html_bubble = self.build_bubble_html(content, sender)
+        ts_display = format_timestamp(timestamp)
+        self.chat_history_cache.append((content, sender, ts_display))
+        html_bubble = self.build_bubble_html(content, sender, ts_display)
         self.chat_display.append(html_bubble)
         self.chat_display.moveCursor(QTextCursor.MoveOperation.End)
 
-    def build_bubble_html(self, content, sender):
+    def build_bubble_html(self, content, sender, timestamp=None):
         user_name = getattr(self, 'user_name', 'Marcelo')
+        ts_display = format_timestamp(timestamp)
         if sender == "user":
             formatted = parse_markdown(content)
             return f"""
@@ -1754,7 +1788,10 @@ class MainWindow(QMainWindow):
                   <table border="0" cellspacing="0" cellpadding="0" style="background-color: #5b21b6; border: 1px solid #8b5cf6; border-radius: 16px 16px 4px 16px;">
                     <tr>
                       <td style="padding: 10px 16px;">
-                        <div style="color: #ddd6fe; font-weight: 700; font-size: 0.78em; margin-bottom: 4px; text-align: right; text-transform: uppercase; letter-spacing: 0.5px;">👤 Vous ({user_name})</div>
+                        <div style="color: #ddd6fe; font-weight: 700; font-size: 0.78em; margin-bottom: 4px; text-align: right; text-transform: uppercase; letter-spacing: 0.5px;">
+                          <span>👤 Vous ({user_name})</span>
+                          <span style="color: rgba(221, 214, 254, 0.65); font-weight: 400; font-size: 0.9em; margin-left: 8px;">{ts_display}</span>
+                        </div>
                         <div style="color: #ffffff; font-size: 14px; line-height: 1.5;">{formatted}</div>
                       </td>
                     </tr>
@@ -1772,7 +1809,10 @@ class MainWindow(QMainWindow):
                   <table border="0" cellspacing="0" cellpadding="0" style="background-color: #1e293b; border: 1px solid rgba(255, 255, 255, 0.1); border-left: 4px solid #10b981; border-radius: 16px 16px 16px 4px;">
                     <tr>
                       <td style="padding: 12px 18px;">
-                        <div style="color: #34d399; font-weight: 700; font-size: 0.8em; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">✨ Pixel</div>
+                        <div style="color: #34d399; font-weight: 700; font-size: 0.8em; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">
+                          <span>✨ Pixel</span>
+                          <span style="color: rgba(255, 255, 255, 0.45); font-weight: 400; font-size: 0.9em; margin-left: 8px;">{ts_display}</span>
+                        </div>
                         <div style="color: #f8fafc; font-size: 14px; line-height: 1.5;">{formatted}</div>
                       </td>
                     </tr>

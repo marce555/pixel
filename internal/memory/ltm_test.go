@@ -175,3 +175,56 @@ func TestSearchPersonalByKeywordsAccentFolding(t *testing.T) {
 		t.Errorf("Expected Hans Urs von Balthasar in result, got: %s", results[0])
 	}
 }
+
+func TestFormatTimestampWithRelative(t *testing.T) {
+	now := time.Date(2026, 10, 20, 8, 23, 35, 0, time.Local)
+
+	tests := []struct {
+		name     string
+		input    time.Time
+		expected string
+	}{
+		{
+			name:     "just now (< 1 min)",
+			input:    now.Add(-20 * time.Second),
+			expected: "Aujourd'hui à 08:23 (à l'instant)",
+		},
+		{
+			name:     "2 minutes ago",
+			input:    now.Add(-2 * time.Minute),
+			expected: "Aujourd'hui à 08:21 (il y a 2 minutes)",
+		},
+		{
+			name:     "1 minute ago",
+			input:    now.Add(-1 * time.Minute),
+			expected: "Aujourd'hui à 08:22 (il y a 1 minute)",
+		},
+		{
+			name:     "2 hours ago (today)",
+			input:    now.Add(-2 * time.Hour),
+			expected: "Aujourd'hui à 06:23 (il y a 2 heures)",
+		},
+		{
+			name:     "yesterday",
+			input:    time.Date(2026, 10, 19, 14, 30, 0, 0, time.Local),
+			expected: "Hier à 14:30",
+		},
+		{
+			name:     "3 days ago",
+			input:    time.Date(2026, 10, 17, 10, 15, 0, 0, time.Local),
+			expected: "17/10 à 10:15 (il y a 3 jours)",
+		},
+		{
+			name:     "2 weeks ago",
+			input:    time.Date(2026, 10, 6, 9, 0, 0, 0, time.Local),
+			expected: "2026-10-06 09:00 (il y a 2 semaines)",
+		},
+	}
+
+	for _, tt := range tests {
+		got := FormatTimestampWithRelativeAt(tt.input, now)
+		if got != tt.expected {
+			t.Errorf("[%s] got %q, want %q", tt.name, got, tt.expected)
+		}
+	}
+}

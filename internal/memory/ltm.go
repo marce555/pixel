@@ -235,6 +235,104 @@ type searchResult struct {
 
 // SearchMemory searches the vector database using a multi-factor scoring algorithm.
 // Score = (cosine × 0.5) + (tagBoost × 0.2) + (importance × 0.2) + (recency × 0.1) + sourceBonus
+// FormatTimestampWithRelative formats a timestamp with both its calendar date/time and its relative elapsed time in French.
+// Examples:
+// - "Aujourd'hui à 08:22 (il y a 2 minutes)"
+// - "Aujourd'hui à 06:15 (il y a 2 heures)"
+// - "Hier à 14:30"
+// - "2026-10-15 14:30 (il y a 5 jours)"
+// - "2026-09-28 10:00 (il y a 3 semaines)"
+func FormatTimestampWithRelative(t time.Time) string {
+	return FormatTimestampWithRelativeAt(t, time.Now())
+}
+
+func FormatTimestampWithRelativeAt(t time.Time, now time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+
+	diff := now.Sub(t)
+	if diff < 0 {
+		return t.Format("2006-01-02 15:04")
+	}
+
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	tDay := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+	dayDiff := int(math.Round(today.Sub(tDay).Hours() / 24))
+
+	isToday := dayDiff == 0
+	isYesterday := dayDiff == 1
+
+	if isToday {
+		if diff < 1*time.Minute {
+			return fmt.Sprintf("Aujourd'hui à %s (à l'instant)", t.Format("15:04"))
+		}
+		if diff < 60*time.Minute {
+			mins := int(math.Round(diff.Minutes()))
+			if mins < 1 {
+				mins = 1
+			}
+			minLabel := "minutes"
+			if mins == 1 {
+				minLabel = "minute"
+			}
+			return fmt.Sprintf("Aujourd'hui à %s (il y a %d %s)", t.Format("15:04"), mins, minLabel)
+		}
+		hours := int(math.Round(diff.Hours()))
+		if hours < 1 {
+			hours = 1
+		}
+		hrLabel := "heures"
+		if hours == 1 {
+			hrLabel = "heure"
+		}
+		return fmt.Sprintf("Aujourd'hui à %s (il y a %d %s)", t.Format("15:04"), hours, hrLabel)
+	}
+
+	if isYesterday {
+		return fmt.Sprintf("Hier à %s", t.Format("15:04"))
+	}
+
+	if dayDiff < 7 {
+		dayLabel := "jours"
+		if dayDiff <= 1 {
+			dayLabel = "jour"
+		}
+		return fmt.Sprintf("%s à %s (il y a %d %s)", t.Format("02/01"), t.Format("15:04"), dayDiff, dayLabel)
+	}
+
+	if dayDiff < 30 {
+		weeks := int(math.Round(float64(dayDiff) / 7.0))
+		if weeks < 1 {
+			weeks = 1
+		}
+		wkLabel := "semaines"
+		if weeks <= 1 {
+			wkLabel = "semaine"
+		}
+		return fmt.Sprintf("%s (il y a %d %s)", t.Format("2006-01-02 15:04"), weeks, wkLabel)
+	}
+
+	if dayDiff < 365 {
+		months := int(math.Round(float64(dayDiff) / 30.0))
+		if months < 1 {
+			months = 1
+		}
+		return fmt.Sprintf("%s (il y a %d mois)", t.Format("2006-01-02 15:04"), months)
+	}
+
+	years := int(math.Round(float64(dayDiff) / 365.0))
+	if years < 1 {
+		years = 1
+	}
+	yrLabel := "ans"
+	if years <= 1 {
+		yrLabel = "an"
+	}
+	return fmt.Sprintf("%s (il y a %d %s)", t.Format("2006-01-02 15:04"), years, yrLabel)
+}
+
+// formatSource converts source to origin label
 func formatSource(source string) string {
 	if source == "conversation" {
 		return "[ORIGINE: Échange avec Marcelo]"
@@ -462,7 +560,7 @@ func (l *LTM) SearchMemory(ctx context.Context, queryString string, queryEmbeddi
 	for i := 0; i < topK && i < len(results); i++ {
 		if results[i].score > 0.25 {
 			sourceLabel, summaryText := formatSourceAndSummary(results[i].source, "", results[i].text)
-			formattedText := fmt.Sprintf("[%s] %s : %s", results[i].timestamp.Format("2006-01-02 15:04"), sourceLabel, summaryText)
+			formattedText := fmt.Sprintf("[%s] %s : %s", FormatTimestampWithRelative(results[i].timestamp), sourceLabel, summaryText)
 			topTexts = append(topTexts, formattedText)
 			// Update access tracking
 			l.markAccessed(results[i].index)
@@ -543,7 +641,7 @@ func (l *LTM) SearchPersonalByKeywords(keywords []string, topK int) []string {
 
 		sourceLabel, summaryText := formatSourceAndSummary(entry.Source, entry.Title, entry.ActionSummary)
 		text := fmt.Sprintf("[%s] %s (%s) : %s",
-			entry.Timestamp.Format("2006-01-02 15:04"),
+			FormatTimestampWithRelative(entry.Timestamp),
 			sourceLabel, entry.Title, summaryText)
 		results = append(results, scored{text: text, score: matches, ts: entry.Timestamp})
 	}
@@ -594,7 +692,7 @@ func (l *LTM) GetTopPersonalByImportance(topK int) []string {
 
 		sourceLabel, summaryText := formatSourceAndSummary(entry.Source, entry.Title, entry.ActionSummary)
 		text := fmt.Sprintf("[%s] %s (%s) : %s",
-			entry.Timestamp.Format("2006-01-02 15:04"),
+			FormatTimestampWithRelative(entry.Timestamp),
 			sourceLabel, entry.Title, summaryText)
 		results = append(results, scored{text: text, importance: entry.Importance})
 	}
@@ -700,7 +798,7 @@ func (l *LTM) GetRecentMemories(topK int) []string {
 			titlePart = " (" + e.Title + ")"
 		}
 		sourceLabel, summaryText := formatSourceAndSummary(e.Source, e.Title, e.ActionSummary)
-		formattedText := fmt.Sprintf("[%s] %s%s : %s", e.Timestamp.Format("2006-01-02 15:04"), sourceLabel, titlePart, summaryText)
+		formattedText := fmt.Sprintf("[%s] %s%s : %s", FormatTimestampWithRelative(e.Timestamp), sourceLabel, titlePart, summaryText)
 		topTexts = append(topTexts, formattedText)
 	}
 
@@ -737,7 +835,7 @@ func (l *LTM) GetRecentCuriosityMemories(topK int) []string {
 			titlePart = " (" + e.Title + ")"
 		}
 		sourceLabel, summaryText := formatSourceAndSummary(e.Source, e.Title, e.ActionSummary)
-		formattedText := fmt.Sprintf("[%s] %s%s : %s", e.Timestamp.Format("2006-01-02 15:04"), sourceLabel, titlePart, summaryText)
+		formattedText := fmt.Sprintf("[%s] %s%s : %s", FormatTimestampWithRelative(e.Timestamp), sourceLabel, titlePart, summaryText)
 		topTexts = append(topTexts, formattedText)
 	}
 
@@ -821,7 +919,7 @@ func (l *LTM) SearchConversationMemories(history []llm.Message, topK int) []stri
 			titlePart = " (" + entry.Title + ")"
 		}
 		sourceLabel, summaryText := formatSourceAndSummary(entry.Source, entry.Title, entry.ActionSummary)
-		text := fmt.Sprintf("[%s] %s%s : %s", entry.Timestamp.Format("2006-01-02 15:04"), sourceLabel, titlePart, summaryText)
+		text := fmt.Sprintf("[%s] %s%s : %s", FormatTimestampWithRelative(entry.Timestamp), sourceLabel, titlePart, summaryText)
 		results = append(results, scored{text: text, score: score})
 	}
 
@@ -927,7 +1025,7 @@ func (l *LTM) SearchSerendipitousMemory() string {
 	if entry.Title != "" {
 		titlePart = " (" + entry.Title + ")"
 	}
-	return fmt.Sprintf("[%s] [%s]%s %s", entry.Timestamp.Format("2006-01-02 15:04"), entry.Category, titlePart, entry.ActionSummary)
+	return fmt.Sprintf("[%s] [%s]%s %s", FormatTimestampWithRelative(entry.Timestamp), entry.Category, titlePart, entry.ActionSummary)
 }
 
 // GetOldestMemories returns the chronologically oldest memory entries formatted as text.
@@ -954,7 +1052,7 @@ func (l *LTM) GetOldestMemories(topK int) []string {
 		if entries[i].Title != "" {
 			titlePart = " (" + entries[i].Title + ")"
 		}
-		formattedText := fmt.Sprintf("[%s] [%s]%s %s", entries[i].Timestamp.Format("2006-01-02 15:04"), entries[i].Category, titlePart, entries[i].ActionSummary)
+		formattedText := fmt.Sprintf("[%s] [%s]%s %s", FormatTimestampWithRelative(entries[i].Timestamp), entries[i].Category, titlePart, entries[i].ActionSummary)
 		topTexts = append(topTexts, formattedText)
 	}
 

@@ -68,6 +68,12 @@ func FactCheckEnabled() bool {
 	return v != "off" && v != "false" && v != "0"
 }
 
+// FactCheckRequired reports whether a fact-check that could not be completed must block publication (PIXEL_FACTCHECK_REQUIRED, default on).
+func FactCheckRequired() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("PIXEL_FACTCHECK_REQUIRED")))
+	return v != "off" && v != "false" && v != "0"
+}
+
 // AppliYouAIEnhanceEnabled reports whether the AppliYou "Améliorer avec l'IA" button should be used.
 // It rewrites the article after verification and may reintroduce inaccuracies, so it is disabled
 // by default whenever the fact-checker is active (override with PIXEL_APPLIYOU_AI_ENHANCE=on).

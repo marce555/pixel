@@ -131,6 +131,25 @@ func extractCells(tr string) []string {
 	return cells
 }
 
+var citationStopWords = map[string]bool{
+	"lab": true, "laboratoire": true, "laboratory": true, "database": true,
+	"consortium": true, "institute": true, "institut": true,
+	"cell": true, "nature": true, "science": true, "article": true,
+	"théorème": true, "theoreme": true, "theorem": true,
+	"inégalités": true, "inegalites": true, "inégalité": true, "inegalite": true, "inequalities": true, "inequality": true,
+	"protocole": true, "protocol": true, "expérience": true, "experience": true, "experiment": true,
+	"principe": true, "principle": true, "algorithme": true, "algorithm": true,
+	"méthode": true, "methode": true, "method": true, "modèle": true, "modele": true, "model": true,
+	"loi": true, "law": true, "paradoxe": true, "paradox": true, "architecture": true,
+	"réseau": true, "reseau": true, "network": true, "système": true, "systeme": true, "system": true,
+	"sécurité": true, "securite": true, "security": true, "théorie": true, "theorie": true, "theory": true,
+	"publications": true, "publication": true, "revue": true, "journal": true,
+	"rapport": true, "report": true, "étude": true, "etude": true, "study": true,
+	"notes": true, "lecture": true, "cours": true, "mathématiques": true, "mathematiques": true,
+	"détection": true, "detection": true, "téléportation": true, "teleportation": true,
+	"physique": true, "physics": true, "quantique": true, "quantum": true,
+}
+
 func parseTableRowCitation(index int, trHTML string, cells []string) ParsedCitation {
 	rawText := strings.Join(cells, " — ")
 	pc := ParsedCitation{
@@ -145,22 +164,49 @@ func parseTableRowCitation(index int, trHTML string, cells []string) ParsedCitat
 		pc.DOI = doiMatch
 	}
 
-	// Extract Year
+	// Extract Year across entire raw text
 	if yMatch := reYear.FindString(rawText); yMatch != "" {
 		if y, err := strconv.Atoi(yMatch); err == nil {
 			pc.Year = y
 		}
 	}
 
+	// Look for title between quotes anywhere in the row
+	reQuotes := regexp.MustCompile(`[«"“]([^»"”]{6,})[»"”]`)
+	if q := reQuotes.FindStringSubmatch(rawText); len(q) > 1 {
+		pc.Title = strings.TrimSpace(q[1])
+	}
+
 	// In typical Pixel tables:
 	// Cell 0: Reference / Author (e.g. "Yamanaka, S. et Thomson, J. H. (2014)" or "Ernst, J. et al. (2015)")
-	// Cell 1: Journal / Source (e.g. "Cell", "Nature", "Université de Stanford")
-	// Cell 2: Type (e.g. "Article de recherche", "Base de données technique")
-	// Cell 3: Description (e.g. "Protocoles de reprogrammation...")
+	// But often formatted with topic prefix: "Théorème de Non-Clonage — Wootters, W. K., & Zurek, W. H. (1982)..."
 	if len(cells) > 0 {
-		pc.Authors = extractAuthors(cells[0])
+		authorSource := cells[0]
+		// Check for dash separating topic from citation
+		dashParts := regexp.MustCompile(`\s+[—–-]\s+`).Split(cells[0], -1)
+		if len(dashParts) > 1 {
+			for idx, p := range dashParts {
+				if reAuthorYear.MatchString(p) || (reYear.MatchString(p) && (strings.Contains(p, ",") || strings.Contains(p, "&") || reEtAl.MatchString(p))) {
+					authorSource = p
+					if idx > 0 && pc.Title == "" {
+						pc.Title = strings.TrimSpace(dashParts[0])
+					}
+					break
+				}
+			}
+		}
+
+		// Only extract authors from the section before or containing the year
+		authorOnlyPart := authorSource
+		if m := reAuthorYear.FindStringSubmatch(authorSource); len(m) > 1 && strings.TrimSpace(m[1]) != "" {
+			authorOnlyPart = m[1]
+		} else if loc := reYear.FindStringIndex(authorSource); loc != nil && loc[0] > 0 {
+			authorOnlyPart = authorSource[:loc[0]]
+		}
+
+		pc.Authors = extractAuthors(authorOnlyPart)
 		if pc.Year == 0 {
-			if yMatch := reYear.FindString(cells[0]); yMatch != "" {
+			if yMatch := reYear.FindString(authorSource); yMatch != "" {
 				pc.Year, _ = strconv.Atoi(yMatch)
 			}
 		}
@@ -177,7 +223,9 @@ func parseTableRowCitation(index int, trHTML string, cells []string) ParsedCitat
 
 	if len(cells) > 3 {
 		pc.TopicDesc = cells[3]
-		pc.Title = cells[3]
+		if pc.Title == "" {
+			pc.Title = cells[3]
+		}
 	} else if len(cells) > 2 {
 		pc.TopicDesc = cells[2]
 		if pc.Title == "" {
@@ -265,9 +313,7 @@ func extractAuthors(s string) []string {
 		for _, m := range matches {
 			mLower := strings.ToLower(m)
 			// Filter out stop words
-			if mLower == "lab" || mLower == "laboratoire" || mLower == "database" ||
-				mLower == "consortium" || mLower == "institute" || mLower == "institut" ||
-				mLower == "cell" || mLower == "nature" || mLower == "science" || mLower == "article" {
+			if citationStopWords[mLower] {
 				continue
 			}
 			if !seen[mLower] {

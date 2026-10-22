@@ -1,0 +1,5 @@
+{
+  "name": "read_system_temp",
+  "description": "Récupère la température du CPU et du boîtier via lm-sensors ou /sys/class/thermal.",
+  "router_instructions": "Utilise cette action si l'utilisateur demande la température du CPU, du boîtier, ou des composants thermiques. Mets la requête de l'utilisateur dans query."
+}

@@ -27,6 +27,10 @@ func (s *STM) AddMessage(msg llm.Message) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if msg.Timestamp.IsZero() {
+		msg.Timestamp = time.Now()
+	}
+
 	s.messages = append(s.messages, msg)
 	s.lastActivity = time.Now()
 
@@ -42,6 +46,10 @@ func (s *STM) AddMessage(msg llm.Message) {
 func (s *STM) AddPassiveMessage(msg llm.Message) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if msg.Timestamp.IsZero() {
+		msg.Timestamp = time.Now()
+	}
 
 	s.messages = append(s.messages, msg)
 	if len(s.messages) > s.limit {

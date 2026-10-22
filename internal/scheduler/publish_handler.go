@@ -140,12 +140,6 @@ func NewPublishArticleHandlerWithReviewer(broadcaster EventBroadcaster, stm STMW
 	return NewPublishArticleHandlerWithFactChecker(broadcaster, stm, provider, searcher, draftManager, reviewer, nil)
 }
 
-// factCheckRequired reports whether a fact-check that could not be completed must block publication (PIXEL_FACTCHECK_REQUIRED, default on).
-func factCheckRequired() bool {
-	v := strings.ToLower(strings.TrimSpace(os.Getenv("PIXEL_FACTCHECK_REQUIRED")))
-	return v != "off" && v != "false" && v != "0"
-}
-
 // NewPublishArticleHandlerWithFactChecker creates the full publishing pipeline:
 // writing → ReviewerAgent (form) → independent FactChecker (accuracy) → publication,
 // and reports at the end whether the fact-checker had to adjust Pixel's statements.
@@ -230,7 +224,7 @@ RÈGLES IMPÉRATIVES DE RÉDACTION, DE RIGUEUR ET DE NON-HALLUCINATION :
    - N'UTILISE AUCUNE SYNTAXE MARKDOWN (#, ##, **, *, _, backticks, $$, etc.).
    - Utilise EXCLUSIVEMENT du code HTML pur : <p> pour chaque paragraphe, <strong> pour mettre en valeur les termes clés, <em> pour l'emphase.
    - Intègre systématiquement des listes à puces (<ul>, <li>) ou numérotées (<ol>, <li>) pour aérer la lecture.
-   - RÈGLE OBLIGATOIRE : Intègre au moins un TABLEAU HTML complet (<table>, <thead>, <tbody>, <tr>, <th>, <td>) de RÉFÉRENCES ET SOURCES DOCUMENTAIRES VÉRIFIABLES (colonnes : Référence / Source, Type de ressource, Description & Thématique couverte) résumant des données réelles et vérifiables.
+   - SOURCES ET RÉFÉRENCES : N'inclus un tableau de références que si des sources documentaires ou scientifiques réelles figurent explicitement dans le contexte fourni ou s'il s'agit de normes et standards publics universels incontestés (ex: RFC IETF, W3C, ISO, GIEC). INTERDICTION STRICTE d'inventer des citations académiques, des noms d'auteurs, des revues ou des identifiants DOI imaginaires. Si aucune source précise n'est documentée dans le contexte, décris les principes sans créer de fausses références (l'Agent Bibliographique se chargera d'injecter les publications fondatrices réelles après vérification).
     - RÈGLE OBLIGATOIRE (si sujet technique/info/sciences) : Au moins un ou plusieurs blocs de code HTML complets formatés avec <pre><code class="language-...">...</code></pre> (ex: language-bash, language-python, language-json, language-yaml).
 5. RÈGLE IMPÉRATIVE DE PLAN FINI ET DE CONCLUSION COMPLÈTE (ANTI-TRONCATURE) :
    - Assure-toi de structurer l'article jusqu'à sa conclusion complète. Ne laisse AUCUNE phrase inachevée.
@@ -423,7 +417,7 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 			}
 			task.AppendLog(fmt.Sprintf("Rapport du vérificateur : %s – %s", report.Verdict, report.Summary))
 
-			blocked := report.Verdict == FactCheckRejected || (report.Verdict == FactCheckSkipped && factCheckRequired())
+			blocked := report.Verdict == FactCheckRejected || (report.Verdict == FactCheckSkipped && FactCheckRequired())
 			if blocked {
 				msg := fmt.Sprintf("🛑 **[Publication bloquée par l'Agent Vérificateur]**\nL'article **\"%s\"** n'a pas été publié : %s\n%s", payload.Title, report.Summary, FormatFactCheckSummary(report))
 				if draft != nil {

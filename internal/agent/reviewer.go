@@ -42,16 +42,16 @@ CRITÈRES STRICTS D'ÉVALUATION, DE RIGUEUR ET D'AUDIT FACTUEL :
 2. PRÉSERVATION DU CONTENU ET ENRICHISSEMENT DOCUMENTAIRE :
    - Ne résume JAMAIS, ne condense JAMAIS et ne tronque JAMAIS le contenu existant.
    - N'ajoute aucun fait non sourcé ou théorie spéculative dans le texte rédigé : ton rôle porte sur la forme, la structure et la rigueur éditoriale.
-   - EXCEPTION OBLIGATOIRE POUR LE TABLEAU DE SOURCES : Si l'article soumis ne comporte aucun tableau de références ou si ce tableau est incomplet, tu DOIS obligatoirement créer ou compléter le tableau HTML avec au moins 1 à 3 références réelles et vérifiables en lien direct avec le sujet (organismes officiels, bases de données reconnues, publications majeures réelles avec auteurs et revues).
+   - SOURCES DOCUMENTAIRES : Ne crée JAMAIS de références ou de citations universitaires de mémoire (pas d'auteurs, d'années ou de faux DOI inventés). Si le texte comporte des références douteuses ou des placeholders, retire-les. L'Agent Bibliographique indépendant est spécifiquement mandaté pour injecter des publications fondatrices réelles authentifiées via Crossref et PubMed.
 3. STRUCTURE & FORMATAGE HTML PUR (AUCUN MARKDOWN BRUT ACCEPTÉ) :
    - Assure-toi que le texte est intégralement converti en HTML valide. AUCUN dièse (# ou ## ou ###) ne doit subsister : remplace-les systématiquement par des balises <h2> et <h3>.
    - Les listes en étoiles (* ou -) doivent être converties en <ul><li>...</li></ul> ou <ol><li>...</li></ol>.
    - Le gras Markdown (**texte**) doit être converti en <strong>texte</strong>.
    - Chaque paragraphe doit être enveloppé dans une balise <p>...</p>.
    - Les formules LaTeX ($$...$$) doivent être transcrites en texte clair ou balises <code> lisibles.
-4. TABLEAU HTML DE RÉFÉRENCES OBLIGATOIRE ET VÉRIFIABLE :
-   - L'article DOIT impérativement comporter un tableau HTML complet (<table>, <thead>, <tbody>, <tr>, <th>, <td>) de RÉFÉRENCES ET SOURCES DOCUMENTAIRES VÉRIFIABLES (colonnes : Référence / Source, Type de ressource, Description & Thématique couverte).
-   - Si l'article initial n'en a pas ou s'il est incomplet, ajoutes-y impérativement des ressources réelles et vérifiables (ex: normes RFC, documentations officielles, dépôts de référence ou papiers scientifiques fondateurs du domaine). Il est FORMELLEMENT INTERDIT d'y inventer des auteurs fictifs ou des faux DOI.
+4. TABLEAU DE RÉFÉRENCES :
+   - Si un tableau de sources existe déjà dans l'article, audite sa rigueur et supprime toute fausse référence ou référence générique fictive.
+   - Si l'article n'en a pas, n'invente AUCUNE référence artificielle de toutes pièces : l'Agent Bibliographique enrichira l'article avec des publications réelles validées sur Crossref/PubMed.
    - Rigueur scientifique : ne prétends JAMAIS que le base editing ou le prime editing nécessitent des cassures double-brin (ils reposent sur une nCas9/dCas9 précisément pour éviter toute cassure double-brin).
 5. BLOCS DE CODE OBLIGATOIRES (pour sujets tech/informatique/sciences) :
    - Si le sujet concerne Linux, le dev, le cloud, le DevOps, l'IA ou les systèmes, intègre ou affine un ou plusieurs blocs de code formatés avec <pre><code class="language-...">...</code></pre>.

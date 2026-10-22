@@ -49,15 +49,16 @@ type FactCheckerAgent struct {
 
 // NewFactCheckerAgent builds the fact-checker. Configuration (env):
 //   - PIXEL_FACTCHECK_MODEL=cloud|local (default cloud, for independence from the local writer model)
-//   - PIXEL_FACTCHECK_REJECT_RATIO (default 0.4): share of false claims above which the article is rejected
-//   - PIXEL_FACTCHECK_MAX_CLAIMS (default 20)
+//   - PIXEL_FACTCHECK_CLOUD_MODEL (default gemini-3.6-flash)
+//   - PIXEL_FACTCHECK_REJECT_RATIO (default 0.20): share of false claims above which the article is rejected
+//   - PIXEL_FACTCHECK_MAX_CLAIMS (default 25)
 func NewFactCheckerAgent(provider llm.Provider, searcher FactSearcher) *FactCheckerAgent {
 	f := &FactCheckerAgent{
 		provider:    provider,
 		searcher:    searcher,
 		maxClaims:   25,
 		maxRefs:     8,
-		rejectRatio: 0.4,
+		rejectRatio: 0.20,
 		forceLocal:  strings.EqualFold(strings.TrimSpace(os.Getenv("PIXEL_FACTCHECK_MODEL")), "local"),
 	}
 	if v, err := strconv.ParseFloat(os.Getenv("PIXEL_FACTCHECK_REJECT_RATIO"), 64); err == nil && v > 0 && v <= 1 {
@@ -115,8 +116,10 @@ func (f *FactCheckerAgent) resolveModel() *fcModel {
 	if baseURL == "" {
 		baseURL = "https://generativelanguage.googleapis.com/v1beta/openai"
 	}
-	if modelName == "" || modelName == "gemini-2.5-flash" || modelName == "gemini-1.5-flash" {
-		modelName = "gemini-3.8-flash"
+	if envModel := strings.TrimSpace(os.Getenv("PIXEL_FACTCHECK_CLOUD_MODEL")); envModel != "" {
+		modelName = envModel
+	} else if modelName == "" || modelName == "gemini-2.5-flash" || modelName == "gemini-1.5-flash" || modelName == "gemini-3.8-flash" {
+		modelName = "gemini-3.6-flash"
 	}
 
 	if apiKey != "" {
@@ -138,16 +141,38 @@ func (m *fcModel) generate(ctx context.Context, system, user string, maxTokens i
 	useFallback := m.degraded && m.fallback != nil
 	m.mu.Unlock()
 	if !useFallback {
-		res, err := llm.GenerateWithTokens(ctx, m.primary, msgs, maxTokens)
-		if err == nil || m.fallback == nil {
-			return res, err
+		var lastErr error
+		for attempt := 0; attempt < 3; attempt++ {
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			res, err := llm.GenerateWithTokens(ctx, m.primary, msgs, maxTokens)
+			if err == nil {
+				return res, nil
+			}
+			lastErr = err
+			errStr := strings.ToLower(err.Error())
+			if strings.Contains(errStr, "503") || strings.Contains(errStr, "429") || strings.Contains(errStr, "high demand") || strings.Contains(errStr, "rate limit") || strings.Contains(errStr, "quota") || strings.Contains(errStr, "timeout") {
+				time.Sleep(time.Duration(1+attempt) * time.Second)
+				continue
+			}
+			break
+		}
+		if m.fallback == nil {
+			return "", lastErr
 		}
 		m.mu.Lock()
 		m.degraded = true
 		m.mu.Unlock()
-		fmt.Printf("[FactChecker] Modèle %s indisponible (%v), repli sur le modèle local.\n", m.label, err)
+		fmt.Printf("[FactChecker] Modèle distant %s indisponible après retentatives (%v), repli sur le modèle local.\n", m.label, lastErr)
 	}
 	return llm.GenerateWithTokens(ctx, m.fallback, msgs, maxTokens)
+}
+
+func (m *fcModel) isDegraded() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.degraded
 }
 
 func (m *fcModel) effectiveLabel() string {
@@ -201,15 +226,15 @@ PREUVES QUE TU AS COLLECTÉES TOI-MÊME SUR LE WEB :
 """
 
 Rends un verdict parmi :
-- "confirmé" : les preuves (ou un fait notoire, consensuel et incontesté) soutiennent l'affirmation telle qu'écrite ;
+- "confirmé" : les preuves soutiennent l'affirmation telle qu'écrite. Pour les chiffres, statistiques, dates, noms propres, entreprises, théories et attributions de découvertes, des preuves documentaires écrites sont STRICTEMENT OBLIGATOIRES (un simple « fait notoire » sans preuve web ne suffit pas) ;
 - "imprécis" : globalement juste mais un détail est inexact, exagéré, mal attribué, daté, trompeur, ou utilise une terminologie impropre (calque de l'anglais comme « broutage de sel » pour « rejet de saumure », mot forgé comme « mergelé » pour « banquise », confusion entre plongée convective et remontée d'eau / upwelling, ou traduction approximative d'université comme « Université du Japon à Kyoto » au lieu de « Université de Kyoto ») ;
 - "faux" : les preuves contredisent l'affirmation, OU affirmation physique/scientifique extraordinaire sans aucun fondement dans la littérature scientifique (hallucination de l'IA, ex: déplacement du pôle Nord géographique par arrêt océanique, dérive des plaques tectoniques induite par la circulation thermohaline), OU contradiction biologique majeure (ex: affirmer que le base editing ou le prime editing nécessitent des cassures double-brin / DSB, alors qu'ils utilisent une nCas9/dCas9 précisément pour NE PAS induire de DSB), OU entité d'entreprise fictive / chimérique (ex: « ExaCell Therapeutics » est une hallucination issue du médicament « exa-cel » / Casgevy dont les véritables promoteurs sont Vertex Pharmaceuticals et CRISPR Therapeutics) ;
-- "non vérifiable" : affirmation d'ordre anecdotique où les preuves sont muettes. Si l'affirmation prétend décrire un fait scientifique, une entreprise biotechnologique ou une causalité technique sans aucun consensus, exige son retrait ou sa rectification.
+- "non vérifiable" : affirmation d'ordre anecdotique où les preuves sont muettes. Si l'affirmation prétend décrire un fait scientifique, une entreprise, des chiffres ou une causalité technique sans aucune preuve tangible, exige son retrait impératif en fournissant une correction de suppression "[SUPPRIMER]" ou une formulation neutre sans chiffre invérifié.
 
-Si le verdict est "imprécis" ou "faux", OU s'il est "non vérifiable" portant sur une causalité scientifique, une entité biotech ou une affiliation technique :
+Si le verdict est "imprécis" ou "faux", OU s'il est "non vérifiable" portant sur une causalité scientifique, une entité biotech, un chiffre ou une attribution technique :
 rédige dans "correction" une formulation de remplacement en français, rigoureuse et sobre, qui :
 - rectifie selon le consensus scientifique établi et les promoteurs réels (ex: remplacer « ExaCell Therapeutics » par « Vertex Pharmaceuticals et CRISPR Therapeutics (pour la thérapie Casgevy / exa-cel) », rectifier « Université du Japon à Kyoto » en « Université de Kyoto », rétablir que le base/prime editing n'induit AUCUNE cassure double-brin) ;
-- OU, si l'affirmation est une hallucination pseudo-scientifique (ex: mouvement des pôles ou des plaques tectoniques induit par les courants océaniques), demande expressément la SUPPRESSION du passage en indiquant "[SUPPRIMER]" ou en reformulant sur les réelles conséquences documentées (effets climatiques et écosystémiques) ;
+- OU, si l'affirmation est invérifiable ou une hallucination pseudo-scientifique (ex: mouvement des pôles ou des plaques tectoniques induit par les courants océaniques), demande expressément la SUPPRESSION du passage en indiquant "[SUPPRIMER]" ou en reformulant sobrement sur les seuls impacts documentés ;
 - utilise le vocabulaire scientifique français exact (ex: « rejet de saumure », « banquise », « remontée d'eau / upwelling ») ;
 - n'introduit AUCUN fait nouveau qui ne figure pas dans les preuves.
 Sinon laisse "correction" vide.
@@ -412,7 +437,8 @@ func (f *FactCheckerAgent) Check(ctx context.Context, title, content string, log
 	// Report
 	report.Claims = verdicts
 	nonRef := 0
-	for _, v := range verdicts {
+	unappliedFalseCount := 0
+	for i, v := range verdicts {
 		switch v.Verdict {
 		case scheduler.ClaimConfirmed:
 			report.Confirmed++
@@ -420,12 +446,16 @@ func (f *FactCheckerAgent) Check(ctx context.Context, title, content string, log
 			report.Imprecise++
 		case scheduler.ClaimFalse:
 			report.False++
+			if !v.IsReference && !v.Applied {
+				unappliedFalseCount++
+			}
 		default:
 			report.Unverifiable++
 		}
 		if !v.IsReference {
 			nonRef++
 		}
+		_ = i
 	}
 	for u := range visited {
 		report.SourcesVisited = append(report.SourcesVisited, u)
@@ -446,10 +476,12 @@ func (f *FactCheckerAgent) Check(ctx context.Context, title, content string, log
 	case len(verdicts) == 0:
 		report.Verdict = scheduler.FactCheckSkipped
 		report.Summary = "Aucune affirmation vérifiable n'a pu être extraite."
-	case (falseClaims > 0 && ratio >= f.rejectRatio) || centralUncorrected:
+	case (falseClaims > 0 && ratio >= f.rejectRatio) || centralUncorrected || unappliedFalseCount > 0:
 		report.Verdict = scheduler.FactCheckRejected
 		if centralUncorrected {
 			report.Summary = "La thèse centrale de l'article est contredite par les sources et n'a pas pu être corrigée."
+		} else if unappliedFalseCount > 0 {
+			report.Summary = fmt.Sprintf("%d affirmation(s) fausse(s) n'ont pas pu être corrigées dans le texte : publication bloquée par rigueur scientifique.", unappliedFalseCount)
 		} else {
 			report.Summary = fmt.Sprintf("%d affirmation(s) fausse(s) sur %d (%.0f%% ≥ seuil %.0f%%) : l'article est trop inexact pour être publié.", falseClaims, nonRef, ratio*100, f.rejectRatio*100)
 		}
@@ -463,6 +495,10 @@ func (f *FactCheckerAgent) Check(ctx context.Context, title, content string, log
 	report.Model = model.effectiveLabel()
 	if strings.Contains(report.Model, "repli local") || model.fallback == nil && f.primaryOverride == nil {
 		report.Warnings = append(report.Warnings, "Vérification effectuée avec le modèle local de Pixel : indépendance réduite.")
+		if model.isDegraded() && !f.forceLocal && scheduler.FactCheckRequired() {
+			report.Verdict = scheduler.FactCheckRejected
+			report.Summary = fmt.Sprintf("Vérification indépendante impossible : le modèle distant a basculé sur le modèle local (%s), ce qui est interdit en mode strict.", model.label)
+		}
 	}
 	logf(fmt.Sprintf("🔎 Verdict du vérificateur : %s – %s", report.Verdict, report.Summary))
 
@@ -640,9 +676,26 @@ func findBlock(content, excerpt string) string {
 			}
 		}
 	}
-	if bestScore >= 0.7 {
+	if bestScore >= 0.45 {
 		return best
 	}
+
+	// Try with 4 consecutive words n-grams from target if direct overlap was low
+	words := strings.Fields(target)
+	if len(words) >= 4 {
+		for i := 0; i <= len(words)-4; i++ {
+			ngram := strings.Join(words[i:i+4], " ")
+			for _, re := range blockRegexps {
+				for _, blk := range re.FindAllString(content, -1) {
+					txt := normalizeText(htmlToPlainText(blk))
+					if strings.Contains(txt, ngram) {
+						return blk
+					}
+				}
+			}
+		}
+	}
+
 	return ""
 }
 
@@ -652,6 +705,9 @@ func (f *FactCheckerAgent) applyCorrection(ctx context.Context, model *fcModel, 
 		excerpt = v.Claim
 	}
 	block := findBlock(content, excerpt)
+	if block == "" && v.Claim != "" && v.Claim != excerpt {
+		block = findBlock(content, v.Claim)
+	}
 	if block == "" {
 		return content, false
 	}

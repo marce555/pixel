@@ -1,0 +1,5 @@
+{
+  "name": "analyse_provenance_logs",
+  "description": "Analyse la provenance géographique des visiteurs à partir des logs d'accès web du serveur appliyou.fr en géolocalisant les adresses IP et en distinguant les connexions résidentielles/humaines des centres de données/robots/cloud.",
+  "router_instructions": "Utilise cette action si l'utilisateur demande d'analyser la provenance, l'origine géographique ou les pays des visiteurs ou des logs d'accès du serveur appliyou.fr. Mets la date (ex: 'today', '2026-10-10') ou le filtre dans query."
+}

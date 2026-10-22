@@ -101,6 +101,13 @@ func (g *GmailAgent) checkEmails(ctx context.Context, settings memory.GmailSetti
 	output, err := cmd.Output()
 	if err != nil {
 		fmt.Printf("[GmailAgent] Erreur exécution du script de messagerie: %v\n", err)
+		detail := err.Error()
+		if exitErr, ok := err.(*exec.ExitError); ok && len(exitErr.Stderr) > 0 {
+			detail = strings.TrimSpace(string(exitErr.Stderr))
+		}
+		if g.thoughtStream != nil {
+			g.thoughtStream.AddThought(fmt.Sprintf("[Gmail] ÉCHEC à %s : impossible d'accéder à la boîte Gmail de Marcelo (%s). Je n'ai aucune information fiable sur ses e-mails tant que ce n'est pas réparé. Je n'ai pas de boîte mail à moi.", time.Now().Format("15:04"), detail), nil)
+		}
 		return
 	}
 

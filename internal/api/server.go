@@ -216,8 +216,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Ajouter à la mémoire immédiate
-	s.stm.AddMessage(llm.Message{Role: llm.RoleUser, Content: req.Message})
+	// Ajouter à la mémoire immédiate avec horodatage
+	s.stm.AddMessage(llm.Message{Role: llm.RoleUser, Content: req.Message, Timestamp: time.Now()})
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -269,7 +269,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if fullReply != "" {
-		s.stm.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: fullReply})
+		s.stm.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: fullReply, Timestamp: time.Now()})
 		// Indexation dynamique et tâches de fond lancées uniquement APRÈS l'envoi complet du flux pour éviter toute interférence
 		bgCtx := s.sleepManager.AcquireBackgroundContext()
 

@@ -1,6 +1,9 @@
 package llm
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Role defines the role of a message sender.
 type Role string
@@ -13,8 +16,9 @@ const (
 
 // Message represents a single message in a conversation.
 type Message struct {
-	Role    Role   `json:"role"`
-	Content string `json:"content"`
+	Role      Role      `json:"role"`
+	Content   string    `json:"content"`
+	Timestamp time.Time `json:"timestamp,omitempty"`
 }
 
 // Provider is the interface that any LLM engine (OpenAI, Ollama, etc.) must implement.

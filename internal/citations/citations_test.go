@@ -59,6 +59,31 @@ func TestParseCitations(t *testing.T) {
 	if c3.Year != 2021 {
 		t.Errorf("expected year 2021, got %d", c3.Year)
 	}
+
+	// Test prefixed titles with em-dash and concept labels
+	prefixedTable := `<table class="table">
+<thead><tr><th>Référence</th><th>Type</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td>Théorème de Non-Clonage — Wootters, W. K., & Zurek, W. H. (1982). "A single quantum cannot be cloned". Physical Review D</td><td>Étude</td><td>Théorème fondamental</td></tr>
+<tr><td>Inégalités de Bell — Bell, J. S. (1964). "On the Einstein Podolsky Rosen paradox". Physics</td><td>Étude</td><td>Non-localité</td></tr>
+</tbody>
+</table>`
+	citations2 := ParseCitations(prefixedTable)
+	if len(citations2) != 2 {
+		t.Fatalf("expected 2 citations parsed from prefixedTable, got %d", len(citations2))
+	}
+	if len(citations2[0].Authors) != 2 || citations2[0].Authors[0] != "Wootters" || citations2[0].Authors[1] != "Zurek" {
+		t.Errorf("expected authors [Wootters, Zurek], got %v", citations2[0].Authors)
+	}
+	if citations2[0].Year != 1982 {
+		t.Errorf("expected year 1982, got %d", citations2[0].Year)
+	}
+	if len(citations2[1].Authors) != 1 || citations2[1].Authors[0] != "Bell" {
+		t.Errorf("expected single author [Bell], got %v", citations2[1].Authors)
+	}
+	if citations2[1].Year != 1964 {
+		t.Errorf("expected year 1964, got %d", citations2[1].Year)
+	}
 }
 
 func TestCrossrefClientMock(t *testing.T) {

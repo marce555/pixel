@@ -1,0 +1,5 @@
+{
+  "name": "read_temps_system",
+  "description": "Lit la température du processeur et du boîtier en temps réel.",
+  "router_instructions": "Utilise cette action si l'utilisateur demande la température du CPU ou du boîtier. Mets 'cpu' ou 'case' dans query."
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -296,10 +297,6 @@ func (s *Scheduler) dispatchTasks(ctx context.Context) {
 	now := time.Now()
 	for _, task := range s.tasks {
 		if task.Status == StatusPending && !task.ScheduledAt.After(now) {
-			task.SetStatus(StatusRunning)
-			task.StartedAt = now
-			task.AppendLog("Lancement de l'exécution.")
-
 			// Acquire execution details under read lock equivalent
 			handler, ok := s.handlers[task.Type]
 			if !ok {
@@ -310,48 +307,60 @@ func (s *Scheduler) dispatchTasks(ctx context.Context) {
 				continue
 			}
 
+			// Special serialization for music playing tasks: acquire musicSem in strict FIFO order
+			// before transitioning to StatusRunning so queued tracks stay Pending until their turn.
+			if task.Type == "play_music" {
+				select {
+				case s.musicSem <- struct{}{}:
+					// Audio channel acquired in strict FIFO order
+				default:
+					if !strings.Contains(task.GetLog(), "Attente de libération du canal audio") {
+						task.AppendLog("Attente de libération du canal audio (file d'attente)...")
+					}
+					continue
+				}
+			}
+
+			taskCtx, cancel := context.WithCancel(ctx)
+			task.mu.Lock()
+			task.Status = StatusRunning
+			task.StartedAt = now
+			task.cancelFunc = cancel
+			task.mu.Unlock()
+			task.AppendLog("Lancement de l'exécution.")
+
 			// Run task in background goroutine
-			go s.runTask(ctx, task, handler)
+			go s.runTask(taskCtx, cancel, task, handler)
 		}
 	}
 }
 
-func (s *Scheduler) runTask(parentCtx context.Context, task *Task, handler TaskHandler) {
-	taskCtx, cancel := context.WithCancel(parentCtx)
-
-	task.mu.Lock()
-	task.cancelFunc = cancel
-	task.mu.Unlock()
-
+func (s *Scheduler) runTask(taskCtx context.Context, cancel context.CancelFunc, task *Task, handler TaskHandler) {
 	defer cancel()
 
-	// Special serialization for music playing tasks
+	// Special serialization for music playing tasks (musicSem was acquired in dispatchTasks)
 	if task.Type == "play_music" {
-		task.AppendLog("Attente de libération du canal audio (file d'attente)...")
-		select {
-		case s.musicSem <- struct{}{}:
-			var semReleased bool
-			var semMu sync.Mutex
+		var semReleased bool
+		var semMu sync.Mutex
 
-			task.ReleaseSem = func() {
-				semMu.Lock()
-				defer semMu.Unlock()
-				if !semReleased {
-					<-s.musicSem
-					semReleased = true
-					task.AppendLog("Canal audio libéré par anticipation (crossfade).")
-					go s.TriggerDispatch()
-				}
+		task.ReleaseSem = func() {
+			semMu.Lock()
+			defer semMu.Unlock()
+			if !semReleased {
+				<-s.musicSem
+				semReleased = true
+				task.AppendLog("Canal audio libéré par anticipation (crossfade).")
+				go s.TriggerDispatch()
 			}
-			defer task.ReleaseSem()
+		}
+		defer task.ReleaseSem()
 
-			task.AppendLog("Canal audio acquis. Lecture en cours.")
-		case <-taskCtx.Done():
-			task.SetStatus(StatusCancelled)
-			task.FinishedAt = time.Now()
+		if task.GetStatus() == StatusCancelled || taskCtx.Err() != nil {
 			task.AppendLog("Tâche annulée en attente du canal audio.")
 			return
 		}
+
+		task.AppendLog("Canal audio acquis. Préparation de la piste...")
 	}
 
 	err := handler(taskCtx, task)

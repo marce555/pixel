@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 )
@@ -111,5 +112,53 @@ func TestSchedulerCancel(t *testing.T) {
 
 	if task.Status != StatusCancelled {
 		t.Fatalf("expected cancelled status, got %s", task.Status)
+	}
+}
+
+func TestSchedulerPlayMusicFIFOOrder(t *testing.T) {
+	s := NewScheduler()
+
+	var order []string
+	var orderMu sync.Mutex
+	doneCh := make(chan struct{})
+
+	s.RegisterHandler("play_music", func(ctx context.Context, task *Task) error {
+		orderMu.Lock()
+		order = append(order, task.Payload)
+		if len(order) == 4 {
+			defer close(doneCh)
+		}
+		orderMu.Unlock()
+		time.Sleep(50 * time.Millisecond)
+		return nil
+	})
+
+	songs := []string{
+		"Whitney Houston - I Wanna Dance with Somebody",
+		"Michael Jackson - Billie Jean",
+		"Madonna - Like a Virgin",
+		"Eurythmics - Sweet Dreams",
+	}
+	for _, song := range songs {
+		s.Enqueue("play_music", "Lecture de : "+song, song, 0)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.Start(ctx)
+	s.TriggerDispatch()
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for play_music FIFO queue")
+	}
+
+	orderMu.Lock()
+	defer orderMu.Unlock()
+	for i, want := range songs {
+		if order[i] != want {
+			t.Fatalf("at index %d: expected %q, got %q (full order: %v)", i, want, order[i], order)
+		}
 	}
 }

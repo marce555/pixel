@@ -482,11 +482,22 @@ func (w *WebAgent) PlayMusic(songQuery string) (string, error) {
 	localBin := "/home/marceloc/Documents/Pixel/bin"
 	newPath := localBin + ":" + path
 
-	args := []string{"--no-video", "--ao=pipewire", "--input-ipc-server=/tmp/mpvsocket_webagent"}
+	ytdlRawOpts := "extractor-args=[youtube:player_client=default,-tv_samsung]"
 	if strings.Contains(targetURL, "list=") {
-		args = append(args, "--ytdl-raw-options=yes-playlist=")
+		ytdlRawOpts += ",yes-playlist="
 	}
-	args = append(args, targetURL)
+	args := []string{
+		"--no-video",
+		"--ao=pipewire",
+		"--ytdl-format=bestaudio/best",
+		fmt.Sprintf("--ytdl-raw-options=%s", ytdlRawOpts),
+		"--input-ipc-server=/tmp/mpvsocket_webagent",
+	}
+	mpvTarget := targetURL
+	if !isDirect && strings.Contains(targetURL, "youtube.com/results?search_query=") {
+		mpvTarget = fmt.Sprintf("ytdl://ytsearch1:%s", songQuery)
+	}
+	args = append(args, mpvTarget)
 
 	mpvCmd := exec.Command("mpv", args...)
 	mpvCmd.Env = append(os.Environ(), "PATH="+newPath)
@@ -612,35 +623,68 @@ func (w *WebAgent) ControlMedia(command string) (string, error) {
 func (w *WebAgent) ScrapeYouTubeDirect(songQuery string) (string, string) {
 	fmt.Printf("[WebAgent] Scraping YouTube direct pour : '%s'\n", songQuery)
 
-	searchURL := fmt.Sprintf("https://www.youtube.com/results?search_query=%s", url.QueryEscape(songQuery))
-	req, err := http.NewRequest("GET", searchURL, nil)
-	if err != nil {
-		return "", ""
+	client := &http.Client{Timeout: 8 * time.Second}
+	var body string
+
+	// Primary method: YouTube InnerTube JSON API (fast, immune to google.com/sorry redirect loops)
+	innerTubePayload := map[string]interface{}{
+		"context": map[string]interface{}{
+			"client": map[string]interface{}{
+				"clientName":    "WEB",
+				"clientVersion": "2.20261021.01.00",
+				"hl":            "fr",
+				"gl":            "FR",
+			},
+		},
+		"query": songQuery,
+	}
+	if payloadBytes, err := json.Marshal(innerTubePayload); err == nil {
+		apiReq, reqErr := http.NewRequest("POST", "https://www.youtube.com/youtubei/v1/search?prettyPrint=false", strings.NewReader(string(payloadBytes)))
+		if reqErr == nil {
+			apiReq.Header.Set("Content-Type", "application/json")
+			apiReq.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+			apiReq.Header.Set("Accept-Language", "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7")
+			if apiResp, doErr := client.Do(apiReq); doErr == nil {
+				if apiResp.StatusCode == http.StatusOK {
+					if b, readErr := ioutil.ReadAll(apiResp.Body); readErr == nil {
+						body = string(b)
+					}
+				}
+				apiResp.Body.Close()
+			}
+		}
 	}
 
-	// Set a standard desktop browser User-Agent so YouTube returns the rich HTML/JSON page
-	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-	req.Header.Set("Accept-Language", "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7")
+	// Fallback method: HTML GET scrape if InnerTube returned empty or no videoId
+	if !strings.Contains(body, `"videoId":"`) {
+		searchURL := fmt.Sprintf("https://www.youtube.com/results?search_query=%s", url.QueryEscape(songQuery))
+		req, err := http.NewRequest("GET", searchURL, nil)
+		if err != nil {
+			return "", ""
+		}
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		fmt.Printf("[WebAgent] Scraping direct échoué (erreur HTTP) : %v\n", err)
-		return "", ""
+		// Set a standard desktop browser User-Agent so YouTube returns the rich HTML/JSON page
+		req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+		req.Header.Set("Accept-Language", "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			fmt.Printf("[WebAgent] Scraping direct échoué (erreur HTTP) : %v\n", err)
+			return "", ""
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			fmt.Printf("[WebAgent] Scraping direct échoué (HTTP %d)\n", resp.StatusCode)
+			return "", ""
+		}
+
+		bodyBytes, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return "", ""
+		}
+		body = string(bodyBytes)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		fmt.Printf("[WebAgent] Scraping direct échoué (HTTP %d)\n", resp.StatusCode)
-		return "", ""
-	}
-
-	bodyBytes, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return "", ""
-	}
-
-	body := string(bodyBytes)
 	queryLower := strings.ToLower(songQuery)
 	isPlaylistQuery := strings.Contains(queryLower, "playlist") || strings.Contains(queryLower, "liste") || strings.Contains(queryLower, "hits") || strings.Contains(queryLower, "top 100") || strings.Contains(queryLower, "best of") || strings.Contains(queryLower, "suite de")
 

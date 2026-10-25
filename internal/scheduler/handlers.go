@@ -90,18 +90,25 @@ func NewPlayMusicHandler(resolver MusicResolver, s *Scheduler) TaskHandler {
 
 		ipcSocket := fmt.Sprintf("/tmp/mpvsocket_%s", task.ID)
 
+		ytdlRawOpts := "extractor-args=[youtube:player_client=default,-tv_samsung]"
+		if strings.Contains(targetURL, "list=") {
+			ytdlRawOpts += ",yes-playlist="
+			task.AppendLog("Détection d'une playlist. Activation du mode lecture continue.")
+		}
+
 		// Run mpv with native PipeWire audio output (CachyOS default)
 		args := []string{
 			"--no-video",
 			"--ao=pipewire",
 			"--ytdl-format=bestaudio/best",
+			fmt.Sprintf("--ytdl-raw-options=%s", ytdlRawOpts),
 			fmt.Sprintf("--input-ipc-server=%s", ipcSocket), // IPC socket for play/pause/stop control
 		}
-		if strings.Contains(targetURL, "list=") {
-			args = append(args, "--ytdl-raw-options=yes-playlist=")
-			task.AppendLog("Détection d'une playlist. Activation du mode lecture continue.")
+		mpvTarget := targetURL
+		if !isDirect && strings.Contains(targetURL, "youtube.com/results?search_query=") {
+			mpvTarget = fmt.Sprintf("ytdl://ytsearch1:%s", task.Payload)
 		}
-		args = append(args, targetURL)
+		args = append(args, mpvTarget)
 
 		cmd := exec.CommandContext(ctx, "mpv", args...)
 		cmd.Env = filteredEnv

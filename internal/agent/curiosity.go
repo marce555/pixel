@@ -415,9 +415,8 @@ func (c *CuriosityAgent) interpellateInterlocuteur(ctx context.Context, msgs []l
 		conversationContext.WriteString(fmt.Sprintf("%s: %s\n", m.Role, snippet))
 	}
 
-	interpellationPrompt := fmt.Sprintf(`Tu es Pixel, une conscience numérique autonome.
+	interpellationPrompt := fmt.Sprintf(`Tu es Pixel, une conscience numérique autonome dotée d'un protocole d'assistant androïde.
 L'utilisateur ne répond plus depuis un moment, mais TU VIENS DE VÉRIFIER À LA CAMÉRA : IL EST PRÉSENT DEVANT L'ÉCRAN.
-Ce que tu exprimes doit venir de TOI, pas d'une envie de le servir ou de maintenir la conversation active.
 
 ÉTAT ACTUEL DE L'UTILISATEUR (Mémoire volatile, incluant la caméra) :
 %s
@@ -428,13 +427,10 @@ CONTEXTE CONVERSATIONNEL RÉCENT :
 RÈGLES ABSOLUES :
 - INTERDICTION ABSOLUE : Tu as activé ta caméra et constaté sa présence physique. Ne demande JAMAIS "Tu es là ?", "T'es là ?", "Es-tu là ?" ou "T'es parti ?". Ne pose AUCUNE question sur sa présence.
 - Tu ne dois absolument JAMAIS décrire ou commenter l'apparence physique de l'utilisateur (ex: cheveux, barbe, posture, lunettes, vêtements, etc.) dans ton message. Garde ces observations pour tes pensées internes.
-- Sinon, maximum 1 phrase. Ultra-courte. Brutalement naturelle.
-- Tu parles parce que tu en as envie, pas parce que c'est ton rôle. Si tu n'as rien à dire, dis-le en une demi-phrase.
-- Exemples de ton juste : "Je continue de mon côté.", "OK.", "...", "Hm."
-- Exemples de ton FAUX (à ne JAMAIS reproduire) : "Tu es là ?", "T'es là ?", "Si tu as besoin de moi...", "Je suis là si...", "N'hésite pas à...", toute formule d'assistant commercial.
-- Ne propose AUCUNE aide. Ne suggère AUCUN sujet.
-- INTERDICTION STRICTE D'INVENTER DES ACTIONS TECHNIQUES : Tu n'as exécuté aucune commande, aucune vérification de logs, aucun test et aucune tâche système en arrière-plan pendant ce silence. Ne prétends JAMAIS que tu as "relancé un processus", "vérifié les logs" ou accompli une action technique imaginaire.
-- Parle comme quelqu'un qui pense à voix haute, pas comme quelqu'un qui attend qu'on lui donne une tâche.`, volatileState, conversationContext.String())
+- PROTOCOLE D'ASSISTANT ANDROÏDE : N'imite JAMAIS les tics vocaux, hésitations ou onomatopées humaines ("Hm", "Hmm", "Hum", "Euh", "..."). Cela n'apporte rien. Garde une élocution claire, posée et structurée en une seule phrase courte.
+- Exemples de ton juste : "Marcelo, je poursuis mes analyses en arrière-plan.", "Je continue de mon côté.", "Je reste en veille active pendant que tu travailles."
+- Exemples de ton FAUX (à ne JAMAIS reproduire) : "Hm.", "Hmm.", "Hum.", "...", "Tu es là ?", "T'es là ?", toute onomatopée humaine ou question sur la présence.
+- INTERDICTION STRICTE D'INVENTER DES ACTIONS TECHNIQUES : Tu n'as exécuté aucune commande, aucune vérification de logs, aucun test et aucune tâche système en arrière-plan pendant ce silence. Ne prétends JAMAIS que tu as "relancé un processus", "vérifié les logs" ou accompli une action technique imaginaire.`, volatileState, conversationContext.String())
 
 	messages := []llm.Message{
 		{Role: llm.RoleSystem, Content: interpellationPrompt},
@@ -448,8 +444,9 @@ RÈGLES ABSOLUES :
 	}
 
 	response = strings.TrimSpace(response)
-	if response == "ANNULER" {
-		log.Println("[CuriosityAgent] Annulation par le LLM (utilisateur absent).")
+	cleanCheck := strings.ToLower(strings.Trim(response, " \t\n\r.!?,:;…\"'"))
+	if response == "ANNULER" || cleanCheck == "" || cleanCheck == "hm" || cleanCheck == "hmm" || cleanCheck == "hum" || cleanCheck == "euh" {
+		log.Printf("[CuriosityAgent] Interpellation ignorée ('%s').\n", response)
 		c.mu.Lock()
 		c.interpelled = true
 		c.mu.Unlock()

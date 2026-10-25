@@ -563,6 +563,14 @@ func (a *SuperiorAgent) analyzeQuery(ctx context.Context, input string, history 
 		return RouterResponse{Action: "media", Query: "play"}
 	}
 
+	// Fast-path for Billboard Top 100 radio (AVANT le fast-path générique "lance la play", inclut variantes STT)
+	if detectBillboardIntent(cleanInput) {
+		return RouterResponse{
+			Action: "skill_billboard_radio",
+			Query:  cleanInput,
+		}
+	}
+
 	// Fast-path for context playlist
 	if strings.HasPrefix(cleanInput, "lance cette play") || strings.HasPrefix(cleanInput, "lance la play") ||
 		strings.HasPrefix(cleanInput, "joue cette play") || strings.HasPrefix(cleanInput, "joue la play") {
@@ -1356,6 +1364,8 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 			resourceagent.AddLiveLog("Skill:CachyOS", "Analyse et capture des logs du système hôte CachyOS en temps réel...")
 		} else if skillName == "decouvrir_nouveau_visage" {
 			resourceagent.AddLiveLog("Skill:Vision", "Activation de la caméra et reconnaissance faciale... 📸")
+		} else if skillName == "billboard_radio" {
+			resourceagent.AddLiveLog("Skill:Billboard", fmt.Sprintf("Récupération des 100 titres Billboard et lancement de la radio (%s)... 📻", routerResp.Query))
 		} else {
 			resourceagent.AddLiveLog(fmt.Sprintf("Skill:%s", skillName), fmt.Sprintf("Exécution de la brique '%s'...", skillName))
 		}
@@ -1363,7 +1373,11 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 		if len(skillQuery) > 500 {
 			skillQuery = skillQuery[:500]
 		}
-		result, err := a.skillManager.ExecuteSkill(ctx, skillName, skillQuery)
+		execArg := skillQuery
+		if skillName == "billboard_radio" {
+			execArg = "--json " + skillQuery
+		}
+		result, err := a.skillManager.ExecuteSkill(ctx, skillName, execArg)
 		if err != nil {
 			fmt.Printf("[Router] Erreur d'exécution de la brique '%s': %v\n", skillName, err)
 			if a.bridge != nil {
@@ -1371,6 +1385,42 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 			}
 			additionalContext += fmt.Sprintf("\n\n--- ERREUR LORS DE L'EXÉCUTION DE LA BRIQUE '%s' ---\n%s\nExplique gentiment à l'utilisateur que l'outil a rencontré une erreur.\n---------------------------------", skillName, err.Error())
 		} else {
+			if skillName == "billboard_radio" && a.scheduler != nil {
+				var bbData struct {
+					Label  string `json:"label"`
+					Count  int    `json:"count"`
+					Tracks []struct {
+						Rank   int    `json:"rank"`
+						Title  string `json:"title"`
+						Artist string `json:"artist"`
+						Query  string `json:"query"`
+					} `json:"tracks"`
+				}
+				if errJSON := json.Unmarshal([]byte(strings.TrimSpace(result)), &bbData); errJSON == nil && len(bbData.Tracks) > 0 {
+					a.scheduler.CancelAutoplay()
+					if a.webAgent != nil {
+						_, _ = a.webAgent.ControlMedia("stop")
+					}
+					for _, t := range a.scheduler.GetTasks() {
+						if t.Type == "play_music" && (t.Status == scheduler.StatusRunning || t.Status == scheduler.StatusPending) {
+							a.scheduler.Cancel(t.ID)
+						}
+					}
+					for _, tr := range bbData.Tracks {
+						taskLabel := fmt.Sprintf("📻 %s #%d : %s", bbData.Label, tr.Rank, tr.Query)
+						a.scheduler.Enqueue("play_music", taskLabel, tr.Query, 0)
+					}
+					a.scheduler.TriggerDispatch()
+					var previewList []string
+					for i := 0; i < len(bbData.Tracks) && i < 5; i++ {
+						previewList = append(previewList, fmt.Sprintf("#%d %s", bbData.Tracks[i].Rank, bbData.Tracks[i].Query))
+					}
+					result = fmt.Sprintf(
+						"Radio %s lancée avec succès (%d titres ajoutés dans la file d'attente musicale avec mixage radio / fondu enchaîné de 5 secondes entre chaque titre).\nPremiers titres en écoute : %s.",
+						bbData.Label, len(bbData.Tracks), strings.Join(previewList, ", "),
+					)
+				}
+			}
 			if skillName == "decouvrir_nouveau_visage" && a.coreMemory != nil {
 				if strings.Contains(result, "[ACTION_PROFIL: Marcelo]") {
 					a.coreMemory.SwitchActiveProfile("Marcelo")
@@ -1756,6 +1806,10 @@ func (a *SuperiorAgent) ProcessInput(ctx context.Context, input string, history 
 		return fmt.Sprintf("J'ai lancé la vérification et le nettoyage des articles en double en arrière-plan. 🧹\n\nTu peux suivre l'avancement et la liste des articles dépubliés dans l'onglet **Tâches** ! *(ID tâche : `%s`)*", task.ID), nil
 	}
 
+	if detectBillboardIntent(input) && a.skillManager != nil && a.scheduler != nil {
+		return a.handleBillboardRadioDirect(ctx, input), nil
+	}
+
 	// 1. Vérification de confirmation d'une proposition précédente de rédaction d'article
 	if a.scheduler != nil && len(history) >= 2 && history[len(history)-2].Role == llm.RoleAssistant {
 		prevAssistantMsg := history[len(history)-2].Content
@@ -2032,6 +2086,17 @@ func (a *SuperiorAgent) ProcessInputStream(ctx context.Context, input string, hi
 		}
 		close(out)
 		close(errs)
+		return out, errs
+	}
+
+	if detectBillboardIntent(input) && a.skillManager != nil && a.scheduler != nil {
+		out := make(chan string, 1)
+		errs := make(chan error, 1)
+		go func() {
+			defer close(out)
+			defer close(errs)
+			out <- a.handleBillboardRadioDirect(ctx, input)
+		}()
 		return out, errs
 	}
 
@@ -2803,6 +2868,68 @@ func detectAgentPlanningIntent(input string) (bool, string) {
 	}
 
 	return false, ""
+}
+
+func detectBillboardIntent(input string) bool {
+	clean := strings.ToLower(input)
+	clean = strings.ReplaceAll(clean, "'", " ")
+	clean = strings.ReplaceAll(clean, "-", " ")
+	clean = strings.ReplaceAll(clean, ".", " ")
+	keywords := []string{
+		"billboard", "bilboard", "biboar", "bilboar", "bilba", "bill board", "bille board",
+		"vilvoorde", "vilvorde", "ville borde", "hot 100", "hot100",
+	}
+	for _, kw := range keywords {
+		if strings.Contains(clean, kw) {
+			return true
+		}
+	}
+	if strings.Contains(clean, "top 100") && (strings.Contains(clean, "19") || strings.Contains(clean, "20") || strings.Contains(clean, "musique") || strings.Contains(clean, "chanson") || strings.Contains(clean, "radio") || strings.Contains(clean, "play") || strings.Contains(clean, "lance") || strings.Contains(clean, "joue") || strings.Contains(clean, "mets")) {
+		return true
+	}
+	return false
+}
+
+func (a *SuperiorAgent) handleBillboardRadioDirect(ctx context.Context, input string) string {
+	if a.skillManager == nil || a.scheduler == nil {
+		return "Le gestionnaire de tâches ou de briques n'est pas initialisé."
+	}
+	result, err := a.skillManager.ExecuteSkill(ctx, "billboard_radio", "--json "+input)
+	if err != nil {
+		return fmt.Sprintf("Désolé, je n'ai pas pu récupérer le classement Billboard : %v", err)
+	}
+	var bbData struct {
+		Label  string `json:"label"`
+		Count  int    `json:"count"`
+		Tracks []struct {
+			Rank   int    `json:"rank"`
+			Title  string `json:"title"`
+			Artist string `json:"artist"`
+			Query  string `json:"query"`
+		} `json:"tracks"`
+	}
+	if errJSON := json.Unmarshal([]byte(strings.TrimSpace(result)), &bbData); errJSON != nil || len(bbData.Tracks) == 0 {
+		return "Désolé, je n'ai pas pu lire la liste des titres Billboard."
+	}
+	a.scheduler.CancelAutoplay()
+	if a.webAgent != nil {
+		_, _ = a.webAgent.ControlMedia("stop")
+	}
+	for _, t := range a.scheduler.GetTasks() {
+		if t.Type == "play_music" && (t.Status == scheduler.StatusRunning || t.Status == scheduler.StatusPending) {
+			a.scheduler.Cancel(t.ID)
+		}
+	}
+	for _, tr := range bbData.Tracks {
+		taskLabel := fmt.Sprintf("📻 %s #%d : %s", bbData.Label, tr.Rank, tr.Query)
+		a.scheduler.Enqueue("play_music", taskLabel, tr.Query, 0)
+	}
+	a.scheduler.TriggerDispatch()
+	var previewList []string
+	for i := 0; i < len(bbData.Tracks) && i < 3; i++ {
+		previewList = append(previewList, fmt.Sprintf("#%d %s", bbData.Tracks[i].Rank, bbData.Tracks[i].Query))
+	}
+	return fmt.Sprintf("C'est parti ! J'ai lancé la radio **%s** 📻.\n\nLes **%d titres** sont programmés dans la file d'attente avec mixage radio (fondu enchaîné de 5 secondes entre chaque titre).\n\n*Premiers morceaux en écoute : %s...*", bbData.Label, len(bbData.Tracks), strings.Join(previewList, ", "))
 }
 
 func (a *SuperiorAgent) buildSchedulerContext() string {

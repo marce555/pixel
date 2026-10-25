@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -320,14 +321,20 @@ func (vm *VoiceManager) TranscribeAudio(ctx context.Context, wavPath string) (st
 	return vm.cleanWhisperText(string(textBytes)), nil
 }
 
+var ttsFillerRegex = regexp.MustCompile(`(?i)\b(?:h+m+|h+u+m+|e+u+h+)\b[\s,\.\!\?:;…]*`)
+
 // Synthesize utilise Piper localement sur le CPU pour générer le WAV audio correspondant au texte
 func (vm *VoiceManager) Synthesize(ctx context.Context, text string) ([]byte, error) {
 	if !vm.isPiperReady() {
 		return nil, fmt.Errorf("le moteur de synthèse vocale Piper est en cours de téléchargement, veuillez patienter")
 	}
 
-	// Nettoyer un peu le texte (supprimer retours à la ligne intempestifs)
+	// Nettoyer le texte (supprimer retours à la ligne et onomatopées humaines de type "Hm", "Hum", "Euh")
 	text = strings.ReplaceAll(text, "\n", " ")
+	text = strings.TrimSpace(ttsFillerRegex.ReplaceAllString(text, ""))
+	if text == "" {
+		return nil, fmt.Errorf("texte vide après filtrage vocal")
+	}
 
 	tempWav := filepath.Join(os.TempDir(), fmt.Sprintf("piper_%d.wav", time.Now().UnixNano()))
 	defer os.Remove(tempWav)

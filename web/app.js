@@ -122,10 +122,16 @@ document.addEventListener('DOMContentLoaded', () => {
                         }, 50);
                     }
                 } else {
+                    const stripped = data.proactive_message.replace(/[\s\.\!\?,:;…]+/g, '').toLowerCase();
+                    if (stripped === 'hm' || stripped === 'hmm' || stripped === 'hum' || stripped === 'euh' || stripped === '') {
+                        return;
+                    }
                     appendMessage(data.proactive_message, 'pixel');
                     if (window.voiceController) {
+                        const summary = window.voiceController.summarizeTaskFailureForTts(data.proactive_message);
+                        const ttsPayload = summary !== null ? summary : data.proactive_message;
                         window.voiceController.startSpeechSession();
-                        window.voiceController.feedChunk(data.proactive_message);
+                        window.voiceController.feedChunk(ttsPayload);
                         window.voiceController.finalizeSpeech();
                     }
                 }
@@ -1803,6 +1809,55 @@ class VoiceController {
     }
 
     /* ── TTS (inchangé — Piper/Go) ────────────────────────────────────── */
+    summarizeTaskFailureForTts(text) {
+        if (!text) return null;
+        const lower = text.toLowerCase();
+        if (
+            lower.includes('publication bloquée') ||
+            lower.includes('problème lors de la publication') ||
+            lower.includes('publication annulée') ||
+            lower.includes('publication refusée') ||
+            lower.includes("n'a pas été publié") ||
+            lower.includes("n'a pas pu être publié") ||
+            lower.includes('échec de la rédaction') ||
+            lower.includes('échec de la révision') ||
+            lower.includes('échec de la publication') ||
+            lower.includes("rejet par l'agent vérificateur") ||
+            (lower.includes('échec de la tâche') && (lower.includes('publication') || lower.includes('article') || lower.includes('rédaction') || lower.includes('audit') || lower.includes('vérification')))
+        ) {
+            return 'Marcelo, une tâche de publication est en échec. Il faudra vérifier plus tard.';
+        }
+        if (
+            lower.includes('erreur durant la lecture mpv') ||
+            lower.includes('impossible de démarrer mpv') ||
+            lower.includes('impossible de lancer la musique') ||
+            lower.includes('impossible de lancer la première musique') ||
+            lower.includes("mpv s'est arrêté avec une erreur") ||
+            (lower.includes('échec de la tâche') && (lower.includes('lecture de') || lower.includes('radio auto') || lower.includes('mpv') || lower.includes('musique')))
+        ) {
+            return 'Marcelo, il y a un problème avec la lecture mpv.';
+        }
+        if (
+            lower.includes('échec de la tâche') ||
+            lower.includes("échec de l'exécution") ||
+            lower.includes("échec de l'audit") ||
+            text.trimStart().startsWith('❌') ||
+            text.trimStart().startsWith('🛑')
+        ) {
+            return 'Marcelo, une tâche est en échec. Il faudra vérifier plus tard.';
+        }
+        return null;
+    }
+
+    cleanTtsSentence(sentence) {
+        return sentence
+            .replace(/<thought>[\s\S]*?<\/thought>/g, '')
+            .replace(/<[^>]+>/g, '')
+            .replace(/\*\*|\*|`|###|##|#/g, '')
+            .replace(/(?:^|(?<=\s))(?:h+m+|h+u+m+|e+u+h+)\b[\s,\.\!\?:;…]*/gi, '')
+            .trim();
+    }
+
     startSpeechSession() {
         this.stopListening();
         this.stopSpeaking();
@@ -1811,11 +1866,19 @@ class VoiceController {
         this.speechBuffer     = '';
         this.isSpeakingSentence = false;
         this.isStreamFinished = false;
+        this.ttsSummaryApplied = false;
     }
 
     feedChunk(chunk) {
-        if (!this.isTtsEnabled) return;
+        if (!this.isTtsEnabled || this.ttsSummaryApplied) return;
         this.speechBuffer += chunk;
+
+        const summary = this.summarizeTaskFailureForTts(this.speechBuffer);
+        if (summary !== null && this.speechBuffer.trim() !== summary) {
+            this.speechQueue = [];
+            this.speechBuffer = summary;
+            this.ttsSummaryApplied = true;
+        }
 
         while (true) {
             let boundary = -1;
@@ -1829,8 +1892,7 @@ class VoiceController {
             }
 
             if (boundary !== -1) {
-                let sentence = this.speechBuffer.substring(0, boundary + 1)
-                    .replace(/\*\*|\*|`|###|##|#/g, '').trim();
+                let sentence = this.cleanTtsSentence(this.speechBuffer.substring(0, boundary + 1));
                 this.speechBuffer = this.speechBuffer.substring(boundary + 1);
                 if (sentence.length > 1) {
                     this.speechQueue.push(sentence);
@@ -1853,7 +1915,7 @@ class VoiceController {
             }
             return;
         }
-        const remaining = this.speechBuffer.replace(/\*\*|\*|`|###|##|#/g, '').trim();
+        const remaining = this.cleanTtsSentence(this.speechBuffer);
         if (remaining.length > 1) this.speechQueue.push(remaining);
         this.speechBuffer = '';
         this._playNext();

@@ -286,6 +286,8 @@ class RecordReaderThread(QThread):
             return
             
         # Dynamic adaptive noise floor VAD with DC offset removal — VAD v2
+        from collections import deque
+        pre_roll = deque(maxlen=20)     # ~640ms de pré-roll audio avant détection de la voix
         audio_data = bytearray()
         noise_floor = 500.0     # Valeur initiale basse (niveaux parec s16le typiques : 200–2000)
         speech_detected = False
@@ -302,8 +304,6 @@ class RecordReaderThread(QThread):
             if not chunk:
                 break
                 
-            audio_data.extend(chunk)
-            
             # Analyze AC volume (with DC offset removal)
             num_samples = len(chunk) // 2
             if num_samples > 0:
@@ -319,7 +319,7 @@ class RecordReaderThread(QThread):
                 # Adapt background noise floor dynamically — mise à jour lente (τ ≈ 17 frames)
                 # uniquement hors parole, avec plafond pour éviter la dérive sur le bruit
                 if not speech_detected:
-                    noise_floor = noise_floor * 0.94 + min(ac_rms, 1500.0) * 0.06
+                    noise_floor = noise_floor * 0.94 + min(ac_rms, 2500.0) * 0.06
                 
                 # Seuil dynamique robuste : au moins 800 unités, ou 2.2× le bruit de fond
                 threshold = max(800.0, noise_floor * 2.2)
@@ -329,10 +329,15 @@ class RecordReaderThread(QThread):
                     if not speech_detected:
                         speech_start_time = now
                         speech_detected = True
+                        for prev_chunk in pre_roll:
+                            audio_data.extend(prev_chunk)
+                        pre_roll.clear()
                         self.speech_started_signal.emit()
+                    audio_data.extend(chunk)
                     silence_start_time = None
                     silence_frame_count = 0
                 elif speech_detected:
+                    audio_data.extend(chunk)
                     # Silence potentiel — hysteresis avant de démarrer le compteur
                     silence_frame_count += 1
                     if silence_frame_count >= SILENCE_HYSTERESIS:
@@ -345,13 +350,27 @@ class RecordReaderThread(QThread):
                             base_delay = 1.1 if self.is_handsfree else 0.9
                             adaptive_delay = base_delay + (0.4 if speech_dur > 3000 else 0.0)
                             
-                            if silence_dur > adaptive_delay and speech_dur > min_speech_ms:
-                                print(f"[GUI] VAD v2 : parole={int(speech_dur)}ms, silence={int(silence_dur*1000)}ms, seuil={threshold:.0f} → Transcription")
-                                break
+                            if silence_dur > adaptive_delay:
+                                if speech_dur > min_speech_ms:
+                                    print(f"[GUI] VAD v2 : parole={int(speech_dur)}ms, silence={int(silence_dur*1000)}ms, seuil={threshold:.0f} → Transcription")
+                                    break
+                                else:
+                                    # Bruit impulsif trop court (< 300ms) : réinitialiser sans couper l'écoute
+                                    speech_detected = False
+                                    speech_start_time = None
+                                    silence_start_time = None
+                                    silence_frame_count = 0
+                                    audio_data.clear()
+                else:
+                    # Hors parole : conserver uniquement les ~640ms précédant la voix
+                    pre_roll.append(chunk)
+                    if not self.is_handsfree and (now - start_time > 15.0):
+                        print("[GUI] Aucune voix détectée en 15s (mode manuel)")
+                        break
                             
-            # Max duration safety (15s)
-            if time.time() - start_time > 15.0:
-                print("[GUI] Durée max d'enregistrement atteinte (15s)")
+            # Max speech duration safety (15s à compter du début de la parole, pas de l'attente)
+            if speech_detected and speech_start_time and (time.time() - speech_start_time > 15.0):
+                print("[GUI] Durée max de parole atteinte (15s)")
                 break
                 
         # Terminate subprocess
@@ -365,8 +384,8 @@ class RecordReaderThread(QThread):
         if self.should_stop:
             return
 
-        # Write WAV file
-        if len(audio_data) > 44:
+        # Write WAV file uniquement si une vraie parole a été détectée
+        if speech_detected and len(audio_data) > 44:
             if AudioWavWriter.write_wav_header_from_bytes(audio_data, self.temp_wav_path):
                 self.finished_signal.emit(self.temp_wav_path)
                 return
@@ -1829,16 +1848,82 @@ class MainWindow(QMainWindow):
             </table>
             """
 
+    def _summarize_task_failure_for_tts(self, text):
+        """Résume vocalement les notifications d'échec de tâche ou de blocage de publication au lieu de lire tout le rapport."""
+        user_name = getattr(self, "user_name", "Marcelo") or "Marcelo"
+        lower = text.lower()
+
+        # 1. Tâche de publication / rédaction / vérification d'article bloquée ou en échec
+        if (
+            "publication bloquée" in lower
+            or "problème lors de la publication" in lower
+            or "publication annulée" in lower
+            or "publication refusée" in lower
+            or "n'a pas été publié" in lower
+            or "n'a pas pu être publié" in lower
+            or "échec de la rédaction" in lower
+            or "échec de la révision" in lower
+            or "échec de la publication" in lower
+            or "rejet par l'agent vérificateur" in lower
+            or ("échec de la tâche" in lower and any(k in lower for k in ("publication", "article", "rédaction", "audit", "vérification")))
+        ):
+            return f"{user_name}, une tâche de publication est en échec. Il faudra vérifier plus tard."
+
+        # 2. Problème de lecture musicale / mpv
+        if (
+            "erreur durant la lecture mpv" in lower
+            or "impossible de démarrer mpv" in lower
+            or "impossible de lancer la musique" in lower
+            or "impossible de lancer la première musique" in lower
+            or "mpv s'est arrêté avec une erreur" in lower
+            or ("échec de la tâche" in lower and any(k in lower for k in ("lecture de", "radio auto", "mpv", "musique")))
+        ):
+            return f"{user_name}, il y a un problème avec la lecture mpv."
+
+        # 3. Autre tâche en échec
+        if (
+            "échec de la tâche" in lower
+            or "échec de l'exécution" in lower
+            or "échec de l'audit" in lower
+            or text.lstrip().startswith(("❌", "🛑"))
+        ):
+            return f"{user_name}, une tâche est en échec. Il faudra vérifier plus tard."
+
+        return None
+
+    def _clean_tts_sentence(self, sentence):
+        """Nettoie le balisage et supprime les onomatopées humaines ('Hm', 'Hmm', 'Hum', 'Euh') pour garder un protocole d'assistant androïde."""
+        sentence = re.sub(r'<thought>.*?</thought>', '', sentence, flags=re.DOTALL)
+        sentence = re.sub(r'<[^>]+>', '', sentence)
+        sentence = re.sub(r'\*\*|\*|`|###|##|#', '', sentence)
+        sentence = re.sub(r'(?i)(?:^|(?<=\s))(?:h+m+|h+u+m+|e+u+h+)\b[\s,\.\!\?:;…]*', '', sentence)
+        return sentence.strip()
+
     def handle_proactive_message(self, message):
         if message.startswith("VISION:"):
             desc = message[7:]
             self.txt_vision.setPlainText(desc)
         else:
+            stripped_msg = re.sub(r'[\s\.\!\?,:;…]+', '', message).lower()
+            if stripped_msg in ("hm", "hmm", "hum", "euh", ""):
+                return
+
             self.append_chat_bubble(message, "pixel")
             if self.voice_enabled:
-                self.start_speech_session()
-                self.feed_chunk(message)
-                self.finalize_speech()
+                summary = self._summarize_task_failure_for_tts(message)
+                tts_payload = summary if summary is not None else message
+                now_ts = time.time()
+                last_summary = getattr(self, "_last_tts_failure_summary", None)
+                last_summary_ts = getattr(self, "_last_tts_failure_ts", 0.0)
+                if summary is not None and summary == last_summary and (now_ts - last_summary_ts) < 10.0:
+                    pass
+                else:
+                    if summary is not None:
+                        self._last_tts_failure_summary = summary
+                        self._last_tts_failure_ts = now_ts
+                    self.start_speech_session()
+                    self.feed_chunk(tts_payload)
+                    self.finalize_speech()
                 
             # Show system tray notification
             self.tray_icon.showMessage(
@@ -1914,9 +1999,9 @@ class MainWindow(QMainWindow):
             has_send_keyword = text.lower().rstrip('.,!?* ').endswith(('envoi', 'envoyer', 'envoie'))
             
             if self.continuous_voice:
-                # En mode mains-libres, exiger le mot-clé d'éveil "Pixel" (avec variantes courantes de transcription)
-                wake_match = re.match(
-                    r'^[\s,:\-\.\!\?]*(?:(?:hey|ok|dis|salut|bonjour|bonsoir|coucou|dis-moi)\s+)?(?:pixel|pixelle|pixels|picel)\b[\s,:\-\.\!\?]*(.*)',
+                # En mode mains-libres, détecter le mot-clé d'éveil "Pixel" (avec variantes courantes de transcription, même précédé de quelques mots)
+                wake_match = re.search(
+                    r'(.*?)\b(?:pixel|pixelle|pixels|picel|picsel|pixl)\b[\s,:\-\.\!\?]*(.*)',
                     text,
                     re.IGNORECASE | re.DOTALL
                 )
@@ -1925,15 +2010,22 @@ class MainWindow(QMainWindow):
                     self.input_field.setText("")
                     self.input_field.setPlaceholderText("Mot-clé « Pixel » non détecté — phrase ignorée.")
                     if not self.is_recording and not self.is_speaking_session and not self.is_speaking_sentence:
-                        QTimer.singleShot(800, self.start_microphone_recording)
+                        QTimer.singleShot(400, self.start_microphone_recording)
                     return
 
-                cleaned_text = wake_match.group(1).strip()
+                after_wake = wake_match.group(2).strip()
+                before_wake = re.sub(
+                    r'^[\s,:\-\.\!\?]*(?:hey|ok|dis|salut|bonjour|bonsoir|coucou|dis-moi|alors|euh|bon)\b[\s,:\-\.\!\?]*',
+                    '',
+                    wake_match.group(1),
+                    flags=re.IGNORECASE
+                ).strip()
+                cleaned_text = after_wake if after_wake else before_wake
                 
                 # Nettoyer les mots-clés d'envoi éventuels en fin de phrase
                 cleaned_text = re.sub(r'[\s,:\-\.\!\?]*(envoi|envoyer|envoie)[\s,:\-\.\!\?]*$', '', cleaned_text, flags=re.IGNORECASE).strip()
                 
-                if cleaned_text and cleaned_text.lower() not in ("pixel", "pixelle", "pixels", "picel"):
+                if cleaned_text and cleaned_text.lower() not in ("pixel", "pixelle", "pixels", "picel", "picsel", "pixl"):
                     self.input_field.setText(cleaned_text)
                     self.send_chat_message()
                 else:
@@ -1941,7 +2033,7 @@ class MainWindow(QMainWindow):
                     self.input_field.setText("")
                     self.input_field.setPlaceholderText("Pixel : Oui ? Je vous écoute...")
                     if not self.is_recording:
-                        QTimer.singleShot(800, self.start_microphone_recording)
+                        QTimer.singleShot(400, self.start_microphone_recording)
             else:
                 # Manual microphone activation: strip trailing send keyword if present
                 cleaned_text = re.sub(r'[\s,:\-\.\!\?]*(envoi|envoyer|envoie)[\s,:\-\.\!\?]*$', '', text, flags=re.IGNORECASE).strip()
@@ -1951,11 +2043,13 @@ class MainWindow(QMainWindow):
         else:
             self.input_field.setText("")
             self.input_field.setPlaceholderText("Aucune voix détectée. Réessayez.")
-            if self.continuous_voice and not self.is_recording:
-                QTimer.singleShot(1200, self.start_microphone_recording)
+            if self.continuous_voice and not self.is_recording and not self.is_speaking_session and not self.is_speaking_sentence:
+                QTimer.singleShot(400, self.start_microphone_recording)
 
     # ── TTS ENGINE (PIPER/GO BACKEND) ──
     def start_speech_session(self):
+        if self.is_recording:
+            self.stop_microphone_recording()
         self.stop_speaking()
         self.is_speaking_session = True
         self.speech_queue = []
@@ -1968,6 +2062,13 @@ class MainWindow(QMainWindow):
         if not self.voice_enabled or getattr(self, "tts_thoughts_stopped", False):
             return
         self.speech_buffer += chunk
+
+        # Si le buffer correspond à un message d'échec de tâche, le remplacer par un court résumé vocal et stopper le reste
+        summary = self._summarize_task_failure_for_tts(self.speech_buffer)
+        if summary is not None and self.speech_buffer.strip() != summary:
+            self.speech_queue.clear()
+            self.speech_buffer = summary
+            self.tts_thoughts_stopped = True
         
         # Check if we hit the thought markers in the accumulated buffer
         thought_markers = [
@@ -2014,10 +2115,8 @@ class MainWindow(QMainWindow):
                     self.speech_buffer = sentence + self.speech_buffer
                     break
                     
-                # Clean HTML/XML and markdown
-                sentence = re.sub(r'<thought>.*?</thought>', '', sentence, flags=re.DOTALL)
-                sentence = re.sub(r'<[^>]+>', '', sentence)
-                sentence = re.sub(r'\*\*|\*|`|###|##|#', '', sentence).strip()
+                # Clean HTML/XML, markdown and human vocal tics ("Hm", "Hmm", "Hum", "Euh")
+                sentence = self._clean_tts_sentence(sentence)
                 
                 # Verify that it has at least one alphanumeric character
                 if len(sentence) > 1 and any(char.isalnum() for char in sentence):
@@ -2039,11 +2138,7 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(1200, self.start_microphone_recording)
             return
             
-        remaining = self.speech_buffer.strip()
-        # Clean HTML/XML and markdown
-        remaining = re.sub(r'<thought>.*?</thought>', '', remaining, flags=re.DOTALL)
-        remaining = re.sub(r'<[^>]+>', '', remaining)
-        remaining = re.sub(r'\*\*|\*|`|###|##|#', '', remaining).strip()
+        remaining = self._clean_tts_sentence(self.speech_buffer)
         
         if len(remaining) > 1 and any(char.isalnum() for char in remaining):
             self.speech_queue.append(remaining)
@@ -2085,8 +2180,8 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(80, self._play_next_tts_sentence)
 
     def _on_media_status_changed(self, status):
-        # Detect end of audio file
-        if status == QMediaPlayer.MediaStatus.EndOfMedia:
+        # Detect end of audio file or invalid media
+        if status in (QMediaPlayer.MediaStatus.EndOfMedia, QMediaPlayer.MediaStatus.InvalidMedia):
             self.is_speaking_sentence = False
             
             # Clean up the localized wav file

@@ -1854,14 +1854,15 @@ class MainWindow(QMainWindow):
         self.is_recording = True
         self.btn_mic.setText("🔴")
         self.btn_mic.setStyleSheet("background: rgba(239, 68, 68, 0.2); border: 2px solid #ef4444;")
-        self.input_field.setPlaceholderText("Pixel vous écoute... Cliquez sur 🔴 ou parlez.")
+        self.input_field.setPlaceholderText("Pixel vous écoute... Dites « Pixel » suivi de votre demande." if self.continuous_voice else "Pixel vous écoute... Cliquez sur 🔴 ou parlez.")
         
         # Start QThread-based recording with real-time silence detection
         self._safe_stop_thread("record_thread", 1000)
         self.record_thread = RecordReaderThread(is_handsfree=self.continuous_voice)
         self._track_thread(self.record_thread)
         self.record_thread.finished_signal.connect(self.handle_record_finished, Qt.ConnectionType.QueuedConnection)
-        self.record_thread.speech_started_signal.connect(self.stop_speaking, Qt.ConnectionType.QueuedConnection)
+        if not self.continuous_voice:
+            self.record_thread.speech_started_signal.connect(self.stop_speaking, Qt.ConnectionType.QueuedConnection)
         self.record_thread.start()
 
     def stop_microphone_recording(self):
@@ -1906,17 +1907,26 @@ class MainWindow(QMainWindow):
             has_send_keyword = text.lower().rstrip('.,!?* ').endswith(('envoi', 'envoyer', 'envoie'))
             
             if self.continuous_voice:
-                # Si la phrase commence par "Pixel", on retire le mot-clé pour garder uniquement la question
-                match = re.match(r'^pixel([\s,:\-\.\!\?]+|$)(.*)', text, re.IGNORECASE)
-                if match and match.group(2).strip():
-                    cleaned_text = match.group(2).strip()
-                else:
-                    cleaned_text = text.strip()
+                # En mode mains-libres, exiger le mot-clé d'éveil "Pixel" (avec variantes courantes de transcription)
+                wake_match = re.match(
+                    r'^[\s,:\-\.\!\?]*(?:(?:hey|ok|dis|salut|bonjour|bonsoir|coucou|dis-moi)\s+)?(?:pixel|pixelle|pixels|picel)\b[\s,:\-\.\!\?]*(.*)',
+                    text,
+                    re.IGNORECASE | re.DOTALL
+                )
+                if not wake_match:
+                    print(f"[GUI] Mains-libres : transcription ignorée (absence du mot-clé 'Pixel') : '{text}'")
+                    self.input_field.setText("")
+                    self.input_field.setPlaceholderText("Mot-clé « Pixel » non détecté — phrase ignorée.")
+                    if not self.is_recording and not self.is_speaking_session and not self.is_speaking_sentence:
+                        QTimer.singleShot(800, self.start_microphone_recording)
+                    return
+
+                cleaned_text = wake_match.group(1).strip()
                 
                 # Nettoyer les mots-clés d'envoi éventuels en fin de phrase
                 cleaned_text = re.sub(r'[\s,:\-\.\!\?]*(envoi|envoyer|envoie)[\s,:\-\.\!\?]*$', '', cleaned_text, flags=re.IGNORECASE).strip()
                 
-                if cleaned_text and cleaned_text.lower() != "pixel":
+                if cleaned_text and cleaned_text.lower() not in ("pixel", "pixelle", "pixels", "picel"):
                     self.input_field.setText(cleaned_text)
                     self.send_chat_message()
                 else:
@@ -1924,7 +1934,7 @@ class MainWindow(QMainWindow):
                     self.input_field.setText("")
                     self.input_field.setPlaceholderText("Pixel : Oui ? Je vous écoute...")
                     if not self.is_recording:
-                        QTimer.singleShot(1200, self.start_microphone_recording)
+                        QTimer.singleShot(800, self.start_microphone_recording)
             else:
                 # Manual microphone activation: strip trailing send keyword if present
                 cleaned_text = re.sub(r'[\s,:\-\.\!\?]*(envoi|envoyer|envoie)[\s,:\-\.\!\?]*$', '', text, flags=re.IGNORECASE).strip()

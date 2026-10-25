@@ -1175,6 +1175,16 @@ class VoiceController {
         this.voiceSelect.disabled = true;
     }
 
+    /* ── Filtrage du mot-clé d'éveil en mode Mains Libres ─────────────── */
+    _extractHandsfreeCommand(text) {
+        if (!text) return null;
+        const wakeMatch = text.match(/^[\s,:\-\.\!\?]*(?:(?:hey|ok|dis|salut|bonjour|bonsoir|coucou|dis-moi)\s+)?(?:pixel|pixelle|pixels|picel)\b[\s,:\-\.\!\?]*(.*)/is);
+        if (!wakeMatch) return null;
+        let cleaned = wakeMatch[1].trim();
+        cleaned = cleaned.replace(/[\s,:\-\.\!\?]*(?:envoi|envoyer|envoie)[\s,:\-\.\!\?]*$/i, '').trim();
+        return cleaned;
+    }
+
     /* ── Événements Recognition ───────────────────────────────────────── */
     _bindRecognitionEvents() {
         this.recognition.onstart = () => {
@@ -1199,13 +1209,39 @@ class VoiceController {
                 else interim += t;
             }
 
-            if (this.userInput) {
-                this.userInput.disabled = false;
-                this.userInput.value = final || interim;
-            }
+            if (this.handsfreeEnabled) {
+                if (!final) {
+                    const interimCmd = this._extractHandsfreeCommand(interim);
+                    if (this.userInput && interimCmd !== null) {
+                        this.userInput.disabled = false;
+                        this.userInput.value = interimCmd || 'Pixel...';
+                    }
+                    return;
+                }
 
-            // Résultat final : envoyer si mode mains-libres
-            if (final && this.handsfreeEnabled) {
+                const cmd = this._extractHandsfreeCommand(final);
+                if (cmd === null) {
+                    console.log("[VoiceController] Mains-libres : transcription ignorée (absence du mot-clé 'Pixel') :", final);
+                    if (this.userInput) {
+                        this.userInput.value = '';
+                        this.userInput.placeholder = '🎤 Dites « Pixel » suivi de votre demande...';
+                    }
+                    return;
+                }
+
+                if (!cmd) {
+                    if (this.userInput) {
+                        this.userInput.value = '';
+                        this.userInput.placeholder = '🎤 Pixel : Oui ? Je vous écoute...';
+                    }
+                    return;
+                }
+
+                if (this.userInput) {
+                    this.userInput.disabled = false;
+                    this.userInput.value = cmd;
+                }
+
                 setTimeout(() => {
                     if (this.chatForm && this.userInput && this.userInput.value.trim()) {
                         const submitBtn = this.chatForm.querySelector('button[type="submit"]');
@@ -1213,6 +1249,12 @@ class VoiceController {
                         else this.chatForm.dispatchEvent(new Event('submit', { cancelable: true }));
                     }
                 }, 300);
+                return;
+            }
+
+            if (this.userInput) {
+                this.userInput.disabled = false;
+                this.userInput.value = final || interim;
             }
         };
 
@@ -1410,7 +1452,9 @@ class VoiceController {
         if (this.userInput) {
             this.userInput.disabled = false;
             this.userInput.value = '';
-            this.userInput.placeholder = '🎤 Parlez maintenant...';
+            this.userInput.placeholder = this.handsfreeEnabled
+                ? '🎤 Dites « Pixel » suivi de votre demande...'
+                : '🎤 Parlez maintenant...';
         }
 
         // Si le mode navigateur cloud est explicitement configuré et disponible
@@ -1589,8 +1633,8 @@ class VoiceController {
                     silenceStart      = null;
                     silenceFrameCount = 0;
 
-                    // Barge-in : interruption si Pixel est en train de parler
-                    if (this.isSpeakingSession || this.isSpeakingSentence || this.currentAudio) {
+                    // Barge-in : interruption uniquement en mode manuel (évite que la musique coupe Pixel en mains-libres)
+                    if (!this.handsfreeEnabled && (this.isSpeakingSession || this.isSpeakingSentence || this.currentAudio)) {
                         console.log("[VoiceController] Barge-in : interruption vocale utilisateur");
                         this.stopSpeaking();
                     }
@@ -1684,16 +1728,34 @@ class VoiceController {
                         return;
                     }
 
-                    this.userInput.value = cleaned;
                     if (this.handsfreeEnabled) {
                         if (this.isSpeakingSession || this.isSpeakingSentence || this.currentAudio) {
                             console.warn("[VoiceController] Pixel a commencé à parler pendant la transcription. Annulation de l'envoi.");
                             this.userInput.value = "";
                             return;
                         }
-                        console.log('[VoiceController] Mode mains-libres : envoi automatique de la transcription :', cleaned);
+                        const cmd = this._extractHandsfreeCommand(cleaned);
+                        if (cmd === null) {
+                            console.log("[VoiceController] Mains-libres : transcription ignorée (absence du mot-clé 'Pixel') :", cleaned);
+                            this.userInput.value = "";
+                            this.userInput.placeholder = "🎤 Dites « Pixel » suivi de votre demande...";
+                            if (!this.isSpeakingSession) {
+                                setTimeout(() => this.startListening(true), 600);
+                            }
+                            return;
+                        }
+                        if (!cmd) {
+                            this.userInput.value = "";
+                            this.userInput.placeholder = "🎤 Pixel : Oui ? Je vous écoute...";
+                            if (!this.isSpeakingSession) {
+                                setTimeout(() => this.startListening(true), 600);
+                            }
+                            return;
+                        }
+                        this.userInput.value = cmd;
+                        console.log('[VoiceController] Mode mains-libres : envoi automatique de la commande :', cmd);
                         setTimeout(() => {
-                            if (this.chatForm && this.userInput && this.userInput.value.trim() === cleaned) {
+                            if (this.chatForm && this.userInput && this.userInput.value.trim() === cmd) {
                                 const submitBtn = this.chatForm.querySelector('button[type="submit"]');
                                 if (submitBtn) {
                                     submitBtn.click();
@@ -1703,6 +1765,7 @@ class VoiceController {
                             }
                         }, 300);
                     } else {
+                        this.userInput.value = cleaned;
                         this.userInput.focus();
                         this.userInput.select();
                         this.userInput.style.outline = '2px solid #f59e0b';

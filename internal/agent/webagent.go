@@ -523,8 +523,8 @@ func (w *WebAgent) PlayMusic(songQuery string) (string, error) {
 		go func() {
 			for i := 1; i <= 3; i++ {
 				time.Sleep(1500 * time.Millisecond)
-				fmt.Printf("[WebAgent] Tentative d'activation MPRIS #%d (volume 100%% + play)...\n", i)
-				exec.Command("playerctl", "volume", "1.0").Run()
+				fmt.Printf("[WebAgent] Tentative d'activation MPRIS #%d (volume 40%% + play)...\n", i)
+				exec.Command("playerctl", "volume", "0.4").Run()
 				exec.Command("playerctl", "play").Run()
 			}
 		}()

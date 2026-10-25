@@ -581,7 +581,6 @@ class MainWindow(QMainWindow):
         # Setup UI
         self.setup_ui()
         self.apply_qss()
-        self.set_handsfree(self.continuous_voice)
         
         # Timer for polling server info
         self.poll_timer = QTimer(self)
@@ -595,6 +594,9 @@ class MainWindow(QMainWindow):
         
         # Switch audio cards to duplex automatically
         self.ensure_duplex_profile()
+        
+        # Activate hands-free mode and microphone recording by default at launch
+        self.set_handsfree(self.continuous_voice)
         
     def _track_thread(self, thread):
         """Maintient une référence forte sur le QThread tant qu'il tourne pour éviter son garbage-collection prématuré."""
@@ -624,9 +626,9 @@ class MainWindow(QMainWindow):
             subprocess.run(["pactl", "set-default-sink", "alsa_output.pci-0000_65_00.6.analog-stereo"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             subprocess.run(["pactl", "set-default-source", "alsa_input.pci-0000_65_00.6.analog-stereo"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            # 2. Utilisation du serveur par défaut de CachyOS : PipeWire / WirePlumber
+            # 2. Utilisation du serveur par défaut de CachyOS : PipeWire / WirePlumber (volume par défaut à 40%)
             subprocess.run(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "0"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            subprocess.run(["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "1.0"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "0.4"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             subprocess.run(["wpctl", "set-mute", "@DEFAULT_AUDIO_SOURCE@", "0"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             subprocess.run(["wpctl", "set-volume", "@DEFAULT_AUDIO_SOURCE@", "1.0"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -647,7 +649,10 @@ class MainWindow(QMainWindow):
             else:
                 subprocess.run(["amixer", "-c", "Generic_1", "sset", "Speaker", "unmute", "100%"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 subprocess.run(["amixer", "-c", "Generic_1", "sset", "Bass Speaker", "unmute"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                subprocess.run(["amixer", "-c", "Generic_1", "sset", "Master", "unmute", "100%"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(["amixer", "-c", "Generic_1", "sset", "Master", "unmute", "40%"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            # Garantir le volume de sortie PipeWire à 40% après l'initialisation matérielle ALSA
+            subprocess.run(["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "0.4"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception as e:
             print(f"[GUI] Erreur configuration audio PipeWire : {e}")
             
@@ -697,6 +702,10 @@ class MainWindow(QMainWindow):
             self._track_thread(self.sse_thread)
             self.sse_thread.proactive_received.connect(self.handle_proactive_message, Qt.ConnectionType.QueuedConnection)
             self.sse_thread.start()
+
+            # Ensure hands-free microphone recording is active once connected
+            if self.continuous_voice and not self.is_recording and not self.is_speaking_session and not self.is_speaking_sentence:
+                self.start_microphone_recording()
         except Exception:
             self.connection_retry_count += 1
             self.chat_display.setHtml(
@@ -1179,10 +1188,8 @@ class MainWindow(QMainWindow):
             
         # Microphone state transition
         if enabled:
-            # Only start recording if initialization is complete
             if not self.is_recording and not self.is_speaking_session and not self.is_speaking_sentence:
-                if hasattr(self, "init_timer") and not self.init_timer.isActive():
-                    self.start_microphone_recording()
+                self.start_microphone_recording()
         else:
             if self.is_recording:
                 self.stop_microphone_recording()

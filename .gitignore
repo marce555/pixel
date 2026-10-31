@@ -35,6 +35,7 @@ __pycache__/
 
 # Audio, Media & Models
 *.wav
+!sounds/*.wav
 *.mp3
 *.flac
 *.onnx

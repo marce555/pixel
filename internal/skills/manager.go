@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -95,11 +96,18 @@ func (sm *SkillManager) GetRouterPromptExtension() string {
 		return ""
 	}
 
+	names := make([]string, 0, len(sm.skills))
+	for name := range sm.skills {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
 	var ext strings.Builder
 	ext.WriteString("\n\n--- ACTIONS DYNAMIQUES (SKILLS) ---\n")
 	ext.WriteString("Tu peux également choisir l'une de ces actions personnalisées si la demande correspond :\n")
 
-	for _, skill := range sm.skills {
+	for _, name := range names {
+		skill := sm.skills[name]
 		ext.WriteString(fmt.Sprintf("- \"skill_%s\" — %s\n", skill.Name, skill.RouterInstructions))
 	}
 	return ext.String()
@@ -114,11 +122,18 @@ func (sm *SkillManager) GetSkillsDescriptionForSystemPrompt() string {
 		return ""
 	}
 
+	names := make([]string, 0, len(sm.skills))
+	for name := range sm.skills {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
 	var sb strings.Builder
 	sb.WriteString("\n\n--- 🧩 TES BRIQUES ET SKILLS DYNAMIQUES CHARGÉES (MCP) ---\n")
 	sb.WriteString("Tu possèdes les briques autonomes (skills) suivantes chargées dans ton système, que tu peux exécuter :\n")
 
-	for _, skill := range sm.skills {
+	for _, name := range names {
+		skill := sm.skills[name]
 		desc := skill.Description
 		if desc == "" {
 			desc = skill.RouterInstructions

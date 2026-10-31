@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -75,9 +76,24 @@ type Server struct {
 }
 
 func NewServer(superior *agent.SuperiorAgent, coreMem *memory.CoreMemory, stm *memory.STM, sleepManager *agent.SleepManager, profiler *agent.ProfilingAgent, projectAgent *agent.ProjectAgent, projectManager *memory.ProjectManager, eventHub *EventHub, taskScheduler *scheduler.Scheduler, adaptiveProvider *llm.AdaptiveProvider) *Server {
-	vm, err := voice.NewVoiceManager()
-	if err != nil {
-		fmt.Printf("[Server] Impossible d'initialiser le VoiceManager : %v\n", err)
+	var vm *voice.VoiceManager
+	if taskScheduler != nil {
+		if sp := taskScheduler.GetVoiceSpeaker(); sp != nil {
+			if v, ok := sp.(*voice.VoiceManager); ok {
+				vm = v
+			}
+		}
+	}
+	if vm == nil {
+		var err error
+		vm, err = voice.NewVoiceManager()
+		if err != nil {
+			fmt.Printf("[Server] Impossible d'initialiser le VoiceManager : %v\n", err)
+		}
+	}
+
+	if stm != nil {
+		stm.RemoveGeminiExchanges()
 	}
 
 	return &Server{
@@ -134,6 +150,9 @@ func (s *Server) Start(port string) error {
 	// Local Voice Routes
 	http.HandleFunc("/api/voice/transcribe", s.handleVoiceTranscribe)
 	http.HandleFunc("/api/voice/speak", s.handleVoiceSpeak)
+
+	// Media Control Routes (Audio Ducking)
+	http.HandleFunc("/api/media/duck", s.handleMediaDuck)
 
 	fmt.Printf("[Web Server] Interface prête sur http://localhost:%s\n", port)
 	return http.ListenAndServe(":"+port, nil)
@@ -431,8 +450,15 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	msgs := s.stm.GetMessages()
+	filtered := make([]llm.Message, 0, len(msgs))
+	for _, m := range msgs {
+		if strings.Contains(m.Content, "[Échange autonome avec Gemini]") || strings.Contains(m.Content, "[Échange avec Gemini]") {
+			continue
+		}
+		filtered = append(filtered, m)
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(msgs)
+	json.NewEncoder(w).Encode(filtered)
 }
 
 func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
@@ -600,6 +626,24 @@ func (s *Server) handleVoiceSpeak(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "audio/wav")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(audioBytes)))
 	w.Write(audioBytes)
+}
+
+func (s *Server) handleMediaDuck(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Content-Type", "application/json")
+
+	duckParam := r.URL.Query().Get("active")
+	duck := duckParam == "true" || duckParam == "1"
+
+	targetVol := 18
+	if volParam := r.URL.Query().Get("volume"); volParam != "" {
+		if v, err := strconv.Atoi(volParam); err == nil && v >= 0 && v <= 100 {
+			targetVol = v
+		}
+	}
+
+	agent.DuckAllMedia(duck, targetVol)
+	w.Write([]byte(`{"status": "ok"}`))
 }
 
 // handleLocalModels proxies the /v1/models call to the configured local server

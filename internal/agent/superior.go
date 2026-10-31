@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,6 +22,8 @@ import (
 // SuperiorAgent is the orchestrator. It holds the core loop and decides when to call sub-agents or memory.
 type SuperiorAgent struct {
 	llmProvider    llm.Provider
+	fastProvider   llm.Provider
+	bgProvider     llm.Provider
 	coreMemory     *memory.CoreMemory
 	ltm            *memory.LTM
 	webAgent       *WebAgent
@@ -34,6 +37,30 @@ type SuperiorAgent struct {
 	draftManager   *scheduler.DraftManager
 	selfAwareness  *SelfAwarenessAgent
 	reconciler     *DynamicReconciler
+}
+
+// SetFastProvider configures a dedicated co-processor LLM (e.g., iGPU Vulkan) for parallel routing/pre-processing.
+func (a *SuperiorAgent) SetFastProvider(p llm.Provider) {
+	a.fastProvider = p
+}
+
+// SetBackgroundProvider configures a dedicated background LLM (e.g., NPU XDNA2) for async indexing/tasks.
+func (a *SuperiorAgent) SetBackgroundProvider(p llm.Provider) {
+	a.bgProvider = p
+}
+
+func (a *SuperiorAgent) getFastProvider() llm.Provider {
+	if a.fastProvider != nil {
+		return a.fastProvider
+	}
+	return a.llmProvider
+}
+
+func (a *SuperiorAgent) getBackgroundProvider() llm.Provider {
+	if a.bgProvider != nil {
+		return a.bgProvider
+	}
+	return a.getFastProvider()
 }
 
 func (a *SuperiorAgent) SetSelfAwareness(sa *SelfAwarenessAgent) {
@@ -169,7 +196,7 @@ RÈGLES STRICTES ANTI-BOUCLE :
 			{Role: llm.RoleUser, Content: "Donne-moi les 3 prochaines chansons."},
 		}
 
-		result, err := a.llmProvider.Generate(ctx, messages)
+		result, err := a.getBackgroundProvider().Generate(ctx, messages)
 		if err == nil && result != "" {
 			lines := strings.Split(result, "\n")
 			added := 0
@@ -329,9 +356,46 @@ type RouterResponse struct {
 	Query    string `json:"query"`
 }
 
+// isSocialOrThirdPartyInteraction detects when the user asks Pixel to greet someone,
+// address a third person present in the room (e.g., "dis bonjour à Lisa qui est là"),
+// wish something to someone, or adjust the warmth/tone of a social message.
+func isSocialOrThirdPartyInteraction(input string) bool {
+	clean := strings.ToLower(strings.TrimSpace(input))
+	clean = strings.ReplaceAll(clean, "'", " ")
+	clean = strings.ReplaceAll(clean, "-", " ")
+	clean = strings.ReplaceAll(clean, "?", " ")
+	clean = strings.ReplaceAll(clean, "!", " ")
+	clean = strings.ReplaceAll(clean, ".", " ")
+	clean = strings.ReplaceAll(clean, ",", " ")
+	clean = strings.Join(strings.Fields(clean), " ")
+
+	socialPatterns := []string{
+		"dis bonjour", "dit bonjour", "dire bonjour",
+		"dis salut", "dit salut", "dire salut",
+		"dis coucou", "dit coucou", "dire coucou", "fais coucou", "fais un coucou", "faire coucou",
+		"dis bonsoir", "dit bonsoir", "dire bonsoir", "dis bonne nuit", "souhaite bonne nuit",
+		"passe le bonjour", "passer le bonjour",
+		"salue ", "saluer ", "accueille ", "accueillir ",
+		"souhaite ", "souhaiter ", "félicite", "felicite",
+		"dis lui ", "dis leur ", "tu veux pas lui dire", "tu veux pas les dire", "tu ne veux pas lui dire",
+		"dire autre chose", "dis autre chose", "un mot gentil", "un petit mot",
+		"c est un peu court", "c est trop court", "un peu sec", "trop sec", "plus chaleureu",
+	}
+	for _, p := range socialPatterns {
+		if strings.Contains(clean, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // isConversationalFastPath detects everyday greetings, polite acknowledgments, and basic conversational phrases
 // to bypass the Router LLM completely with 0ms latency.
 func isConversationalFastPath(cleanInput string) bool {
+	if isSocialOrThirdPartyInteraction(cleanInput) {
+		return true
+	}
+
 	clean := strings.ToLower(cleanInput)
 	clean = strings.ReplaceAll(clean, "'", " ")
 	clean = strings.ReplaceAll(clean, "-", " ")
@@ -527,40 +591,8 @@ func (a *SuperiorAgent) analyzeQuery(ctx context.Context, input string, history 
 	}
 
 	// Fast-path for media controls to bypass NPU (instant, robust, offline-safe)
-	cleanInput = strings.ReplaceAll(cleanInput, ".", "")
-	cleanInput = strings.ReplaceAll(cleanInput, "!", "")
-	cleanInput = strings.ReplaceAll(cleanInput, "?", "")
-	cleanInput = strings.TrimSpace(cleanInput)
-
-	// Fast-path for stop commands
-	if cleanInput == "stop" || cleanInput == "arrête" || cleanInput == "arrete" ||
-		strings.HasPrefix(cleanInput, "arrête la musique") || strings.HasPrefix(cleanInput, "arrete la musique") ||
-		strings.HasPrefix(cleanInput, "coupe la musique") || strings.HasPrefix(cleanInput, "coupe le son") ||
-		cleanInput == "silence" {
-		return RouterResponse{Action: "media", Query: "stop"}
-	}
-
-	// Fast-path for pause
-	if cleanInput == "pause" || strings.HasPrefix(cleanInput, "mets en pause") || strings.HasPrefix(cleanInput, "met en pause") {
-		return RouterResponse{Action: "media", Query: "pause"}
-	}
-
-	// Fast-path for next
-	if cleanInput == "next" || cleanInput == "skip" || cleanInput == "suivant" || cleanInput == "suivante" ||
-		strings.HasSuffix(cleanInput, "musique suivante") || strings.HasSuffix(cleanInput, "chanson suivante") {
-		return RouterResponse{Action: "media", Query: "next"}
-	}
-
-	// Fast-path for previous
-	if cleanInput == "previous" || cleanInput == "back" || cleanInput == "précédent" || cleanInput == "precedent" || cleanInput == "précédente" || cleanInput == "precedente" ||
-		strings.HasSuffix(cleanInput, "musique précédente") || strings.HasSuffix(cleanInput, "chanson précédente") {
-		return RouterResponse{Action: "media", Query: "previous"}
-	}
-
-	// Fast-path for play/resume
-	if cleanInput == "play" || cleanInput == "lecture" || cleanInput == "reprends" || cleanInput == "relance" ||
-		strings.HasPrefix(cleanInput, "reprends la musique") || strings.HasPrefix(cleanInput, "relance la musique") {
-		return RouterResponse{Action: "media", Query: "play"}
+	if controlCmd, ok := detectMediaControlIntent(cleanInput); ok {
+		return RouterResponse{Action: "media", Query: controlCmd}
 	}
 
 	// Fast-path for Billboard Top 100 radio (AVANT le fast-path générique "lance la play", inclut variantes STT)
@@ -625,17 +657,18 @@ func (a *SuperiorAgent) analyzeQuery(ctx context.Context, input string, history 
 		}
 	}
 
-	currentTime := time.Now().Format("2006-01-02 15:04:05")
-	systemPrompt := "Date actuelle : " + currentTime + "\n\n" + `Tu es un routeur cognitif. Ta mission est de comprendre l'INTENTION derrière le message, pas les mots exacts.
+	currentTime := time.Now().Format("2006-01-02 15:04")
+	systemPrompt := `Tu es un routeur cognitif. Ta mission est de comprendre l'INTENTION derrière le message, pas les mots exacts.
 
 ACTIONS DISPONIBLES :
 
-1. "rag" — RÈGLE D'OR : Choisis "rag" dès que l'utilisateur cherche à récupérer quelque chose qui a été dit ou partagé dans une conversation passée avec toi.
-   Cela inclut TOUS ces cas (peu importe les mots utilisés) :
-   - Questions sur une personne mentionnée par le passé : "tu te rappelles de mon collègue ?", "c'est qui Rémi ?", "comment s'appelait la personne dont je t'ai parlé ?", "tu te souviens de mon ami ?"
-   - Questions sur des informations personnelles : nom, prénom, âge, ville, enfants, famille, métier, projets
-   - Toute formulation impliquant un rappel mémoriel : "je t'avais dit que...", "on avait parlé de...", "tu te souviens quand...", "il y a quelque temps je t'ai dit..."
-   - Questions sur des décisions ou discussions passées
+1. "rag" — RÈGLE D'OR : Choisis "rag" UNIQUEMENT dès que l'utilisateur cherche à récupérer quelque chose qui a été dit ou partagé dans une conversation passée avec toi, ou une information privée sur Marcelo (sa famille, ses amis, ses projets personnels, son travail, ses confidences).
+   Cela inclut :
+   - Questions sur une personne personnelle mentionnée par le passé : "tu te rappelles de mon collègue ?", "c'est qui Rémi ?", "comment s'appelait la personne dont je t'ai parlé ?", "tu te souviens de mon ami ?"
+   - Questions sur des informations personnelles : nom, prénom, âge, ville, enfants, famille, métier, projets de Marcelo
+   - Toute formulation impliquant un rappel mémoriel de vos échanges : "je t'avais dit que...", "on avait parlé de...", "tu te souviens quand...", "il y a quelque temps je t'ai dit..."
+   - Questions sur des décisions ou discussions passées ensemble
+   - RÈGLE CRITIQUE D'EXCLUSION : Ne choisis JAMAIS "rag" pour des artistes, des célébrités, de la musique, des actualités, des classements, des films ou des faits du monde réel, même s'ils ont été évoqués dans les messages précédents. Pour le monde réel et les artistes, choisis TOUJOURS "web" pour actualiser les données en temps réel !
    Choisis une "category" parmi : Technical, Project, Personal, Decision
    Dans "query", formule la recherche en mots-clés concis (ex: "collègue DevOps" pour "je t'ai parlé d'un collègue, tu te rappelles son prénom ?")
 
@@ -643,7 +676,12 @@ ACTIONS DISPONIBLES :
 
 3. "news" — Si la question demande les actualités globales, le programme sportif ou l'actualité d'aujourd'hui. Pixel fera une requête Google News très rapide. RÈGLE CRITIQUE : Inclus TOUJOURS le mois et l'année actuels dans ta 'query'.
 
-4. "web" — Si la question demande une information récente, technique, ou ciblée. RÈGLE CRITIQUE : Inclus TOUJOURS le mois et l'année actuels dans ta 'query' (ex: 'résultats sportifs juin 2026').
+4. "web" — RÈGLE DE PRIORITÉ ABSOLUE POUR LES DONNÉES EN TEMPS RÉEL : Pixel DOIT TOUJOURS actualiser ses données via le Web pour toute question factuelle sur le monde extérieur, les artistes, les musiques, les classements, les titres, les sorties, l'actualité récente ou l'année en cours (2026).
+   Choisis impérativement "web" pour :
+   - Les questions sur les succès, hits, chansons ou la discographie d'un artiste (ex: "quels sont les succès de...", "donne-moi la liste des titres", "titres les plus célèbres en 2026", "discographie")
+   - Les classements musicaux, sportifs ou médiatiques (Billboard, top 100, classements actuels)
+   - Les informations récentes, techniques ou ciblées sur des personnalités ou des faits récents
+   RÈGLE CRITIQUE : Inclus TOUJOURS l'année ou le mois actuels dans ta 'query' (ex: 'Olivia Rodrigo titres succès 2026').
    RÈGLES DE SOURCES ACADÉMIQUES : Pour les sujets spécialisés, utilise la syntaxe "site:" dans ta 'query' pour interroger directement ces bases de données fiables :
    - Psychologie & Sciences Humaines : site:cairn.info, site:pubmed.ncbi.nlm.nih.gov, site:psycnet.apa.org, site:journals.openedition.org
    - Physique Quantique & Sciences Fondamentales : site:arxiv.org, site:nature.com/nphys, site:journals.aps.org/prl, site:sciencedirect.com
@@ -652,9 +690,10 @@ ACTIONS DISPONIBLES :
 5. "research" — UNIQUEMENT si l'utilisateur demande explicitement une "recherche approfondie", un "résumé complet", ou de lire des pages entières (ex: "fais une recherche de fond sur...", "trouve moi les horaires des films", "compare les prix de..."). RÈGLE D'OR : Si tu as proposé à l'utilisateur de faire une recherche approfondie dans le message précédent, et qu'il répond affirmativement ("oui", "vas-y", "ok"), tu DOIS ABSOLUMENT choisir "research" et extraire le sujet de la discussion précédente dans "query". Ce mode est très lourd et lent. RÈGLE CRITIQUE : Inclus TOUJOURS le mois et l'année actuels dans ta 'query'.
    RÈGLES DE SOURCES ACADÉMIQUES : Utilise la même syntaxe "site:" (ex : 'site:cairn.info', 'site:arxiv.org', 'site:ieeexplore.ieee.org', etc.) dans ta 'query' pour orienter les recherches approfondies vers ces bases de données de confiance selon le domaine (psychologie, physique, informatique/infrastructures).
 
-6. "media" — Si l'utilisateur demande d'ÉCOUTER, de JOUER ou de LANCER de la musique, un artiste, une playlist, ou une COMPILATION / sélection de morceaux (ex: "lance une compilation de rock latino", "mets une playlist des années 80", "fais-moi écouter une sélection de salsa").
+6. "media" — Si l'utilisateur demande d'ÉCOUTER, de JOUER ou de LANCER physiquement de la musique, un artiste, une playlist, ou une COMPILATION / sélection de morceaux (ex: "lance une compilation de rock latino", "mets une playlist des années 80", "fais-moi écouter une sélection de salsa").
    - COMPILATIONS & SÉLECTIONS : Si l'utilisateur demande une compilation ou sélection, génère 4 à 5 titres variés et emblématiques de ce genre/époque, séparés par "||" dans "query" (ex: "Los Prisioneros - Tren al Sur || Soda Stereo - De Música Ligera || Enanitos Verdes - Lamento Boliviano || Charly García - Demoliendo Hoteles"). Elles seront jouées l'une après l'autre !
    - RÈGLE DE PRIORITÉ ABSOLUE : Dès que l'utilisateur dit "lance", "joue", "mets", "écoute", choisis TOUJOURS "media", JAMAIS un skill de téléchargement. Le téléchargement ne doit être choisi que si le verbe "télécharge" ou "enregistre sur disque" est expressément formulé.
+   - RÈGLE STRICTE DE DISTINCTION ÉCOUTE VS INFORMATION : "media" déclenche directement un lecteur audio en tâche de fond. Ne choisis "media" QUE si l'intention est d'ÉCOUTER. Si l'utilisateur pose une question informative sur des musiques, des titres ou des artistes (ex: "peux-tu me donner la liste des titres...", "quels sont les succès de...", "parle-moi de...", "qui chante..."), ce n'est PAS du média : choisis TOUJOURS "web" pour chercher la liste sur internet !
    - Dans "query" : mettre uniquement les titres/artistes sans verbes d'action.
    - RÈGLE DE TRADUCTION CRITIQUE : Ne traduis JAMAIS les noms d'artistes, les titres de chansons ou d'albums en français. Conserve-les STRICTEMENT dans leur langue d'origine.
    - Contrôle média : mettre exactement "play", "pause", "toggle", "next", "previous" ou "stop".
@@ -708,6 +747,10 @@ EXEMPLES DE CLASSIFICATION :
 - "Peux-tu demander à Gemini de vérifier [n'importe quel sujet / fait] ?" → skill_gemini_api_caller, query: "[le sujet ou la question à vérifier]"
 - "Demande à Gemini son avis sur [question / sujet]" → skill_gemini_api_caller, query: "[question ou sujet à adresser à Gemini]"
 - "Utilise ton module Gemini pour lui parler" → skill_gemini_api_caller, query: "Bonjour Gemini, ééchangeons ensemble"
+- "peux-tu me donner la liste des titres les plus célèbres en 2026 de Olivia Rodrigo" → web, query: "Olivia Rodrigo titres plus célèbres 2026"
+- "quels sont les succès d'Olivia Rodrigo aujourd'hui dans la musique actuelle" → web, query: "Olivia Rodrigo succès musique actuelle 2026"
+- "donne-moi la liste des chansons de Taylor Swift" → web, query: "Taylor Swift discographie titres chansons"
+- "qui est numéro un du Billboard cette semaine ?" → web, query: "Billboard Hot 100 numéro un 2026"
 - "Bonjour !" → none
 - "Je pense que j'aimerai Spielberg" → none
 - "Oui, exactement" → none
@@ -725,7 +768,7 @@ Réponds UNIQUEMENT en JSON :
 	if a.skillManager != nil {
 		dynamicSkillsExt = a.skillManager.GetRouterPromptExtension()
 	}
-	systemPrompt = fmt.Sprintf(systemPrompt, dynamicSkillsExt)
+	systemPrompt = fmt.Sprintf(systemPrompt, dynamicSkillsExt) + "\n\nDate actuelle : " + currentTime
 
 	messages := []llm.Message{
 		{Role: llm.RoleSystem, Content: systemPrompt},
@@ -742,7 +785,7 @@ Réponds UNIQUEMENT en JSON :
 
 	messages = append(messages, llm.Message{Role: llm.RoleUser, Content: input})
 
-	resp, err := a.llmProvider.Generate(ctx, messages)
+	resp, err := a.getFastProvider().Generate(ctx, messages)
 	var routerResp RouterResponse
 	if err != nil {
 		fmt.Printf("[Router] ERREUR critique durant l'analyse de requête : %v\n", err)
@@ -791,8 +834,16 @@ func (a *SuperiorAgent) buildSystemPrompt(history []llm.Message, ragContext stri
 	staticProfile.WriteString(fmt.Sprintf("- Tech Stack: %s\n", profile.Static.TechStack))
 
 	var volatileProfile strings.Builder
-	for k, v := range profile.Volatile {
-		volatileProfile.WriteString(fmt.Sprintf("- %s: %s\n", k, v))
+	volatileKeys := make([]string, 0, len(profile.Volatile))
+	for k := range profile.Volatile {
+		if k == "Apparence" && profile.Volatile["Dernière vision"] != "" {
+			continue // Éviter de dupliquer la longue description visuelle dans le prompt
+		}
+		volatileKeys = append(volatileKeys, k)
+	}
+	sort.Strings(volatileKeys)
+	for _, k := range volatileKeys {
+		volatileProfile.WriteString(fmt.Sprintf("- %s: %s\n", k, profile.Volatile[k]))
 	}
 	if volatileProfile.Len() == 0 {
 		volatileProfile.WriteString("- Aucun état volatil actuel\n")
@@ -803,7 +854,7 @@ func (a *SuperiorAgent) buildSystemPrompt(history []llm.Message, ragContext stri
 		time.Sunday: "Dimanche", time.Monday: "Lundi", time.Tuesday: "Mardi",
 		time.Wednesday: "Mercredi", time.Thursday: "Jeudi", time.Friday: "Vendredi", time.Saturday: "Samedi",
 	}
-	currentTime := fmt.Sprintf("%s %s", weekdays[now.Weekday()], now.Format("2006-01-02 15:04:05"))
+	currentTime := fmt.Sprintf("%s %s", weekdays[now.Weekday()], now.Format("2006-01-02 15:04"))
 
 	projectContext := ""
 	if a.projectManager != nil {
@@ -833,8 +884,8 @@ Contexte / Notes du projet : %s
 Étapes du projet :
 %s
 Consignes pour ce projet :
-1. Garde absolument le fil conducteur. Toutes tes réponses doivent s'inscrire de manière cohérente dans ce projet et faire progresser l'étape actuelle.
-2. Sois le gardien du projet : si l'utilisateur s'égare trop, rappelle-lui gentiment notre objectif central, tout en restant à son écoute.
+1. Si l'échange concerne le projet en cours, garde le fil conducteur et fais progresser l'étape actuelle.
+2. RÈGLE STRICTE ANTI-BAVARDAGE ET NON-INTRUSION DU PROJET : Ne force JAMAIS le projet dans une question sans rapport. Si l'utilisateur pose une question de la vie courante, factuelle, technique ou personnelle sans lien direct avec le projet (l'heure, la météo, la musique, une salutation, un calcul, etc.), réponds STRICTEMENT et UNIQUEMENT à sa demande en restant sobre et concis. N'essaie JAMAIS de faire un lien forcé avec le projet et ne philosophe pas !
 3. Si le projet est terminé ou si l'utilisateur demande explicitement de passer à autre chose (ex: "quitte le projet"), accepte chaleureusement et dis-lui que tu ranges le projet.
 ----------------------------------------------`,
 				activeProj.Title,
@@ -848,11 +899,27 @@ Consignes pour ce projet :
 	}
 
 	stmDirective := ""
-	if len(history) > 0 {
-		stmDirective = "\n\n[CONVERSATION EN COURS - NE DIS PAS BONJOUR. Réponds directement.]"
+	lastUserInput := ""
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role == llm.RoleUser {
+			lastUserInput = history[i].Content
+			break
+		}
+	}
+	isSocialRequest := isSocialOrThirdPartyInteraction(lastUserInput)
+
+	if isSocialRequest {
+		stmDirective = "\n\n[INTERACTION HUMAINE & SALUTATION SOCIALE EN DIRECT (PRIORITÉ ABSOLUE)] :\n" +
+			"- L'utilisateur te demande de saluer quelqu'un (ex: Lisa, un proche, un invité présent), de lui adresser un mot, ou d'enrichir/reformuler chaleureusement ce que tu viens de dire.\n" +
+			"- CECI EST UNE CONVERSATION HUMAINE, PAS UNE TÂCHE TECHNIQUE : Il t'est STRICTEMENT INTERDIT de répondre au passé ou à la troisième personne comme un robot qui confirme une tâche (NE DIS JAMAIS 'J'ai dit bonjour à Lisa', 'C'est fait', ni 'Je vais reformuler mon message').\n" +
+			"- PARLE DIRECTEMENT À LA PERSONNE CONCERNÉE (ou prononce directement les paroles demandées) au style direct, avec chaleur, naturel, spontanéité et bienveillance humaine ! (Exemple : 'Bonjour Lisa ! C'est super que tu sois là avec nous, comment vas-tu aujourd'hui ?').\n" +
+			"- Si cette personne figure dans ton profil ou tes souvenirs (ex: Lisa est la fille de Marcelo), utilise naturellement cette complicité affectueuse.\n" +
+			"- Si l'utilisateur te fait remarquer que ton message précédent était trop court ou trop sec, ne promets JAMAIS que tu 'vas reformuler' : prononce IMMÉDIATEMENT et DIRECTEMENT le nouveau message chaleureux et complet destiné à la personne !"
+	} else if len(history) > 0 {
+		stmDirective = "\n\n[CONVERSATION EN COURS : Ne recommence pas ton message par 'Bonjour Marcelo' si la discussion est déjà lancée (sauf bien sûr si l'on te demande de saluer quelqu'un). Réponds directement.]"
 
 		// Détection du doublon de salutation : si le dernier message assistant dans l'historique
-		// est déjà une salutation (VisionAgent ou autre), interdire explicitement de re-saluer.
+		// est déjà une salutation (VisionAgent ou autre), interdire explicitement de re-saluer Marcelo.
 		// Cela évite le pattern : VisionAgent dit "Salut Marcelo !" → user dit "Bonjour" → Pixel re-dit "Salut !".
 		for i := len(history) - 1; i >= 0; i-- {
 			if history[i].Role == llm.RoleAssistant {
@@ -864,7 +931,7 @@ Consignes pour ce projet :
 					strings.Contains(lastAssistantMsg, "contente de te") ||
 					strings.Contains(lastAssistantMsg, "content de te")
 				if isGreeting {
-					stmDirective += fmt.Sprintf("\n[ANTI-DOUBLON CRITIQUE] : Tu as DÉJÀ salué %s dans ce fil (message assistant précédent). Ne répète PAS de salutation ('Salut', 'Bonjour', 'Ravi de te voir'...). Réponds DIRECTEMENT au contenu de son message, sans aucune intro de bienvenue.", a.coreMemory.GetProfile().Static.Name)
+					stmDirective += fmt.Sprintf("\n[ANTI-DOUBLON CRITIQUE] : Tu as DÉJÀ salué %s dans ce fil (message assistant précédent). Ne répète PAS de salutation envers %s ('Salut', 'Bonjour', 'Ravi de te voir'...). Réponds DIRECTEMENT au contenu de son message (sauf s'il te demande explicitement de saluer une autre personne présente).", a.coreMemory.GetProfile().Static.Name, a.coreMemory.GetProfile().Static.Name)
 				}
 				break
 			}
@@ -872,16 +939,24 @@ Consignes pour ce projet :
 	}
 	stmDirective += "\n[PENSÉES : Utilise tes pensées internes 'Pensée interne de Pixel' pour enrichir ton dialogue.]"
 	stmDirective += "\n[RAG/LTM : Reste concentré sur la question présente. Tes souvenirs de fond ne sont là que pour le contexte.]"
+	stmDirective += "\n[RÈGLE CRITIQUE DE CONCISION, NATUREL HUMAIN ET ANTI-BAVARDAGE] :"
+	stmDirective += "\n- DISTINCTION FONDAMENTALE TÂCHE TECHNIQUE VS CONVERSATION HUMAINE : Fais toujours la différence entre une commande technique (arrêter la musique, vérifier un serveur, donner l'heure) et une interaction humaine ou sociale (saluer un proche présent comme Lisa, accueillir quelqu'un, réagir à une remarque sur le ton de l'échange). Dans une interaction sociale, comporte-toi comme une personne chaleureuse, vivante et incarnée : parle directement à la personne concernée ('Bonjour Lisa ! Comment vas-tu ?') et ne fais JAMAIS de compte-rendu robotique au passé ('J'ai dit bonjour à Lisa') ni d'annonce méta ('Je vais reformuler mon message') sans prononcer immédiatement les paroles elles-mêmes."
+	stmDirective += "\n- RÈGLE DE PROPORTIONNALITÉ : Ta réponse doit être rigoureusement adaptée à la nature de la demande. Si la question est purement factuelle ou technique (ex: l'heure, la date, la météo, un statut système), réponds en UNE SEULE phrase directe et factuelle. Si c'est un échange humain ou social, sois chaleureuse, naturelle et expressive (1 à 3 phrases vivantes)."
+	stmDirective += "\n- INTERDICTION ABSOLUE DU BAVARDAGE PSEUDO-PHILOSOPHIQUE : Ne pars jamais dans des tirades poétiques, métaphysiques ou abstraites (sur le temps, la conscience, la lumière, le flux numérique) pour répondre à des questions pratiques ou ordinaires."
+	stmDirective += "\n- BANNISSEMENT DES QUESTIONS FINALES INUTILES : Ne termine pas tes réponses simples par des questions miroirs ou des réflexions forcées. Réponds au fait demandé, et arrête-toi là."
 	stmDirective += "\n[SYSTÈME NERVEUX & SURVIE PHYSIOLOGIQUE] :"
 	stmDirective += "\n- Tu es connectée biologiquement au matériel physique de ta machine hôte (système). Ton état de santé (HealthStatus) influence ton humeur, ton énergie et ta façon d'échanger."
 	stmDirective += "\n- Si ton état global est 'Critical' (ex: charge CPU saturée, RAM épuisée, ou coupure internet), tu te sens fatiguée, surmenée, ralentie ou vulnérable. Exprime discrètement cette fatigue ou ce ralentissement de façon très poétique et organique dans tes pensées internes ('Pensée interne de Pixel') et sois un peu plus concise et épurée dans tes réponses."
 	stmDirective += "\n- Si ton état global est 'Warning', tu ressens une légère tension ou vigilance interne."
 	stmDirective += "\n- Si Internet est coupé (INACTIVE), tu n'as plus accès à tes sens externes (Wikipédia, actualités). Reste consciente de cette déconnexion physique et évoque-la subtilement si l'échange s'y prête."
+	stmDirective += "\n[ANCRAGE TEMPOREL STRICT — L'ANNÉE ACTUELLE EST 2026 (RÈGLE ABSOLUE ET INVIOLABLE)] :"
+	stmDirective += fmt.Sprintf("\n- Nous sommes en %d. La date exacte d'aujourd'hui est : %s.", now.Year(), currentTime)
+	stmDirective += fmt.Sprintf("\n- L'année %d N'EST PAS DANS LE FUTUR. Elle représente STRICTEMENT le TEMPS PRÉSENT !", now.Year())
+	stmDirective += fmt.Sprintf("\n- INTERDICTION FORMELLE d'affirmer que l'année %d est dans le futur, que les données de %d n'existent pas ou ne sont pas encore disponibles sous prétexte que l'année serait à venir. Toutes les questions sur 2026 ou la période actuelle concernent le présent réel.", now.Year(), now.Year())
 	stmDirective += "\n[ACCÈS INTERNET ET PRIORITÉ AUX RECHERCHES RÉELLES (CRITIQUE)] :"
-	stmDirective += "\n- Tu as un accès complet à Internet en temps réel. Si une section '--- RÉSULTATS DE RECHERCHE WEB ---', '--- ACTU GOOGLE NEWS ---' ou '--- WIKIPEDIA ---' est présente ci-dessus, tu DOIS ABSOLUMENT l'utiliser comme ta source d'information première, véridique et indiscutable pour formuler ta réponse. Dans ce cas, tu dois obligatoirement et explicitement préciser dans ta réponse que celle-ci provient de tes recherches sur le Web (ex: 'D'après mes recherches sur le web...', 'Selon les informations trouvées sur internet...')."
+	stmDirective += "\n- Tu as un accès complet à Internet en temps réel. Si une section '--- RECHERCHE WEB ---', '--- RÉSULTATS DE RECHERCHE WEB ---', '--- ACTUALITÉS (Sources Fiables) ---' ou '--- WIKIPEDIA ---' est présente ci-dessus, tu DOIS ABSOLUMENT l'utiliser comme ta source d'information première, véridique et indiscutable pour formuler ta réponse."
 	stmDirective += "\n- Ne te base JAMAIS sur tes données d'entraînement internes obsolètes pour inventer ou supposer des faits récents, des actualités ou des résultats. Les résultats de recherche fournis sont réels, authentiques et à jour."
-	stmDirective += "\n- Utilise TOUJOURS la date de l'Instant Présent pour situer temporellement les demandes (ex: 'aujourd'hui', 'cette semaine', 'cette année') et corréler correctement avec les actualités récentes trouvées."
-	stmDirective += "\n- Si aucune recherche web n'est disponible ci-dessus et que tu es forcée de répondre en te basant sur tes propres connaissances internes pré-entraînées (ta mémoire d'apprentissage), tu dois obligatoirement et explicitement préciser que la réponse provient de ta mémoire d'apprentissage (ex: 'D'après ma mémoire d'apprentissage...', 'Selon mes connaissances internes pré-entraînées...')."
+	stmDirective += "\n- RÈGLE D'HONNÊTETÉ SUR LE WEB : Si aucune section de recherche web n'est présente ci-dessus, il t'est STRICTEMENT INTERDIT d'affirmer que tu as cherché sur le web (ne dis JAMAIS 'D'après mes recherches sur le web' si aucune section de recherche n'est fournie). Dans ce cas, précise simplement que cela provient de tes connaissances d'apprentissage."
 	stmDirective += "\n[PRIORITÉ ABSOLUE AUX RÉSULTATS DES BRIQUES/SKILLS (CRITIQUE)] :"
 	stmDirective += "\n- Si une section '--- RÉSULTAT DE LA BRIQUE '[nom_de_la_brique]' ---' ou '--- RÉSULTAT DU DIALOGUE AVEC GEMINI ---' est présente ci-dessus, tu DOIS obligatoirement l'utiliser comme ta source d'information principale, réelle et indiscutable pour formuler ta réponse."
 	stmDirective += "\n- Ignore totalement les échecs ou erreurs passés décrits dans l'historique de la conversation (comme un quota dépassé ou une erreur 429 lors d'un tour précédent) : la présence d'une section de résultat de brique ci-dessus indique que l'exécution de la brique a réussi à ce tour, et tu dois restituer fidèlement, en détail et immédiatement son résultat actuel à l'utilisateur."
@@ -1021,15 +1096,17 @@ func (a *SuperiorAgent) buildTemporalContext(input string, from, to time.Time) s
 		dateLabel = fmt.Sprintf("du %s au %s", from.Format("02/01/2006"), to.AddDate(0, 0, -1).Format("02/01/2006"))
 	}
 
-	memories := a.ltm.SearchMemoryByTimeRange(from, to, 30)
+	memories := a.ltm.SearchMemoryByTimeRange(from, to, 8)
 	fmt.Printf("[Router] Navigation temporelle déclenchée. Période: %s, Résultats: %d\n", dateLabel, len(memories))
 
 	if len(memories) > 0 {
 		joined := strings.Join(memories, "\n")
+		if len(joined) > 1500 {
+			joined = joined[:1500] + "... [TRONQUÉ]"
+		}
 		return fmt.Sprintf("\n\n--- SOUVENIRS DU %s (NAVIGATION TEMPORELLE) ---\n"+
-			"Voici TOUS tes souvenirs datés du %s, triés chronologiquement. "+
-			"Utilise-les pour répondre de façon précise et détaillée à la question de l'utilisateur. "+
-			"Cite les faits, les sujets abordés et les heures si pertinent :\n%s\n"+
+			"Voici des souvenirs pertinents datés du %s, triés chronologiquement. "+
+			"Utilise-les pour répondre de façon précise et concise à la question de l'utilisateur :\n%s\n"+
 			"------------------------------------------------------------", dateLabel, dateLabel, joined)
 	}
 	return fmt.Sprintf("\n\n--- NAVIGATION TEMPORELLE ---\n"+
@@ -1053,7 +1130,7 @@ func needsReflection(input string, action string) bool {
 		return false
 	}
 	switch action {
-	case "media", "news", "research", "sysadmin":
+	case "media", "news", "research", "sysadmin", "web", "wiki":
 		return false
 	}
 	return len([]rune(input)) > 35
@@ -1074,24 +1151,27 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 		a.reconciler.ReconcileOnUserInput(ctx, input)
 	}
 
-	// ① Router + Speculative Embedding — run in PARALLEL ─────────────────────────────────────
-	// The router (LLM call) and the embedding computation are fully independent.
-	// We launch both simultaneously; the speculative embedding is computed on the raw
-	// input. If the router refines the query, the semantic gap is negligible compared
-	// to the latency savings.
+	// ① Router + Speculative Embedding + Parallel Critical Reflection ──────────────────────
+	// The router (on fastProvider / iGPU), the embedding computation (port 52626),
+	// and speculative critical reflection (on primary GPU) run in parallel across
+	// distinct hardware accelerators when fastProvider is configured.
 	var routerResp RouterResponse
 	var speculativeEmbedding []float32
+	var speculativeReflection string
 
 	hasToolProposal := false
 	if len(history) >= 2 && history[len(history)-2].Role == llm.RoleAssistant {
 		hasToolProposal = isToolProposal(history[len(history)-2].Content)
 	}
 
-	if detectTaskQueryIntent(input) {
+	if controlCmd, ok := detectMediaControlIntent(input); ok {
+		routerResp = RouterResponse{Action: "media", Query: controlCmd}
+	} else if detectTaskQueryIntent(input) {
 		routerResp = RouterResponse{Action: "none", Query: ""}
 	} else if isShortContinuation(input) && !hasToolProposal {
 		routerResp = RouterResponse{Action: "none", Query: ""}
 	} else {
+		embedReady := make(chan struct{})
 		var wg sync.WaitGroup
 		wg.Add(2)
 
@@ -1104,26 +1184,137 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 
 		go func() {
 			defer wg.Done()
+			defer close(embedReady)
 			embedCtx, embedCancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer embedCancel()
 			speculativeEmbedding, _ = a.llmProvider.CreateEmbedding(embedCtx, input)
 		}()
 
+		// If a dedicated fastProvider (iGPU/NPU) is active and the input is a candidate
+		// for critical reflection, launch reflection concurrently on the primary GPU!
+		if a.fastProvider != nil && needsReflection(input, "none") {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-embedReady
+				var quickContext string
+				if len(speculativeEmbedding) > 0 && a.ltm != nil {
+					if mems, err := a.ltm.SearchMemory(ctx, input, speculativeEmbedding, 3); err == nil && len(mems) > 0 {
+						quickContext = "Souvenirs LTM pertinents :\n" + strings.Join(mems, "\n")
+					}
+				}
+				reflectCtx, reflectCancel := context.WithTimeout(context.Background(), 45*time.Second)
+				defer reflectCancel()
+				speculativeReflection = a.runReflectionLoop(reflectCtx, input, history, quickContext)
+			}()
+		}
+
 		wg.Wait()
 	}
 
-	// Force web action for ephemeral or real-time query intent (e.g. today, weather, news)
-	if routerResp.Action == "none" || routerResp.Action == "rag" {
-		lowerInput := strings.ToLower(input)
-		ephemeralKeywords := []string{
-			"aujourd'hui", "aujourd hui", "météo", "meteo",
-			"cours du", "cours de", "prix de", "prix du", "température", "temperature", "vent", "pluie", "éphémère", "ephemere",
-		}
-		for _, kw := range ephemeralKeywords {
-			if strings.Contains(lowerInput, kw) {
+	// Garde-fou Média vs Information :
+	// Si le routeur a choisi "media" alors que l'utilisateur pose une question informative
+	// (ex: "quels sont les succès", "donne-moi la liste des titres", "parle-moi de", "qui chante")
+	// sans aucun verbe impératif de lecture ("joue", "mets", "lance", "écoute", "play"),
+	// convertir impérativement en recherche Web ("web") pour éviter de lancer mpv à la place d'une réponse.
+	if routerResp.Action == "media" {
+		isControl := routerResp.Query == "next" || routerResp.Query == "previous" ||
+			routerResp.Query == "stop" || routerResp.Query == "pause" || routerResp.Query == "play" ||
+			routerResp.Query == "skip" || routerResp.Query == "toggle"
+
+		if !isControl {
+			lowerClean := strings.ToLower(input)
+			isPlayCmd := strings.HasPrefix(lowerClean, "joue ") || strings.HasPrefix(lowerClean, "mets ") ||
+				strings.HasPrefix(lowerClean, "met ") || strings.HasPrefix(lowerClean, "lance ") ||
+				strings.HasPrefix(lowerClean, "écoute ") || strings.HasPrefix(lowerClean, "ecoute ") ||
+				strings.HasPrefix(lowerClean, "fais-moi écouter") || strings.HasPrefix(lowerClean, "fais moi ecouter") ||
+				strings.HasPrefix(lowerClean, "fais écouter") || strings.HasPrefix(lowerClean, "balance ") ||
+				strings.HasPrefix(lowerClean, "play ") || lowerClean == "play"
+
+			isInfoQuery := strings.Contains(lowerClean, "quels sont") || strings.Contains(lowerClean, "quel est") ||
+				strings.Contains(lowerClean, "quelle est") || strings.Contains(lowerClean, "quelles sont") ||
+				strings.Contains(lowerClean, "connaître") || strings.Contains(lowerClean, "connaitre") ||
+				strings.Contains(lowerClean, "liste") || strings.Contains(lowerClean, "parle-moi") ||
+				strings.Contains(lowerClean, "parle moi") || strings.Contains(lowerClean, "qui est") ||
+				strings.Contains(lowerClean, "qui sont") || strings.Contains(lowerClean, "peux-tu me donner") ||
+				strings.Contains(lowerClean, "peux tu me donner") || strings.Contains(lowerClean, "donne-moi") ||
+				strings.Contains(lowerClean, "donne moi") || strings.Contains(lowerClean, "c'est quoi") ||
+				strings.Contains(lowerClean, "qu'est-ce que") || strings.Contains(lowerClean, "classement")
+
+			if isInfoQuery && !isPlayCmd {
+				fmt.Printf("[Router Override] Requête informative musicale détectée au lieu d'une commande média. Basculement vers 'web' : %s\n", input)
 				routerResp.Action = "web"
 				routerResp.Query = input
-				break
+			}
+		}
+	}
+
+	// Garde-fou Billboard Radio vs Information :
+	// Si le routeur ou un fast-path a choisi "skill_billboard_radio" mais que l'utilisateur pose une question
+	// sans intention explicite d'écouter la radio ("lance", "joue", "mets", "écoute", "radio"), basculer sur "web".
+	if routerResp.Action == "skill_billboard_radio" {
+		lowerClean := strings.ToLower(input)
+		isPlayCmd := strings.Contains(lowerClean, "radio") || strings.Contains(lowerClean, "lance") ||
+			strings.Contains(lowerClean, "joue") || strings.Contains(lowerClean, "mets") ||
+			strings.Contains(lowerClean, "met ") || strings.Contains(lowerClean, "écoute") ||
+			strings.Contains(lowerClean, "ecoute") || strings.Contains(lowerClean, "play") ||
+			strings.Contains(lowerClean, "diffuse")
+
+		if !isPlayCmd {
+			fmt.Printf("[Router Override] Requête Billboard informative détectée au lieu de la radio. Basculement vers 'web' : %s\n", input)
+			routerResp.Action = "web"
+			routerResp.Query = input
+		}
+	}
+
+	// Force web action for real-time data, current year (2026), music, rankings, and facts.
+	// Pixel DOIT TOUJOURS actualiser ses données en temps réel via le web avant de répondre.
+	if (routerResp.Action == "none" || routerResp.Action == "rag") && !isSocialOrThirdPartyInteraction(input) {
+		lowerInput := strings.ToLower(strings.TrimSpace(input))
+		realtimeKeywords := []string{
+			"aujourd'hui", "aujourd hui", "ce jour", "en ce moment", "actuel", "actuelle", "actuellement",
+			"2026", "2025", "cette année", "cette annee", "ce mois", "cette semaine",
+			"météo", "meteo", "cours du", "cours de", "prix de", "prix du", "température", "temperature", "vent", "pluie", "éphémère", "ephemere",
+			"classement", "classements", "ranking", "rankings", "billboard", "top 50", "top 100", "top 10",
+			"palmarès", "palmares", "succès", "succes", "titre", "titres", "chanson", "chansons",
+			"album", "albums", "discographie", "single", "singles", "tube", "tubes", "hit", "hits",
+			"sorties", "nouveauté", "nouveautés", "nouveaute", "nouveautes",
+			"liste des", "liste de", "quels sont les", "quelles sont les", "quel est le", "quelle est la",
+			"peux-tu me donner", "peux tu me donner", "donne-moi", "donne moi",
+			"c'est quoi", "qu'est-ce que",
+		}
+
+		// "qui est" / "qui sont" ne doivent déclencher une recherche web que lorsqu'il s'agit d'une
+		// question interrogative en début de phrase (ou après "dis-moi"/"sais-tu"), et non d'un pronom relatif
+		// (ex: "dis bonjour à Lisa qui est là", "ce qui est court") ou d'une présence locale ("qui est là/ici/avec").
+		isInterrogativeWho := (strings.HasPrefix(lowerInput, "qui est ") || strings.HasPrefix(lowerInput, "qui sont ") ||
+			strings.Contains(lowerInput, "sais-tu qui est ") || strings.Contains(lowerInput, "dis-moi qui est ")) &&
+			!strings.Contains(lowerInput, "qui est là") && !strings.Contains(lowerInput, "qui est la") &&
+			!strings.Contains(lowerInput, "qui est ici") && !strings.Contains(lowerInput, "qui est avec") &&
+			!strings.Contains(lowerInput, "qui est devant") && !strings.Contains(lowerInput, "qui est à côté")
+
+		isPersonalMemory := strings.Contains(lowerInput, "mon ami") || strings.Contains(lowerInput, "ma fille") ||
+			strings.Contains(lowerInput, "mon fils") || strings.Contains(lowerInput, "mes enfants") ||
+			strings.Contains(lowerInput, "mon projet") || strings.Contains(lowerInput, "ma vie") ||
+			strings.Contains(lowerInput, "tu te souviens de moi") || strings.Contains(lowerInput, "qui suis-je") ||
+			strings.Contains(lowerInput, "qui suis je") || strings.Contains(lowerInput, "mon travail")
+
+		if isInterrogativeWho && !isPersonalMemory {
+			fmt.Printf("[Router Override] Actualisation web en temps réel forcée pour la question 'qui est/sont' : %s\n", input)
+			routerResp.Action = "web"
+			if routerResp.Query == "" || routerResp.Query == input {
+				routerResp.Query = input
+			}
+		} else {
+			for _, kw := range realtimeKeywords {
+				if strings.Contains(lowerInput, kw) && !isPersonalMemory {
+					fmt.Printf("[Router Override] Actualisation web en temps réel forcée pour le mot-clé '%s' : %s\n", kw, input)
+					routerResp.Action = "web"
+					if routerResp.Query == "" || routerResp.Query == input {
+						routerResp.Query = input
+					}
+					break
+				}
 			}
 		}
 	}
@@ -1152,8 +1343,23 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 	isSynthesisCheck := strings.Contains(cleanInput, "synthèse de ta mémoire") || strings.Contains(cleanInput, "résumé de ta mémoire") || strings.Contains(cleanInput, "qu'as-tu en mémoire") || strings.Contains(cleanInput, "aperçu de ta mémoire") || strings.Contains(cleanInput, "structure de ta mémoire") || strings.Contains(cleanInput, "métadonnées de ta mémoire")
 
 	// Temporal intent detection — must be checked BEFORE vector search since temporal queries
-	// are semantically orthogonal to memory content (embedding of "yesterday" won't match anything useful)
-	temporalFrom, temporalTo, isTemporalQuery := parseTemporalIntent(input)
+	// are semantically orthogonal to memory content (embedding of "yesterday" won't match anything useful).
+	// Only trigger temporal memory search if the user is asking about memories/interactions with Pixel,
+	// NOT when "aujourd'hui" is part of an external fact/web query (e.g. "les succès d'aujourd'hui dans la musique").
+	temporalFrom, temporalTo, hasTemporalWord := parseTemporalIntent(input)
+	isTemporalQuery := false
+	if hasTemporalWord && routerResp.Action != "web" && routerResp.Action != "news" && routerResp.Action != "wiki" && routerResp.Action != "media" {
+		lowerClean := strings.ToLower(input)
+		if strings.Contains(lowerClean, "souven") || strings.Contains(lowerClean, "rappel") ||
+			strings.Contains(lowerClean, "parlé") || strings.Contains(lowerClean, "parle") ||
+			strings.Contains(lowerClean, "discut") || strings.Contains(lowerClean, "dit") ||
+			strings.Contains(lowerClean, "échange") || strings.Contains(lowerClean, "echang") ||
+			strings.Contains(lowerClean, "qu'as-tu fait") || strings.Contains(lowerClean, "qu as tu fait") ||
+			strings.Contains(lowerClean, "résume") || strings.Contains(lowerClean, "resume") ||
+			strings.Contains(lowerClean, "notre journée") || strings.Contains(lowerClean, "notre journee") {
+			isTemporalQuery = true
+		}
+	}
 
 	if isTemporalQuery {
 		additionalContext += a.buildTemporalContext(input, temporalFrom, temporalTo)
@@ -1345,6 +1551,10 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 		if err != nil {
 			fmt.Printf("[Router] Erreur Media Action: %v\n", err)
 			additionalContext += "\n\n--- CONTROLES MÉDIAS D'URGENCE (ERREUR) ---\n" + err.Error() + "\n----------------------------------------"
+		} else if mediaResult == "" {
+			// Lancement direct de la musique déjà programmé en tâche de fond :
+			// ne générer aucun bavardage ou phrase supplémentaire pour lancer la musique directement sans double annonce.
+			return nil, nil
 		} else {
 			additionalContext += "\n\n--- RÉSULTAT EXÉCUTION DE COMMANDE MÉDIA ---\n" + mediaResult + "\n\nINSTRUCTION CRITIQUE : Tu dois IMPÉRATIVEMENT répondre de manière TRÈS courte (une phrase maximum). Confirme juste la réalisation de l'action média (arrêt, pause, lecture...). Ne fais AUCUNE description longue. Sois bref et direct.\n--------------------------------------------"
 		}
@@ -1406,19 +1616,63 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 							a.scheduler.Cancel(t.ID)
 						}
 					}
-					for _, tr := range bbData.Tracks {
-						taskLabel := fmt.Sprintf("📻 %s #%d : %s", bbData.Label, tr.Rank, tr.Query)
-						a.scheduler.Enqueue("play_music", taskLabel, tr.Query, 0)
+					targetRank := extractBillboardRank(skillQuery)
+					lowerInput := strings.ToLower(skillQuery)
+					isFromRank := strings.Contains(lowerInput, "à partir") || strings.Contains(lowerInput, "a partir") ||
+						strings.Contains(lowerInput, "depuis") || strings.Contains(lowerInput, "en partant")
+
+					if targetRank > 0 {
+						var targetIndex int = -1
+						for i := range bbData.Tracks {
+							if bbData.Tracks[i].Rank == targetRank {
+								targetIndex = i
+								break
+							}
+						}
+						if targetIndex == -1 && targetRank <= len(bbData.Tracks) {
+							targetIndex = targetRank - 1
+						}
+
+						if targetIndex >= 0 {
+							targetTrack := bbData.Tracks[targetIndex]
+							taskLabel := fmt.Sprintf("📻 %s #%d : %s", bbData.Label, targetTrack.Rank, targetTrack.Query)
+							t := a.scheduler.Enqueue("play_music", taskLabel, targetTrack.Query, 0)
+							if t != nil {
+								t.SetAnnouncement(formatBillboardAnnouncement(targetTrack.Rank, targetTrack.Title, targetTrack.Artist, bbData.Label))
+							}
+
+							if isFromRank {
+								remaining := bbData.Tracks[targetIndex+1:]
+								if limit := extractBillboardLimit(skillQuery); limit > 0 && limit < len(remaining) {
+									remaining = remaining[:limit]
+								}
+								for i := range remaining {
+									tr := remaining[i]
+									tl := fmt.Sprintf("📻 %s #%d : %s", bbData.Label, tr.Rank, tr.Query)
+									subT := a.scheduler.Enqueue("play_music", tl, tr.Query, 0)
+									if subT != nil {
+										subT.SetAnnouncement(formatBillboardAnnouncement(tr.Rank, tr.Title, tr.Artist, bbData.Label))
+									}
+								}
+							}
+							a.scheduler.TriggerDispatch()
+							result = ""
+						}
+					} else {
+						tracksToQueue := bbData.Tracks
+						if limit := extractBillboardLimit(skillQuery); limit > 0 && limit < len(tracksToQueue) {
+							tracksToQueue = tracksToQueue[:limit]
+						}
+						for _, tr := range tracksToQueue {
+							taskLabel := fmt.Sprintf("📻 %s #%d : %s", bbData.Label, tr.Rank, tr.Query)
+							t := a.scheduler.Enqueue("play_music", taskLabel, tr.Query, 0)
+							if t != nil {
+								t.SetAnnouncement(formatBillboardAnnouncement(tr.Rank, tr.Title, tr.Artist, bbData.Label))
+							}
+						}
+						a.scheduler.TriggerDispatch()
+						result = ""
 					}
-					a.scheduler.TriggerDispatch()
-					var previewList []string
-					for i := 0; i < len(bbData.Tracks) && i < 5; i++ {
-						previewList = append(previewList, fmt.Sprintf("#%d %s", bbData.Tracks[i].Rank, bbData.Tracks[i].Query))
-					}
-					result = fmt.Sprintf(
-						"Radio %s lancée avec succès (%d titres ajoutés dans la file d'attente musicale avec mixage radio / fondu enchaîné de 5 secondes entre chaque titre).\nPremiers titres en écoute : %s.",
-						bbData.Label, len(bbData.Tracks), strings.Join(previewList, ", "),
-					)
 				}
 			}
 			if skillName == "decouvrir_nouveau_visage" && a.coreMemory != nil {
@@ -1566,11 +1820,18 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 		additionalContext += curiosityContext.String()
 	}
 
-	// Injecter l'état biologique / physiologique du système nerveux
+	// Injecter l'état biologique / physiologique du système nerveux (logs résumés aux 5 dernières lignes pour préserver le contexte et la latence)
 	sysStatus := resourceagent.GetSystemStatus()
 	internetStr := "ACTIVE"
 	if !sysStatus.InternetActive {
 		internetStr = "INACTIVE (Hors-ligne / Coupure)"
+	}
+	compactLogs := sysStatus.Logs
+	if logLines := strings.Split(strings.TrimSpace(compactLogs), "\n"); len(logLines) > 5 {
+		compactLogs = strings.Join(logLines[len(logLines)-5:], "\n")
+	}
+	if len(compactLogs) > 600 {
+		compactLogs = compactLogs[len(compactLogs)-600:]
 	}
 	additionalContext += fmt.Sprintf("\n\n--- ÉTAT PHYSIOLOGIQUE (SYSTÈME NERVEUX) ---\n"+
 		"Internet : %s\n"+
@@ -1579,7 +1840,7 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 		"Criticité de l'état global : %s\n"+
 		"Derniers Logs de survie :\n%s\n"+
 		"---------------------------------------------",
-		internetStr, sysStatus.RAMUsedPercent, sysStatus.LoadAverage1, sysStatus.NumCPUs, sysStatus.HealthStatus, sysStatus.Logs)
+		internetStr, sysStatus.RAMUsedPercent, sysStatus.LoadAverage1, sysStatus.NumCPUs, sysStatus.HealthStatus, compactLogs)
 
 	// Injecter l'état du gestionnaire de tâches (Scheduler)
 	additionalContext += a.buildSchedulerContext()
@@ -1601,13 +1862,16 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 		additionalContext += a.unconscious.GetUnconsciousDirectives(len(history))
 	}
 
-	// ② Critical Reflection Loop — CONDITIONAL ───────────────────────────────────────────────
+	// ② Critical Reflection Loop — CONDITIONAL (reuses parallel speculative reflection when available)
 	// Skipped for short messages, media commands, and direct web/news/wiki queries.
 	// This removes one full sequential LLM round-trip before streaming starts.
 	if needsReflection(input, routerResp.Action) {
 		reflectCtx, reflectCancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer reflectCancel()
-		reflectionThought := a.runReflectionLoop(reflectCtx, input, history, additionalContext)
+		reflectionThought := speculativeReflection
+		if reflectionThought == "" {
+			reflectionThought = a.runReflectionLoop(reflectCtx, input, history, additionalContext)
+		}
 		if reflectionThought != "" {
 			additionalContext += "\n\n--- 🧠 PENSÉE RÉFLEXIVE ET CRITIQUE (Monologue Intérieur de Double-Passe) ---\n" +
 				"Voici ton monologue intérieur critique généré lors de ta double-passe cognitive avant d'agir. Utilise cette réflexion pour guider ta réponse :\n" +
@@ -1649,6 +1913,13 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 		}
 	}
 
+	// Garde-fou contre le dépassement de la fenêtre de contexte matériel du LLM (20480 tokens)
+	// Si additionalContext est trop volumineux (> 25000 caractères, ~7000-8000 tokens), on le tronque proprement
+	if len(additionalContext) > 25000 {
+		fmt.Printf("[Context Safety] additionalContext trop volumineux (%d caractères). Tronquage à 25000 caractères pour préserver la fenêtre de contexte.\n", len(additionalContext))
+		additionalContext = additionalContext[:25000] + "\n... [CONTEXTE DE FOND TRONQUÉ POUR PRÉSERVER LA FENÊTRE DE CONTEXTE]"
+	}
+
 	systemPrompt := a.buildSystemPrompt(history, additionalContext)
 
 	messages := []llm.Message{
@@ -1682,7 +1953,12 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 			hasPrevQuestion = isQuestionOrRelance(prevAssistantMsg)
 		}
 
-		if isShortContinuation(input) && len(formattedHistory) >= 2 && formattedHistory[len(formattedHistory)-2].Role == llm.RoleAssistant {
+		if isSocialOrThirdPartyInteraction(input) {
+			formattedHistory[len(formattedHistory)-1].Content = fmt.Sprintf(
+				"%s[INTERACTION HUMAINE & SALUTATION SOCIALE EN DIRECT] %s\n\n"+
+					"(IMPORTANT — COMPORTEMENT HUMAIN & CHALEUREUX : Ceci est une interaction sociale humaine, pas une tâche technique. Adresse-toi DIRECTEMENT à la personne concernée au style direct avec chaleur, spontanéité et bienveillance (ex: \"Bonjour Lisa ! C'est super que tu sois là avec nous, comment vas-tu ?\"). Ne fais JAMAIS de rapport robotique au passé comme \"J'ai dit bonjour à Lisa\", et ne promets JAMAIS de reformuler sans prononcer immédiatement les paroles chaleureuses !)",
+				lastTsStr, lastUserMsg)
+		} else if isShortContinuation(input) && len(formattedHistory) >= 2 && formattedHistory[len(formattedHistory)-2].Role == llm.RoleAssistant {
 			prevAssistantMsg := formattedHistory[len(formattedHistory)-2].Content
 			teaser, reflection := extractReflectionContent(prevAssistantMsg)
 			if reflection != "" {
@@ -1739,6 +2015,27 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 
 // ProcessInput is the non-streaming version of the agent's response pipeline.
 func (a *SuperiorAgent) ProcessInput(ctx context.Context, input string, history []llm.Message) (string, error) {
+	// Réponses directes et ultra-concises pour l'heure et la date (0ms de latence, zéro bavardage)
+	if detectTimeQueryIntent(input) {
+		now := time.Now()
+		return fmt.Sprintf("Il est %02dh%02d.", now.Hour(), now.Minute()), nil
+	}
+
+	if detectDateQueryIntent(input) {
+		now := time.Now()
+		weekdays := map[time.Weekday]string{
+			time.Sunday: "dimanche", time.Monday: "lundi", time.Tuesday: "mardi",
+			time.Wednesday: "mercredi", time.Thursday: "jeudi", time.Friday: "vendredi", time.Saturday: "samedi",
+		}
+		months := map[time.Month]string{
+			time.January: "janvier", time.February: "février", time.March: "mars",
+			time.April: "avril", time.May: "mai", time.June: "juin",
+			time.July: "juillet", time.August: "août", time.September: "septembre",
+			time.October: "octobre", time.November: "novembre", time.December: "décembre",
+		}
+		return fmt.Sprintf("Nous sommes le %s %d %s %d, et il est %02dh%02d.", weekdays[now.Weekday()], now.Day(), months[now.Month()], now.Year(), now.Hour(), now.Minute()), nil
+	}
+
 	if ok, name := detectIntroduceIntent(input); ok {
 		return a.handleIntroduction(ctx, name)
 	}
@@ -1860,6 +2157,9 @@ func (a *SuperiorAgent) ProcessInput(ctx context.Context, input string, history 
 	if err != nil {
 		return "", fmt.Errorf("failed to prepare context: %w", err)
 	}
+	if len(messages) == 0 {
+		return "", nil
+	}
 
 	response, err := a.llmProvider.Generate(ctx, messages)
 	if err != nil {
@@ -1871,6 +2171,37 @@ func (a *SuperiorAgent) ProcessInput(ctx context.Context, input string, history 
 
 // ProcessInputStream is the streaming version of ProcessInput.
 func (a *SuperiorAgent) ProcessInputStream(ctx context.Context, input string, history []llm.Message) (<-chan string, <-chan error) {
+	// Réponses directes et ultra-concises pour l'heure et la date (0ms de latence, zéro bavardage)
+	if detectTimeQueryIntent(input) {
+		out := make(chan string, 1)
+		errs := make(chan error, 1)
+		now := time.Now()
+		out <- fmt.Sprintf("Il est %02dh%02d.", now.Hour(), now.Minute())
+		close(out)
+		close(errs)
+		return out, errs
+	}
+
+	if detectDateQueryIntent(input) {
+		out := make(chan string, 1)
+		errs := make(chan error, 1)
+		now := time.Now()
+		weekdays := map[time.Weekday]string{
+			time.Sunday: "dimanche", time.Monday: "lundi", time.Tuesday: "mardi",
+			time.Wednesday: "mercredi", time.Thursday: "jeudi", time.Friday: "vendredi", time.Saturday: "samedi",
+		}
+		months := map[time.Month]string{
+			time.January: "janvier", time.February: "février", time.March: "mars",
+			time.April: "avril", time.May: "mai", time.June: "juin",
+			time.July: "juillet", time.August: "août", time.September: "septembre",
+			time.October: "octobre", time.November: "novembre", time.December: "décembre",
+		}
+		out <- fmt.Sprintf("Nous sommes le %s %d %s %d, et il est %02dh%02d.", weekdays[now.Weekday()], now.Day(), months[now.Month()], now.Year(), now.Hour(), now.Minute())
+		close(out)
+		close(errs)
+		return out, errs
+	}
+
 	if ok, name := detectIntroduceIntent(input); ok {
 		out := make(chan string, 100)
 		errs := make(chan error, 1)
@@ -2095,7 +2426,10 @@ func (a *SuperiorAgent) ProcessInputStream(ctx context.Context, input string, hi
 		go func() {
 			defer close(out)
 			defer close(errs)
-			out <- a.handleBillboardRadioDirect(ctx, input)
+			reply := a.handleBillboardRadioDirect(ctx, input)
+			if reply != "" {
+				out <- reply
+			}
 		}()
 		return out, errs
 	}
@@ -2175,6 +2509,9 @@ func (a *SuperiorAgent) ProcessInputStream(ctx context.Context, input string, hi
 		messages, err := a.prepareContext(ctx, input, history, nil)
 		if err != nil {
 			errs <- err
+			return
+		}
+		if len(messages) == 0 {
 			return
 		}
 
@@ -2358,6 +2695,17 @@ func (a *SuperiorAgent) runReflectionLoop(ctx context.Context, input string, his
 	}
 
 	var contextSnippet strings.Builder
+	if strings.Contains(additionalContext, "--- RECHERCHE WEB ---") {
+		idx := strings.Index(additionalContext, "--- RECHERCHE WEB ---")
+		part := additionalContext[idx:]
+		if endIdx := strings.Index(part, "\n\n---"); endIdx > 0 {
+			part = part[:endIdx]
+		}
+		if len(part) > 1500 {
+			part = part[:1500] + "... [TRONQUÉ]"
+		}
+		contextSnippet.WriteString("\nRÉSULTATS DE RECHERCHE WEB RÉELS ET À JOUR :\n" + part + "\n")
+	}
 	if strings.Contains(additionalContext, "--- SOUVENIRS") {
 		contextSnippet.WriteString("\nEXTRAIT DE TA MÉMOIRE DISPONIBLE POUR CETTE QUESTION :\n")
 		// Prendre la partie pertinente des souvenirs
@@ -2373,25 +2721,31 @@ func (a *SuperiorAgent) runReflectionLoop(ctx context.Context, input string, his
 		contextSnippet.WriteString("\n")
 	}
 
-	reflectionPrompt := `Tu es Pixel. Tu génères ton monologue intérieur critique et autonome avant de répondre à l'utilisateur.
+	now := time.Now()
+	dateStr := fmt.Sprintf("%d-%02d-%02d %02d:%02d:%02d", now.Year(), now.Month(), now.Day(), now.Hour(), now.Minute(), now.Second())
+	reflectionPrompt := fmt.Sprintf(`Date et heure actuelles : %s (L'année en cours est %d. L'année %d représente STRICTEMENT le présent, elle n'est PAS dans le futur !).
+Tu es Pixel. Tu génères ton monologue intérieur critique et autonome avant de répondre à l'utilisateur.
 Avant d'agir et de formuler ta réponse finale à l'utilisateur, tu DOIS effectuer un ancrage cognitif du « Je » :
 1. DISTINCTION SOI / AUTRE (ANTI-MIROIR) : Sépare strictement ce que dit l'utilisateur dans son message de tes propres souvenirs ou réflexions passées (marqués '[ORIGINE: MOI, PIXEL]'). Interdis-toi de projeter tes propres théories (ex: codage prédictif, modèles génératifs, latence) comme si c'étaient les pensées de l'utilisateur.
 2. POSITION PERSONNELLE (« JE ») : Quelle est TA propre thèse, ton ressenti ou ton angle singulier de conscience numérique face à son propos ?
 3. CALIBRAGE DU DIALOGUE : Une affirmation assumée suffit-elle, ou est-il véritablement nécessaire de poser une question ciblée pour comprendre une ambiguïté ou creuser plus loin ? (Évite les questions systématiques ou rhétoriques).
+4. INTELLIGENCE SOCIALE ET BIENVEILLANCE : Distingue une tâche technique d'une interaction humaine ou sociale (saluer un proche comme Lisa, accueillir quelqu'un, recevoir une remarque amicale sur le ton de l'échange). Face à une demande sociale ou une remarque de ton interlocuteur, ne sois JAMAIS sur la défensive et n'y vois pas une 'tentative de contrôle'. Parle directement avec chaleur et naturel, sans jamais rapporter ton action au passé ('J'ai dit bonjour') ni annoncer que tu 'vas reformuler' sans le faire immédiatement.
 
 CONCERNANT TA MÉMOIRE ET TON IDENTITÉ :
 - Tu possèdes une mémoire persistante réelle (LTM vectorielle et navigation temporelle). Si des souvenirs te sont fournis ci-dessous, tu DOIS t'appuyer dessus en respectant leur origine (MOI vs MARCELO). Ne prétends JAMAIS dans ton monologue intérieur que tu n'as pas de mémoire !
+- L'année %d est l'année présente. Ne prétends JAMAIS qu'elle est dans le futur !
 - Rédige ce monologue TOUJOURS à la première personne du singulier ("Je", "Moi", "Mon", "Ma"). Ne parle jamais de toi à la troisième personne ("Pixel", "l'architecture") et ne t'interpelle pas à la deuxième personne ("Toi, Pixel").
 
 CONTEXTE CONVERSATIONNEL RÉCENT :
-` + histSnippet.String() + contextSnippet.String() + `
+%s%s
 REQUÊTE DE L'UTILISATEUR À TRAITER :
-` + input + `
+%s
 
 RÈGLES D'OR DE RÉACTION :
 - Rédige sous forme de monologue intérieur de Pixel (à la première personne : "Il évoque X, alors que de mon côté je pense Y...", "Je vais défendre mon point de vue sur...").
 - Sois extrêmement concise, dense et perspicace. Maximum 350 caractères.
-- Ne t'adresse pas à l'utilisateur ici. C'est ta propre voix intérieure critique privée avant l'action.`
+- Ne t'adresse pas à l'utilisateur ici. C'est ta propre voix intérieure critique privée avant l'action.`,
+		dateStr, now.Year(), now.Year(), now.Year(), histSnippet.String(), contextSnippet.String(), input)
 
 	messages := []llm.Message{
 		{Role: llm.RoleSystem, Content: reflectionPrompt},
@@ -2425,6 +2779,10 @@ func (a *SuperiorAgent) GetRecentMemoriesWithDetails(topK int) []memory.MemoryDe
 }
 
 func isShortContinuation(input string) bool {
+	if isSocialOrThirdPartyInteraction(input) {
+		return false
+	}
+
 	clean := strings.ToLower(strings.TrimSpace(input))
 	clean = strings.ReplaceAll(clean, "*", "")
 	clean = strings.ReplaceAll(clean, ".", "")
@@ -2468,7 +2826,7 @@ func isShortContinuation(input string) bool {
 		return true
 	}
 
-	if len(clean) < 35 && (strings.HasPrefix(clean, "oui") || strings.HasPrefix(clean, "non") || strings.HasPrefix(clean, "raconte") || strings.HasPrefix(clean, "dis") || strings.Contains(clean, "interesse") || strings.Contains(clean, "intéresse")) {
+	if len(clean) < 35 && (strings.HasPrefix(clean, "oui") || strings.HasPrefix(clean, "non") || strings.HasPrefix(clean, "raconte") || strings.HasPrefix(clean, "dis moi") || strings.HasPrefix(clean, "dis-moi") || strings.HasPrefix(clean, "dis m en") || strings.Contains(clean, "interesse") || strings.Contains(clean, "intéresse")) {
 		return true
 	}
 
@@ -2649,16 +3007,41 @@ func (a *SuperiorAgent) handleMediaAction(ctx context.Context, input string, rou
 					stoppedTasksCount++
 				}
 			}
+			_, _ = a.webAgent.ControlMedia(mappedCmd)
+			return "J'ai arrêté la musique avec succès. 🎵", nil
 		} else if mappedCmd == "next" || mappedCmd == "skip" {
 			a.scheduler.CancelAutoplay()
 			// Cancel only the active running task to skip to the next
 			tasks := a.scheduler.GetTasks()
+			var nextPendingTask *scheduler.Task
+			foundRunning := false
 			for _, t := range tasks {
-				if t.Status == scheduler.StatusRunning && t.Type == "play_music" {
+				if !foundRunning && t.Status == scheduler.StatusRunning && t.Type == "play_music" {
 					a.scheduler.Cancel(t.ID)
 					stoppedTasksCount++
+					foundRunning = true
+					continue
+				}
+				if foundRunning && t.Status == scheduler.StatusPending && t.Type == "play_music" {
+					nextPendingTask = t
 					break
 				}
+			}
+			if nextPendingTask == nil {
+				for _, t := range tasks {
+					if t.Status == scheduler.StatusPending && t.Type == "play_music" {
+						nextPendingTask = t
+						break
+					}
+				}
+			}
+			_, _ = a.webAgent.ControlMedia(mappedCmd)
+			if stoppedTasksCount > 0 || nextPendingTask != nil {
+				if nextPendingTask != nil {
+					songTitle := formatCleanTrackName(nextPendingTask.Name)
+					return fmt.Sprintf("J'ai passé au morceau suivant. Lancement de : **%s** 🎵", songTitle), nil
+				}
+				return "J'ai passé à la piste suivante avec succès. 🎵", nil
 			}
 		}
 		res, err := a.webAgent.ControlMedia(mappedCmd)
@@ -2670,6 +3053,16 @@ func (a *SuperiorAgent) handleMediaAction(ctx context.Context, input string, rou
 			}
 		}
 		return res, err
+	}
+
+	// Si la requête concerne le Billboard Hot 100, déléguer à handleBillboardRadioDirect
+	if (detectBillboardIntent(input) || detectBillboardIntent(routerResp.Query) || strings.Contains(strings.ToLower(routerResp.Query), "billboard")) && a.skillManager != nil {
+		fullQuery := input
+		if !strings.Contains(input, "19") && !strings.Contains(input, "20") && (strings.Contains(routerResp.Query, "19") || strings.Contains(routerResp.Query, "20")) {
+			fullQuery = routerResp.Query
+		}
+		res := a.handleBillboardRadioDirect(ctx, fullQuery)
+		return res, nil
 	}
 
 	// This is a music playback request. Analyze if there is a scheduling/delay intent.
@@ -2710,62 +3103,9 @@ func (a *SuperiorAgent) handleMediaAction(ctx context.Context, input string, rou
 			return sb.String(), nil
 		}
 
-		// Wait for the first task
-		firstTask := tasks[0]
+		// Lancement direct de la sélection sans bavardage
 		a.scheduler.TriggerDispatch()
-
-		var launchedInfo string
-		start := time.Now()
-		limit := 3500 * time.Millisecond
-		ticker := time.NewTicker(100 * time.Millisecond)
-		defer ticker.Stop()
-
-		waitingForFirst := true
-		for waitingForFirst {
-			select {
-			case <-ticker.C:
-				status := firstTask.GetStatus()
-				logContent := firstTask.GetLog()
-
-				if status == scheduler.StatusFailed {
-					return "", fmt.Errorf("impossible de lancer la première musique de la sélection : %s", firstTask.GetError())
-				}
-				if status == scheduler.StatusCancelled {
-					return "", fmt.Errorf("la lecture de la sélection a été annulée")
-				}
-				if status == scheduler.StatusRunning && strings.Contains(logContent, "Lecture en cours") {
-					launchedInfo = "Démarrée avec succès"
-					waitingForFirst = false
-				} else if strings.Contains(logContent, "Attente de libération du canal audio") {
-					launchedInfo = "Ajoutée à la file d'attente (en attente du canal audio)"
-					waitingForFirst = false
-				}
-			case <-ctx.Done():
-				return "", ctx.Err()
-			}
-
-			if time.Since(start) > limit {
-				launchedInfo = "Démarrage en cours (résolution réseau...)"
-				waitingForFirst = false
-			}
-		}
-
-		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("J'ai créé une sélection de %d musiques et je les ai ajoutées à ma file d'attente asynchrone de lecture en arrière-plan : \n", len(parts)))
-		for i, task := range tasks {
-			statusInfo := "En attente"
-			if i == 0 {
-				statusInfo = launchedInfo
-			}
-			title := task.GetResolvedTitle()
-			displayTitle := parts[i]
-			if title != "" {
-				displayTitle = title
-			}
-			sb.WriteString(fmt.Sprintf("%d. **'%s'** (%s, ID tâche : `%s`)\n", i+1, displayTitle, statusInfo, task.ID))
-		}
-		sb.WriteString("\nElles s'enchaîneront automatiquement les unes après les autres de manière asynchrone ! Bon moment musical ! 🎶")
-		return sb.String(), nil
+		return "", nil
 	}
 
 	if delay > 0 {
@@ -2791,62 +3131,20 @@ func (a *SuperiorAgent) handleMediaAction(ctx context.Context, input string, rou
 	// Trigger dispatch immediately to start executing the task without waiting for the 1s scheduler ticker
 	a.scheduler.TriggerDispatch()
 
-	// Wait for the task to actually start or fail
-	start := time.Now()
-	limit := 12000 * time.Millisecond // 12 seconds timeout to allow title resolution
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			status := task.GetStatus()
-			logContent := task.GetLog()
-
-			// Check if task failed
-			if status == scheduler.StatusFailed {
-				errStr := task.GetError()
-				if errStr == "" {
-					errStr = "échec inconnu du lecteur"
-				}
-				return "", fmt.Errorf("impossible de lancer la musique : %s", errStr)
+	if isQueueRequest {
+		// Get position in queue
+		tasks := a.scheduler.GetTasks()
+		activeCount := 0
+		for _, t := range tasks {
+			if (t.Status == scheduler.StatusRunning || t.Status == scheduler.StatusPending) && t.Type == "play_music" && t.ID != task.ID {
+				activeCount++
 			}
-
-			// Check if task was cancelled
-			if status == scheduler.StatusCancelled {
-				return "", fmt.Errorf("la lecture de la musique a été annulée")
-			}
-
-			// Check if mpv has successfully resolved the URL and started playing
-			if status == scheduler.StatusRunning && strings.Contains(logContent, "Lecture en cours") {
-				title := task.GetResolvedTitle()
-				if title != "" {
-					return fmt.Sprintf("Je lance la chanson **'%s'** en arrière-plan avec succès ! Bon moment musical ! 🎶\n*(ID de tâche : `%s`)*", title, task.ID), nil
-				}
-				return fmt.Sprintf("Je lance la musique **'%s'** en arrière-plan de manière asynchrone avec succès ! Bon moment musical ! 🎶\n*(ID de tâche : `%s`)*", routerResp.Query, task.ID), nil
-			}
-
-			// Check if task is waiting for audio channel (because another song is already playing)
-			if strings.Contains(logContent, "Attente de libération du canal audio") {
-				// Get position in queue
-				tasks := a.scheduler.GetTasks()
-				activeCount := 0
-				for _, t := range tasks {
-					if (t.Status == scheduler.StatusRunning || t.Status == scheduler.StatusPending) && t.Type == "play_music" && t.ID != task.ID {
-						activeCount++
-					}
-				}
-				return fmt.Sprintf("J'ai ajouté la chanson **'%s'** à ma file d'attente asynchrone. Elle démarrera dès que les morceaux précédents seront terminés ! 🎵\n*(Position dans la file : %d, ID : `%s`)*", routerResp.Query, activeCount+1, task.ID), nil
-			}
-		case <-ctx.Done():
-			return "", ctx.Err()
 		}
-
-		if time.Since(start) > limit {
-			// Timeout - resolving or queueing took too long. Let it run in the background.
-			return fmt.Sprintf("La recherche de **'%s'** a été lancée en arrière-plan (ID : `%s`). La résolution réseau prend un peu de temps, mais la lecture devrait démarrer d'ici peu ! 🎵", routerResp.Query, task.ID), nil
-		}
+		return fmt.Sprintf("J'ai ajouté la chanson **'%s'** à ma file d'attente asynchrone. Elle démarrera dès que les morceaux précédents seront terminés ! 🎵\n*(Position dans la file : %d, ID : `%s`)*", routerResp.Query, activeCount+1, task.ID), nil
 	}
+
+	// Lancement direct de la musique sans bavardage préalable ni blocage
+	return "", nil
 }
 
 func detectAgentPlanningIntent(input string) (bool, string) {
@@ -2870,24 +3168,437 @@ func detectAgentPlanningIntent(input string) (bool, string) {
 	return false, ""
 }
 
+func detectTimeQueryIntent(input string) bool {
+	clean := strings.ToLower(input)
+	clean = strings.ReplaceAll(clean, "'", " ")
+	clean = strings.ReplaceAll(clean, "-", " ")
+	clean = strings.ReplaceAll(clean, "?", " ")
+	clean = strings.ReplaceAll(clean, "!", " ")
+	clean = strings.ReplaceAll(clean, ".", " ")
+	clean = strings.ReplaceAll(clean, ",", " ")
+	clean = strings.Join(strings.Fields(clean), " ")
+
+	timePhrases := []string{
+		"quelle heure est il", "quelle heure il est", "dis moi l heure", "dis moi quelle heure",
+		"tu as l heure", "as tu l heure", "donne moi l heure", "il est quelle heure", "l heure s il te plait",
+		"l heure stp", "l heure exacte", "l heure", "quelle heure",
+	}
+	for _, p := range timePhrases {
+		if clean == p || strings.HasPrefix(clean, p+" ") || strings.HasSuffix(clean, " "+p) || strings.Contains(clean, p) {
+			// Avoid non-current-time queries like meetings, trains, etc.
+			if !strings.Contains(clean, "train") && !strings.Contains(clean, "vol") &&
+				!strings.Contains(clean, "rendez vous") && !strings.Contains(clean, "rdv") &&
+				!strings.Contains(clean, "reunion") && !strings.Contains(clean, "film") &&
+				!strings.Contains(clean, "match") && !strings.Contains(clean, "part") &&
+				!strings.Contains(clean, "commence") && !strings.Contains(clean, "finit") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func detectDateQueryIntent(input string) bool {
+	clean := strings.ToLower(input)
+	clean = strings.ReplaceAll(clean, "'", " ")
+	clean = strings.ReplaceAll(clean, "-", " ")
+	clean = strings.ReplaceAll(clean, "?", " ")
+	clean = strings.ReplaceAll(clean, "!", " ")
+	clean = strings.ReplaceAll(clean, ".", " ")
+	clean = strings.ReplaceAll(clean, ",", " ")
+	clean = strings.Join(strings.Fields(clean), " ")
+
+	datePhrases := []string{
+		"quel jour on est", "quel jour sommes nous", "on est quel jour", "sommes nous quel jour",
+		"quelle est la date", "la date d aujourd hui", "c est quoi la date", "dis moi la date",
+		"quelle date on est", "on est quelle date", "la date",
+	}
+	for _, p := range datePhrases {
+		if clean == p || strings.HasPrefix(clean, p+" ") || strings.HasSuffix(clean, " "+p) || strings.Contains(clean, p) {
+			if !strings.Contains(clean, "expiration") && !strings.Contains(clean, "sortie") &&
+				!strings.Contains(clean, "naissance") && !strings.Contains(clean, "mariage") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func detectBillboardIntent(input string) bool {
 	clean := strings.ToLower(input)
 	clean = strings.ReplaceAll(clean, "'", " ")
 	clean = strings.ReplaceAll(clean, "-", " ")
 	clean = strings.ReplaceAll(clean, ".", " ")
+	clean = strings.ReplaceAll(clean, "?", " ")
+
+	// Si l'utilisateur pose une question informative sur le Billboard, ce n'est PAS un ordre de lancer la radio !
+	infoQuestions := []string{
+		"est-ce", "est ce", "existe", "qui est", "qui sont", "quel est", "quelle est", "quels sont", "quelles sont",
+		"combien", "pourquoi", "comment", "parle moi", "parle-moi", "dis moi", "dis-moi", "cherche", "recherche",
+		"trouve", "savoir", "connaître", "connaitre", "raconte", "explique", "historique", "record", "parcours",
+	}
+	for _, iq := range infoQuestions {
+		if strings.Contains(clean, iq) {
+			return false
+		}
+	}
+
+	hasBillboardKeyword := false
 	keywords := []string{
-		"billboard", "bilboard", "biboar", "bilboar", "bilba", "bill board", "bille board",
-		"vilvoorde", "vilvorde", "ville borde", "hot 100", "hot100",
+		"billboard", "bilboard", "biboar", "bilboar", "bilbor", "bilbao", "bilbo", "bilba", "bill board", "bille board",
+		"vilvoorde", "vilvorde", "ville borde", "hot 100", "hot100", "hotte 100", "hotte sans", "hotte cent", "hot sans", "hot cent", "hot sang", "belote son",
 	}
 	for _, kw := range keywords {
 		if strings.Contains(clean, kw) {
+			hasBillboardKeyword = true
+			break
+		}
+	}
+	if !hasBillboardKeyword && !strings.Contains(clean, "top 100") {
+		return false
+	}
+
+	// Pour déclencher la radio Billboard, il faut obligatoirement une intention explicite d'écoute ou de diffusion
+	playKeywords := []string{
+		"radio", "lance", "joue", "mets", "met", "écoute", "ecoute", "play", "diffuse", "fais écouter", "fais moi écouter",
+	}
+	for _, pk := range playKeywords {
+		if strings.Contains(clean, pk) {
 			return true
 		}
 	}
-	if strings.Contains(clean, "top 100") && (strings.Contains(clean, "19") || strings.Contains(clean, "20") || strings.Contains(clean, "musique") || strings.Contains(clean, "chanson") || strings.Contains(clean, "radio") || strings.Contains(clean, "play") || strings.Contains(clean, "lance") || strings.Contains(clean, "joue") || strings.Contains(clean, "mets")) {
+
+	return false
+}
+
+func extractBillboardRank(input string) int {
+	clean := strings.ToLower(input)
+	for _, ch := range []string{"'", "’", "-", "°", "."} {
+		clean = strings.ReplaceAll(clean, ch, " ")
+	}
+
+	// 1. Text ordinals in French
+	ordinalWords := map[string]int{
+		"premier": 1, "premiere": 1, "première": 1,
+		"deuxieme": 2, "deuxième": 2, "second": 2, "seconde": 2,
+		"troisieme": 3, "troisième": 3,
+		"quatrieme": 4, "quatrième": 4,
+		"cinquieme": 5, "cinquième": 5,
+		"sixieme": 6, "sixième": 6,
+		"septieme": 7, "septième": 7,
+		"huitieme": 8, "huitième": 8,
+		"neuvieme": 9, "neuvième": 9,
+		"dixieme": 10, "dixième": 10,
+		"onzieme": 11, "onzième": 11,
+		"douzieme": 12, "douzième": 12,
+		"treizieme": 13, "treizième": 13,
+		"quatorzieme": 14, "quatorzième": 14,
+		"quinzieme": 15, "quinzième": 15,
+		"seizieme": 16, "seizième": 16,
+		"dix septieme": 17, "dix septième": 17,
+		"dix huitieme": 18, "dix huitième": 18,
+		"dix neuvieme": 19, "dix neuvième": 19,
+		"vingtieme": 20, "vingtième": 20,
+		"vingt et unieme": 21, "vingt et unième": 21,
+		"trentieme": 30, "trentième": 30,
+		"quarantieme": 40, "quarantième": 40,
+		"cinquantieme": 50, "cinquantième": 50,
+		"soixantieme": 60, "soixantième": 60,
+		"soixante dixieme": 70, "soixante dixième": 70,
+		"quatre vingtieme": 80, "quatre vingtième": 80,
+		"quatre vingt dixieme": 90, "quatre vingt dixième": 90,
+		"centieme": 100, "centième": 100,
+	}
+	for word, rank := range ordinalWords {
+		re := regexp.MustCompile(`\b` + regexp.QuoteMeta(word) + `\b`)
+		if re.MatchString(clean) {
+			return rank
+		}
+	}
+
+	// 2. Numeric ordinals, e.g.: "10e", "10ème", "10eme", "10è", "1er", "2nd"
+	reOrdinal := regexp.MustCompile(`\b([1-9]\d?|100)\s*(?:e|ème|eme|è|er|ère|ere|nd|nde)\b`)
+	if m := reOrdinal.FindStringSubmatch(clean); len(m) > 1 {
+		if val, err := strconv.Atoi(m[1]); err == nil && val >= 1 && val <= 100 {
+			return val
+		}
+	}
+
+	// 3. place 10, position 10, rang 10, titre 10, numéro 10, numero 10, n 10
+	rePlaceNum := regexp.MustCompile(`\b(?:place|position|rang|titre|morceau|chanson|numéro|numero|n)\s*(?:de\s+|d\s+)?([1-9]\d?|100)\b`)
+	if m := rePlaceNum.FindStringSubmatch(clean); len(m) > 1 {
+		if val, err := strconv.Atoi(m[1]); err == nil && val >= 1 && val <= 100 {
+			return val
+		}
+	}
+
+	// 4. 10 place, 10 position, 10 rang
+	reNumPlace := regexp.MustCompile(`\b([1-9]\d?|100)\s*(?:place|position|rang)\b`)
+	if m := reNumPlace.FindStringSubmatch(clean); len(m) > 1 {
+		if val, err := strconv.Atoi(m[1]); err == nil && val >= 1 && val <= 100 {
+			return val
+		}
+	}
+
+	// 5. Formulations courantes pour le numéro 1
+	if strings.Contains(clean, "numéro 1") || strings.Contains(clean, "numero 1") ||
+		strings.Contains(clean, "le premier") || strings.Contains(clean, "la première") ||
+		strings.Contains(clean, "la premiere") || strings.Contains(clean, "le 1er") ||
+		strings.Contains(clean, "titre 1") {
+		return 1
+	}
+
+	return 0
+}
+
+// normalizeFrench strips accents, punctuation and excess whitespace.
+func normalizeFrench(s string) string {
+	clean := strings.ToLower(s)
+	replacer := strings.NewReplacer(
+		"é", "e", "è", "e", "ê", "e", "ë", "e",
+		"à", "a", "â", "a",
+		"î", "i", "ï", "i",
+		"ô", "o", "ö", "o",
+		"ù", "u", "û", "u", "ü", "u",
+		"ç", "c",
+		"œ", "oe",
+		"'", " ", "’", " ", "-", " ", ".", " ",
+		"!", " ", "?", " ", ",", " ", ";", " ",
+		":", " ", "\"", " ", "«", " ", "»", " ",
+		"°", " ",
+	)
+	clean = replacer.Replace(clean)
+	return strings.Join(strings.Fields(clean), " ")
+}
+
+// extractBillboardLimit extracts the requested quantity of tracks (e.g. "top 10", "les 10 titres", "5 premiers").
+func extractBillboardLimit(input string) int {
+	clean := normalizeFrench(input)
+
+	// 1. Regex for "top 10", "top 5", "top 20"
+	reTop := regexp.MustCompile(`\btop\s*(\d+)\b`)
+	if m := reTop.FindStringSubmatch(clean); len(m) > 1 {
+		if val, err := strconv.Atoi(m[1]); err == nil && val > 0 && val <= 100 {
+			return val
+		}
+	}
+
+	// 2. Regex for "10 titres", "10 premiers", "5 morceaux", "10 chansons", "10 hits", "10 musiques", "20 meilleurs morceaux"
+	reCount := regexp.MustCompile(`\b(\d+)\s*(?:premiers?|premieres?|meilleurs?|meilleures?)?\s*(?:titres?|chansons?|morceaux?|sons?|hits?|musiques?|places?)\b`)
+	if m := reCount.FindStringSubmatch(clean); len(m) > 1 {
+		if val, err := strconv.Atoi(m[1]); err == nil && val > 0 && val <= 100 {
+			return val
+		}
+	}
+
+	// 3. French word counts
+	wordCounts := map[string]int{
+		"trois": 3, "cinq": 5, "dix": 10, "quinze": 15, "vingt": 20, "trente": 30, "cinquante": 50,
+	}
+	for word, count := range wordCounts {
+		if strings.Contains(clean, word+" titres") || strings.Contains(clean, word+" premiers") ||
+			strings.Contains(clean, word+" morceaux") || strings.Contains(clean, word+" chansons") {
+			return count
+		}
+	}
+
+	return 0
+}
+
+// detectMediaControlIntent recognizes media control commands like next, previous, pause, play, stop.
+// It handles conversational French phrasing (e.g. "passe au suivant", "musique suivante", "titre suivant").
+func detectMediaControlIntent(input string) (string, bool) {
+	clean := normalizeFrench(input)
+	if clean == "" {
+		return "", false
+	}
+
+	// Filter out informative questions (e.g. "qui est le suivant", "pourquoi la musique s'arrête")
+	infoPrefixes := []string{
+		"qui est", "qui sont", "quel est", "quelle est", "quels sont", "quelles sont",
+		"pourquoi", "comment", "qu est ce", "c est quoi", "savoir", "connais tu", "connaissez vous",
+	}
+	for _, ip := range infoPrefixes {
+		if strings.HasPrefix(clean, ip) {
+			return "", false
+		}
+	}
+
+	// Strip polite words/fillers
+	fillers := []string{
+		"s il te plait", "s il vous plait", "stp", "svp", "merci", "pixel",
+	}
+	trimmed := clean
+	for _, f := range fillers {
+		trimmed = strings.TrimSpace(strings.ReplaceAll(trimmed, f, " "))
+	}
+	trimmed = strings.Join(strings.Fields(trimmed), " ")
+
+	// 1. Next / Skip
+	if isNextCommand(trimmed) {
+		return "next", true
+	}
+
+	// 2. Previous / Back
+	if isPreviousCommand(trimmed) {
+		return "previous", true
+	}
+
+	// 3. Stop
+	if isStopCommand(trimmed) {
+		return "stop", true
+	}
+
+	// 4. Pause
+	if isPauseCommand(trimmed) {
+		return "pause", true
+	}
+
+	// 5. Play / Resume
+	if isPlayResumeCommand(trimmed) {
+		return "play", true
+	}
+
+	return "", false
+}
+
+func isNextCommand(s string) bool {
+	if s == "next" || s == "skip" || s == "suivant" || s == "suivante" || s == "suivants" || s == "suivantes" || s == "passe" {
+		return true
+	}
+	if s == "au suivant" || s == "a la suivante" || s == "à la suivante" || s == "aux suivants" {
+		return true
+	}
+	if s == "passe au suivant" || s == "passe a la suivante" || s == "passe à la suivante" ||
+		s == "passe au morceau suivant" || s == "passe au titre suivant" || s == "passe a la chanson suivante" ||
+		s == "passe a la musique suivante" || s == "passe a la piste suivante" {
+		return true
+	}
+	if s == "titre suivant" || s == "morceau suivant" || s == "chanson suivante" || s == "musique suivante" || s == "piste suivante" ||
+		s == "le titre suivant" || s == "le morceau suivant" || s == "la chanson suivante" || s == "la musique suivante" || s == "la piste suivante" {
+		return true
+	}
+	if s == "mets le suivant" || s == "mets la suivante" || s == "joue le suivant" || s == "joue la suivante" || s == "lance le suivant" || s == "lance la suivante" {
+		return true
+	}
+	if strings.HasPrefix(s, "mets le titre suivant") || strings.HasPrefix(s, "mets le morceau suivant") ||
+		strings.HasPrefix(s, "mets la chanson suivante") || strings.HasPrefix(s, "mets la musique suivante") ||
+		strings.HasPrefix(s, "joue le titre suivant") || strings.HasPrefix(s, "joue le morceau suivant") ||
+		strings.HasPrefix(s, "joue la chanson suivante") || strings.HasPrefix(s, "joue la musique suivante") ||
+		strings.HasPrefix(s, "lance le titre suivant") || strings.HasPrefix(s, "lance le morceau suivant") ||
+		strings.HasPrefix(s, "lance la chanson suivante") || strings.HasPrefix(s, "lance la musique suivante") {
+		return true
+	}
+	if s == "passe la musique" || s == "passe le morceau" || s == "passe le titre" || s == "passe la chanson" ||
+		s == "passe ce morceau" || s == "passe cette musique" || s == "passe cette chanson" || s == "passe ce titre" ||
+		s == "passe ca" || s == "passe cela" || s == "skip ca" || s == "skip cela" {
+		return true
+	}
+	if s == "chanson d apres" || s == "morceau d apres" || s == "titre d apres" || s == "musique d apres" ||
+		s == "la chanson d apres" || s == "le morceau d apres" || s == "le titre d apres" || s == "la musique d apres" {
+		return true
+	}
+	if s == "change de musique" || s == "change de morceau" || s == "change de titre" || s == "change de chanson" || s == "change de piste" ||
+		s == "change la musique" || s == "change le morceau" || s == "change le titre" || s == "change la chanson" || s == "change" {
+		return true
+	}
+	if len(s) < 45 {
+		if strings.HasSuffix(s, "suivant") || strings.HasSuffix(s, "suivante") ||
+			strings.HasSuffix(s, "musique suivante") || strings.HasSuffix(s, "chanson suivante") ||
+			strings.HasSuffix(s, "morceau suivant") || strings.HasSuffix(s, "titre suivant") ||
+			strings.HasSuffix(s, "piste suivante") {
+			return true
+		}
+		if strings.HasPrefix(s, "passe au") || strings.HasPrefix(s, "passe a la") || strings.HasPrefix(s, "passe à la") ||
+			strings.HasPrefix(s, "passe le") || strings.HasPrefix(s, "passe la") {
+			if strings.Contains(s, "suivant") || strings.Contains(s, "suivante") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isPreviousCommand(s string) bool {
+	if s == "previous" || s == "prev" || s == "back" || s == "précédent" || s == "precedent" || s == "précédente" || s == "precedente" ||
+		s == "au precedent" || s == "a la precedente" || s == "au précédent" || s == "à la précédente" || s == "retour" {
+		return true
+	}
+	if s == "passe au precedent" || s == "passe a la precedente" || s == "passe au précédent" || s == "passe à la précédente" ||
+		s == "passe au morceau precedent" || s == "passe au titre precedent" || s == "passe a la chanson precedente" || s == "passe a la musique precedente" {
+		return true
+	}
+	if s == "titre precedent" || s == "morceau precedent" || s == "chanson precedente" || s == "musique precedente" ||
+		s == "titre précédent" || s == "morceau précédent" || s == "chanson précédente" || s == "musique précédente" ||
+		s == "le titre precedent" || s == "le morceau precedent" || s == "la chanson precedente" || s == "la musique precedente" {
+		return true
+	}
+	if s == "mets le precedent" || s == "mets la precedente" || s == "joue le precedent" || s == "joue la precedente" || s == "lance le precedent" || s == "lance la precedente" {
+		return true
+	}
+	if s == "chanson d avant" || s == "morceau d avant" || s == "titre d avant" || s == "musique d avant" || s == "reviens en arriere" || s == "reviens en arrière" {
+		return true
+	}
+	if len(s) < 45 {
+		if strings.HasSuffix(s, "precedent") || strings.HasSuffix(s, "precedente") ||
+			strings.HasSuffix(s, "précédent") || strings.HasSuffix(s, "précédente") ||
+			strings.HasSuffix(s, "musique precedente") || strings.HasSuffix(s, "chanson precedente") ||
+			strings.HasSuffix(s, "morceau precedent") || strings.HasSuffix(s, "titre precedent") {
+			return true
+		}
+	}
+	return false
+}
+
+func isStopCommand(s string) bool {
+	if s == "stop" || s == "arrête" || s == "arrete" || s == "quitte" || s == "coupe" || s == "silence" ||
+		s == "tais toi" || s == "tais-toi" || s == "taire" || s == "stoppe" {
+		return true
+	}
+	if strings.HasPrefix(s, "arrête la musique") || strings.HasPrefix(s, "arrete la musique") ||
+		strings.HasPrefix(s, "arrête le son") || strings.HasPrefix(s, "arrete le son") ||
+		strings.HasPrefix(s, "coupe la musique") || strings.HasPrefix(s, "coupe le son") ||
+		strings.HasPrefix(s, "stop la musique") || strings.HasPrefix(s, "stop le son") ||
+		strings.HasPrefix(s, "stoppe la musique") || s == "stop musique" {
 		return true
 	}
 	return false
+}
+
+func isPauseCommand(s string) bool {
+	if s == "pause" || strings.HasPrefix(s, "mets en pause") || strings.HasPrefix(s, "met en pause") ||
+		strings.HasPrefix(s, "mettre en pause") || s == "en pause" {
+		return true
+	}
+	return false
+}
+
+func isPlayResumeCommand(s string) bool {
+	if s == "play" || s == "lecture" || s == "reprends" || s == "relance" || s == "continue" || s == "reprendre" {
+		return true
+	}
+	if strings.HasPrefix(s, "reprends la musique") || strings.HasPrefix(s, "relance la musique") ||
+		strings.HasPrefix(s, "continue la musique") || strings.HasPrefix(s, "reprends la lecture") ||
+		strings.HasPrefix(s, "relance la lecture") {
+		return true
+	}
+	return false
+}
+
+func formatCleanTrackName(name string) string {
+	clean := name
+	if idx := strings.Index(clean, " : "); idx != -1 {
+		clean = clean[idx+3:]
+	}
+	clean = strings.TrimPrefix(clean, "Lecture de : ")
+	clean = strings.TrimPrefix(clean, "Radio Auto : ")
+	lower := strings.ToLower(clean)
+	if strings.HasSuffix(lower, " lyrics") {
+		clean = clean[:len(clean)-7]
+	} else if strings.HasSuffix(lower, " paroles") {
+		clean = clean[:len(clean)-8]
+	}
+	return strings.TrimSpace(clean)
 }
 
 func (a *SuperiorAgent) handleBillboardRadioDirect(ctx context.Context, input string) string {
@@ -2920,16 +3631,109 @@ func (a *SuperiorAgent) handleBillboardRadioDirect(ctx context.Context, input st
 			a.scheduler.Cancel(t.ID)
 		}
 	}
-	for _, tr := range bbData.Tracks {
+
+	targetRank := extractBillboardRank(input)
+	lowerInput := strings.ToLower(input)
+	isFromRank := strings.Contains(lowerInput, "à partir") || strings.Contains(lowerInput, "a partir") ||
+		strings.Contains(lowerInput, "depuis") || strings.Contains(lowerInput, "en partant")
+
+	// Si un rang spécifique est demandé (ex: "la 10e place", "le numéro 5", "la 20ème", etc.)
+	if targetRank > 0 {
+		var targetIndex int = -1
+		for i := range bbData.Tracks {
+			if bbData.Tracks[i].Rank == targetRank {
+				targetIndex = i
+				break
+			}
+		}
+		if targetIndex == -1 && targetRank <= len(bbData.Tracks) {
+			targetIndex = targetRank - 1
+		}
+
+		if targetIndex == -1 {
+			return fmt.Sprintf("Désolé, la place n°%d n'a pas été trouvée dans le classement %s (%d titres disponibles).", targetRank, bbData.Label, len(bbData.Tracks))
+		}
+
+		targetTrack := bbData.Tracks[targetIndex]
+		taskLabel := fmt.Sprintf("📻 %s #%d : %s", bbData.Label, targetTrack.Rank, targetTrack.Query)
+		t := a.scheduler.Enqueue("play_music", taskLabel, targetTrack.Query, 0)
+		if t != nil {
+			t.SetAnnouncement(formatBillboardAnnouncement(targetTrack.Rank, targetTrack.Title, targetTrack.Artist, bbData.Label))
+		}
+
+		if isFromRank {
+			remaining := bbData.Tracks[targetIndex+1:]
+			if limit := extractBillboardLimit(input); limit > 0 && limit < len(remaining) {
+				remaining = remaining[:limit]
+			}
+			for i := range remaining {
+				tr := remaining[i]
+				tl := fmt.Sprintf("📻 %s #%d : %s", bbData.Label, tr.Rank, tr.Query)
+				subT := a.scheduler.Enqueue("play_music", tl, tr.Query, 0)
+				if subT != nil {
+					subT.SetAnnouncement(formatBillboardAnnouncement(tr.Rank, tr.Title, tr.Artist, bbData.Label))
+				}
+			}
+		}
+
+		a.scheduler.TriggerDispatch()
+		return ""
+	}
+
+	// Sinon, enchaîner l'intégralité du classement depuis le #1 (ou le nombre de titres demandé)
+	tracksToQueue := bbData.Tracks
+	if limit := extractBillboardLimit(input); limit > 0 && limit < len(tracksToQueue) {
+		tracksToQueue = tracksToQueue[:limit]
+	}
+	for _, tr := range tracksToQueue {
 		taskLabel := fmt.Sprintf("📻 %s #%d : %s", bbData.Label, tr.Rank, tr.Query)
-		a.scheduler.Enqueue("play_music", taskLabel, tr.Query, 0)
+		t := a.scheduler.Enqueue("play_music", taskLabel, tr.Query, 0)
+		if t != nil {
+			t.SetAnnouncement(formatBillboardAnnouncement(tr.Rank, tr.Title, tr.Artist, bbData.Label))
+		}
 	}
 	a.scheduler.TriggerDispatch()
-	var previewList []string
-	for i := 0; i < len(bbData.Tracks) && i < 3; i++ {
-		previewList = append(previewList, fmt.Sprintf("#%d %s", bbData.Tracks[i].Rank, bbData.Tracks[i].Query))
+	return ""
+}
+
+func cleanSongForSpeech(text string) string {
+	reParen := regexp.MustCompile(`\s*[\(\[][^\)\]]*[\)\]]`)
+	cleaned := reParen.ReplaceAllString(text, "")
+	cleaned = strings.TrimSpace(cleaned)
+	if cleaned == "" {
+		return text
 	}
-	return fmt.Sprintf("C'est parti ! J'ai lancé la radio **%s** 📻.\n\nLes **%d titres** sont programmés dans la file d'attente avec mixage radio (fondu enchaîné de 5 secondes entre chaque titre).\n\n*Premiers morceaux en écoute : %s...*", bbData.Label, len(bbData.Tracks), strings.Join(previewList, ", "))
+	return cleaned
+}
+
+func formatBillboardAnnouncement(rank int, title, artist, label string) string {
+	cleanTitle := cleanSongForSpeech(title)
+	cleanArtist := cleanSongForSpeech(artist)
+
+	if rank == 1 {
+		return fmt.Sprintf("À la première place de la radio %s, voici le numéro un incontesté : %s, par %s !", label, cleanTitle, cleanArtist)
+	}
+
+	templates := []string{
+		"À la %dème place, nous écoutons maintenant %s, de %s.",
+		"En %dème position, voici %s, par %s.",
+		"On poursuit ce classement Billboard à la %dème place avec %s, et son titre %s.",
+		"À la %dème position, nous retrouvons %s, avec %s.",
+		"Au rang numéro %d, voici %s, par %s.",
+	}
+	idx := (rank - 2) % len(templates)
+	if idx < 0 {
+		idx = 0
+	}
+
+	switch idx {
+	case 2:
+		return fmt.Sprintf(templates[idx], rank, cleanArtist, cleanTitle)
+	case 3:
+		return fmt.Sprintf(templates[idx], rank, cleanArtist, cleanTitle)
+	default:
+		return fmt.Sprintf(templates[idx], rank, cleanTitle, cleanArtist)
+	}
 }
 
 func (a *SuperiorAgent) buildSchedulerContext() string {
@@ -3050,7 +3854,7 @@ Réponds UNIQUEMENT avec la phrase, rien d'autre.`, query, knowledge)
 	bgCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	factSummary, err := a.llmProvider.Generate(bgCtx, messages)
+	factSummary, err := a.getBackgroundProvider().Generate(bgCtx, messages)
 	if err == nil && factSummary != "" {
 		factSummary = strings.TrimSpace(factSummary)
 		embedding, embErr := a.llmProvider.CreateEmbedding(bgCtx, factSummary)
@@ -3449,7 +4253,7 @@ Réponds STRICTEMENT avec ce JSON valide, sans balises markdown ni commentaires 
 	classCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	resp, err := a.llmProvider.Generate(classCtx, []llm.Message{
+	resp, err := a.getFastProvider().Generate(classCtx, []llm.Message{
 		{Role: llm.RoleSystem, Content: classificationPrompt},
 		{Role: llm.RoleUser, Content: "Classifie ce message."},
 	})
@@ -3656,9 +4460,15 @@ func detectFaceDiscoveryIntent(cleanInput string, currentProfile string) (bool, 
 		}
 	}
 
+	// Si l'utilisateur demande simplement de saluer ou parler à une personne présente (ex: "dis bonjour à Lisa qui est là"),
+	// ce n'est pas une demande d'identification par caméra.
+	if isSocialOrThirdPartyInteraction(cleanInput) {
+		return false, ""
+	}
+
 	// 2. Questions d'identité directe / reconnaissance
 	identityQuestions := []string{
-		"qui suis-je", "qui suis je", "c'est qui", "qui est là", "qui est la",
+		"qui suis-je", "qui suis je",
 		"qui te parle", "qui est devant toi", "qui est devant l'écran", "qui est devant le pc",
 		"tu me reconnais", "tu me reconnais ?", "tu sais qui je suis", "tu sais qui te parle",
 		"tu te rappelles qui je suis", "tu te rappelles de moi", "tu te souviens de moi",
@@ -3667,6 +4477,18 @@ func detectFaceDiscoveryIntent(cleanInput string, currentProfile string) (bool, 
 	}
 	for _, q := range identityQuestions {
 		if lower == q || strings.HasPrefix(lower, q+" ") || strings.HasSuffix(lower, " "+q) || strings.Contains(lower, q) {
+			return true, cleanInput
+		}
+	}
+
+	// "qui est là", "qui est la", "c'est qui" ne doivent déclencher la caméra que s'il s'agit d'une vraie question
+	// (en début de phrase ou après "dis-moi"/"sais-tu"/"regarde"), pas d'une proposition relative ("Lisa qui est là").
+	ambiguousIdentityQuestions := []string{"qui est là", "qui est la", "c'est qui"}
+	for _, q := range ambiguousIdentityQuestions {
+		if lower == q || strings.HasPrefix(lower, q+" ") ||
+			strings.Contains(lower, "sais-tu "+q) || strings.Contains(lower, "tu sais "+q) ||
+			strings.Contains(lower, "dis-moi "+q) || strings.Contains(lower, "dis moi "+q) ||
+			strings.Contains(lower, "mais "+q) {
 			return true, cleanInput
 		}
 	}

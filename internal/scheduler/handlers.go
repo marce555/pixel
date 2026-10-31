@@ -7,10 +7,12 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/marce555/pixel/internal/llm"
+	"github.com/marce555/pixel/internal/voice"
 )
 
 // STMWriter interface to allow adding messages to short-term memory without circular imports.
@@ -97,18 +99,38 @@ func NewPlayMusicHandler(resolver MusicResolver, s *Scheduler) TaskHandler {
 		}
 
 		// Run mpv with native PipeWire audio output (CachyOS default)
+		// Audio filter silenceremove trims leading silence and cuts off trailing silence
+		// to allow instant punch-in at 100% volume and clean radio-style transitions.
 		args := []string{
 			"--no-video",
 			"--ao=pipewire",
 			"--ytdl-format=bestaudio/best",
+			"--af=lavfi=[silenceremove=start_periods=1:start_duration=0.02:start_threshold=-40dB:stop_periods=-1:stop_duration=0.8:stop_threshold=-40dB]",
 			fmt.Sprintf("--ytdl-raw-options=%s", ytdlRawOpts),
 			fmt.Sprintf("--input-ipc-server=%s", ipcSocket), // IPC socket for play/pause/stop control
 		}
 		mpvTarget := targetURL
 		if !isDirect && strings.Contains(targetURL, "youtube.com/results?search_query=") {
-			mpvTarget = fmt.Sprintf("ytdl://ytsearch1:%s", task.Payload)
+			cleanPayload := task.Payload
+			qLower := strings.ToLower(cleanPayload)
+			if !strings.Contains(qLower, "lyrics") && !strings.Contains(qLower, "paroles") && !strings.Contains(qLower, "live") && !strings.Contains(qLower, "playlist") {
+				cleanPayload += " lyrics"
+			}
+			mpvTarget = fmt.Sprintf("ytdl://ytsearch1:%s", cleanPayload)
 		}
 		args = append(args, mpvTarget)
+
+		var speaker VoiceSpeaker
+		if s != nil {
+			speaker = s.GetVoiceSpeaker()
+		}
+
+		// Opening announcement for the very first track if not yet announced
+		if speaker != nil && task.GetAnnouncement() != "" && !task.IsAnnounced() {
+			task.SetAnnounced(true)
+			task.AppendLog(fmt.Sprintf("Pixel annonce le premier titre : '%s'...", task.GetAnnouncement()))
+			_ = speaker.SpeakText(ctx, task.GetAnnouncement())
+		}
 
 		cmd := exec.CommandContext(ctx, "mpv", args...)
 		cmd.Env = filteredEnv
@@ -157,13 +179,26 @@ func NewPlayMusicHandler(resolver MusicResolver, s *Scheduler) TaskHandler {
 					} else {
 						nextTask.AppendLog(fmt.Sprintf("Échec de la pré-résolution : %v", err))
 					}
+
+					// Pre-synthesize the voice announcement for nextTask if present
+					nextAnn := nextTask.GetAnnouncement()
+					if nextAnn != "" && speaker != nil && nextTask.GetAnnouncementWav() == "" {
+						annWav := filepath.Join(os.TempDir(), fmt.Sprintf("pixel_ann_%s.wav", nextTask.ID))
+						if errWav := speaker.SynthesizeToFile(ctx, nextAnn, annWav); errWav == nil {
+							nextTask.SetAnnouncementWav(annWav)
+							nextTask.AppendLog(fmt.Sprintf("Annonce vocale pré-synthétisée : '%s'", nextAnn))
+						}
+					}
 				}
 			}()
 		}
 
-		// Background crossfade monitor
+		speechDone := make(chan struct{})
+		var hasSpeechStarted bool
+
+		// Background transition monitor with Audio Ducking & Radio DJ voiceover
 		go func() {
-			ticker := time.NewTicker(1 * time.Second)
+			ticker := time.NewTicker(250 * time.Millisecond)
 			defer ticker.Stop()
 			released := false
 			for {
@@ -187,39 +222,92 @@ func NewPlayMusicHandler(resolver MusicResolver, s *Scheduler) TaskHandler {
 							break
 						}
 						if response.Error == "success" {
-							if response.Data <= 5.0 && !released {
+							var nextTask *Task
+							if s != nil {
+								nextTask = s.GetNextPendingMusicTask(task.ID)
+							}
+
+							hasAnnouncement := nextTask != nil && nextTask.GetAnnouncement() != "" && !nextTask.IsAnnounced()
+							threshold := 2.5
+							if hasAnnouncement {
+								threshold = 5.5
+							}
+
+							if response.Data <= threshold && !released {
 								released = true
-								if task.ReleaseSem != nil {
-									task.ReleaseSem()
-								}
 
-								task.AppendLog("Mixage en cours (Fade-out progressif sur 5s)...")
+								if hasAnnouncement && speaker != nil {
+									hasSpeechStarted = true
+									nextTask.SetAnnounced(true)
+									task.AppendLog(fmt.Sprintf("Radio DJ : Ducking du volume à 20%% et annonce vocale : '%s'...", nextTask.GetAnnouncement()))
 
-								// Start Fade-Out Goroutine
-								go func() {
-									fadeTicker := time.NewTicker(100 * time.Millisecond)
-									defer fadeTicker.Stop()
-									vol := 100.0
-									for {
-										select {
-										case <-ctx.Done():
-											return
-										case <-fadeTicker.C:
-											vol -= 2.0 // 100 to 0 over 50 steps (5 seconds)
-											if vol < 0 {
-												vol = 0
+									// 1. Duck volume to 20%
+									duckConn, errDuck := net.Dial("unix", ipcSocket)
+									if errDuck == nil {
+										fmt.Fprintf(duckConn, `{"command": ["set_property", "volume", 20.0]}`+"\n")
+										duckConn.Close()
+									}
+
+									// 2. Play speech over ducked music
+									go func() {
+										annWav := nextTask.GetAnnouncementWav()
+										if annWav != "" {
+											if _, statErr := os.Stat(annWav); statErr == nil {
+												_ = voice.PlayAudioFile(ctx, annWav)
+												_ = os.Remove(annWav)
+											} else {
+												_ = speaker.SpeakText(ctx, nextTask.GetAnnouncement())
 											}
-											fadeConn, errDial := net.Dial("unix", ipcSocket)
-											if errDial == nil {
-												fmt.Fprintf(fadeConn, `{"command": ["set_property", "volume", %f]}`+"\n", vol)
-												fadeConn.Close()
-											}
-											if vol <= 0 {
+										} else {
+											_ = speaker.SpeakText(ctx, nextTask.GetAnnouncement())
+										}
+
+										// 3. Outgoing track fade-out to 0
+										fadeConn, errFade := net.Dial("unix", ipcSocket)
+										if errFade == nil {
+											fmt.Fprintf(fadeConn, `{"command": ["set_property", "volume", 0.0]}`+"\n")
+											fadeConn.Close()
+										}
+
+										// 4. Release next track to attack directly at 100%
+										if task.ReleaseSem != nil {
+											task.ReleaseSem()
+										}
+										close(speechDone)
+									}()
+								} else {
+									if task.ReleaseSem != nil {
+										task.ReleaseSem()
+									}
+
+									task.AppendLog("Enchaînement direct : lancement du titre suivant à 100% et descente du volume...")
+
+									// Start Fade-Out Goroutine (quick smooth descent over ~2 seconds)
+									go func() {
+										fadeTicker := time.NewTicker(50 * time.Millisecond)
+										defer fadeTicker.Stop()
+										vol := 100.0
+										for {
+											select {
+											case <-ctx.Done():
 												return
+											case <-fadeTicker.C:
+												vol -= 2.5 // 100 to 0 over 40 steps (2 seconds)
+												if vol < 0 {
+													vol = 0
+												}
+												fadeConn, errDial := net.Dial("unix", ipcSocket)
+												if errDial == nil {
+													fmt.Fprintf(fadeConn, `{"command": ["set_property", "volume", %f]}`+"\n", vol)
+													fadeConn.Close()
+												}
+												if vol <= 0 {
+													return
+												}
 											}
 										}
-									}
-								}()
+									}()
+								}
 							}
 							break
 						}
@@ -231,6 +319,14 @@ func NewPlayMusicHandler(resolver MusicResolver, s *Scheduler) TaskHandler {
 
 		task.AppendLog("Lecture en cours. En attente de la fin du morceau...")
 		waitErr := cmd.Wait()
+
+		// If speech announcement is running, wait for it before exiting
+		if hasSpeechStarted {
+			select {
+			case <-speechDone:
+			case <-time.After(8 * time.Second):
+			}
+		}
 
 		// Check if task was cancelled during execution
 		if ctx.Err() != nil {

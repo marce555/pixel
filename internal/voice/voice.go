@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -364,6 +365,78 @@ func (vm *VoiceManager) Synthesize(ctx context.Context, text string) ([]byte, er
 	}
 
 	return audioBytes, nil
+}
+
+// SynthesizeToFile utilise Piper localement pour générer directement un fichier WAV sur disque.
+func (vm *VoiceManager) SynthesizeToFile(ctx context.Context, text string, destWav string) error {
+	if !vm.isPiperReady() {
+		return fmt.Errorf("le moteur de synthèse vocale Piper n'est pas prêt")
+	}
+
+	text = strings.ReplaceAll(text, "\n", " ")
+	text = strings.TrimSpace(ttsFillerRegex.ReplaceAllString(text, ""))
+	if text == "" {
+		return fmt.Errorf("texte vide après filtrage vocal")
+	}
+
+	piperDir := filepath.Dir(vm.piperPath)
+	cmd := exec.CommandContext(ctx, vm.piperPath, "--model", vm.modelPath, "--output_file", destWav)
+	cmd.Env = append(os.Environ(), "LD_LIBRARY_PATH="+piperDir)
+	cmd.Stdin = strings.NewReader(text)
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil {
+		return fmt.Errorf("piper execution failed: %w (stderr: %s)", err, stderr.String())
+	}
+	return nil
+}
+
+// SpeakText synthétise et diffuse vocalement le texte sur la sortie audio locale (PipeWire / ALSA).
+func (vm *VoiceManager) SpeakText(ctx context.Context, text string) error {
+	tempWav := filepath.Join(os.TempDir(), fmt.Sprintf("pixel_speak_%d.wav", time.Now().UnixNano()))
+	defer os.Remove(tempWav)
+
+	if err := vm.SynthesizeToFile(ctx, text, tempWav); err != nil {
+		return err
+	}
+	return PlayAudioFile(ctx, tempWav)
+}
+
+func duckActiveMpv(duck bool, targetVolume int) {
+	sockets, _ := filepath.Glob("/tmp/mpvsocket_*")
+	for _, socket := range sockets {
+		conn, err := net.DialTimeout("unix", socket, 200*time.Millisecond)
+		if err != nil {
+			continue
+		}
+		_ = conn.SetDeadline(time.Now().Add(200 * time.Millisecond))
+		if duck {
+			_, _ = conn.Write([]byte(fmt.Sprintf(`{"command": ["set_property", "volume", %d]}`+"\n", targetVolume)))
+		} else {
+			_, _ = conn.Write([]byte(`{"command": ["set_property", "volume", 100]}` + "\n"))
+		}
+		conn.Close()
+	}
+}
+
+// PlayAudioFile diffuse un fichier audio WAV via PipeWire (pw-play), aplay ou mpv.
+func PlayAudioFile(ctx context.Context, wavPath string) error {
+	duckActiveMpv(true, 18)
+	defer duckActiveMpv(false, 100)
+
+	if _, err := exec.LookPath("pw-play"); err == nil {
+		cmd := exec.CommandContext(ctx, "pw-play", wavPath)
+		return cmd.Run()
+	}
+	if _, err := exec.LookPath("aplay"); err == nil {
+		cmd := exec.CommandContext(ctx, "aplay", "-q", wavPath)
+		return cmd.Run()
+	}
+	cmd := exec.CommandContext(ctx, "mpv", "--no-video", "--ao=pipewire", wavPath)
+	return cmd.Run()
 }
 
 func (vm *VoiceManager) isPiperReady() bool {

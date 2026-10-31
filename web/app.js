@@ -121,6 +121,9 @@ document.addEventListener('DOMContentLoaded', () => {
                             visionDescEl.style.opacity = '1';
                         }, 50);
                     }
+                } else if (data.proactive_message.includes("[Échange autonome avec Gemini]") || data.proactive_message.includes("[Échange avec Gemini]")) {
+                    // Dialogue autonome interne : ne pas afficher dans le chat web ni synthétiser au TTS
+                    return;
                 } else {
                     const stripped = data.proactive_message.replace(/[\s\.\!\?,:;…]+/g, '').toLowerCase();
                     if (stripped === 'hm' || stripped === 'hmm' || stripped === 'hum' || stripped === 'euh' || stripped === '') {
@@ -373,6 +376,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 window.voiceController.finalizeSpeech();
             }
 
+            // Supprimer la bulle si la réponse est vide (lancement direct sans bavardage)
+            if (!accumulatedText.trim() && !bubbleDiv.textContent.trim()) {
+                msgDiv.remove();
+            }
+
             fetchCoreMemory(); // Mettre à jour au cas où le Profiler a agi
             fetchActiveProject(); // Mettre à jour le projet actif si besoin
 
@@ -578,6 +586,9 @@ document.addEventListener('DOMContentLoaded', () => {
             chatBox.innerHTML = "";
             
             messages.forEach(msg => {
+                if (msg.content && (msg.content.includes("[Échange autonome avec Gemini]") || msg.content.includes("[Échange avec Gemini]"))) {
+                    return;
+                }
                 const sender = msg.role === 'assistant' ? 'pixel' : 'user';
                 appendMessage(msg.content, sender);
             });
@@ -1164,6 +1175,9 @@ class VoiceController {
         this.mediaStream = null;
         this.maxDurationTimer = null;
         this._isStopping = false; // Guard anti-doublon pour stopListening
+        this.isWakeActive = false;
+        this.wakeActiveTimer = null;
+        this.speechDetected = false;
 
         this._setupVoiceSelect();
         this._setupUI();
@@ -1184,7 +1198,9 @@ class VoiceController {
     /* ── Filtrage du mot-clé d'éveil en mode Mains Libres ─────────────── */
     _extractHandsfreeCommand(text) {
         if (!text) return null;
-        const wakeMatch = text.match(/^[\s,:\-\.\!\?]*(?:(?:hey|ok|dis|salut|bonjour|bonsoir|coucou|dis-moi)\s+)?(?:pixel|pixelle|pixels|picel)\b[\s,:\-\.\!\?]*(.*)/is);
+        const wakeCore = '(?:pixel|pixelle|pixels|picel|picsel|pixl|pixeul|pique[\\s\\-]*sel(?:le)?|pic[\\s\\-]*sel(?:le)?|pik[\\s\\-]*sel(?:le)?|excel|exel|axel|axelle|accel|bruxelles|pixar|picasso|pix|pics|fixel|bixel|bicelle|bicel|xl)';
+        const wakeRegex = new RegExp(`^(?:[\\s,:\\-\\.\\!\\?]*(?:hey|ok|dis|salut|bonjour|bonsoir|coucou|dis-moi)\\s+)?${wakeCore}\\b[\\s,:\\-\\.\\!\\?]*(.*)`, 'is');
+        const wakeMatch = text.match(wakeRegex);
         if (!wakeMatch) return null;
         let cleaned = wakeMatch[1].trim();
         cleaned = cleaned.replace(/[\s,:\-\.\!\?]*(?:envoi|envoyer|envoie)[\s,:\-\.\!\?]*$/i, '').trim();
@@ -1458,9 +1474,9 @@ class VoiceController {
         if (this.userInput) {
             this.userInput.disabled = false;
             this.userInput.value = '';
-            this.userInput.placeholder = this.handsfreeEnabled
-                ? '🎤 Dites « Pixel » suivi de votre demande...'
-                : '🎤 Parlez maintenant...';
+            this.userInput.placeholder = this.isWakeActive
+                ? '🎤 Pixel vous écoute... Posez votre question.'
+                : (this.handsfreeEnabled ? '🎤 Dites « Pixel » pour activer l\'écoute...' : '🎤 Parlez maintenant...');
         }
 
         // Si le mode navigateur cloud est explicitement configuré et disponible
@@ -1514,13 +1530,14 @@ class VoiceController {
             this.isListening = true;
             this._startListeningUI();
 
-            // Sécurité : arrêt automatique après 15 secondes max
+            // Auto-refresh silencieux après 10s max (ou 6s en écoute active) si aucune voix détectée
+            const maxDurationMs = this.isWakeActive ? 6000 : 10000;
             this.maxDurationTimer = setTimeout(() => {
                 if (this.isListening) {
-                    console.log('[VoiceController] Durée max 15s, arrêt automatique.');
+                    console.log(`[VoiceController] Auto-refresh buffer après ${maxDurationMs/1000}s sans voix.`);
                     this.stopListening();
                 }
-            }, 15000);
+            }, maxDurationMs);
 
             // Détecter la fin de parole via le volume (VAD robuste)
             await this.setupSilenceDetection(stream);
@@ -1580,7 +1597,11 @@ class VoiceController {
 
     _stopListeningUI() {
         this.isListening = false;
-        if (this.userInput) this.userInput.placeholder = 'Écrivez un message ou parlez...';
+        if (this.userInput && !this.isWakeActive) {
+            this.userInput.placeholder = this.handsfreeEnabled
+                ? '🎤 Dites « Pixel » pour activer l\'écoute...'
+                : 'Écrivez un message ou parlez...';
+        }
         if (this.micBtn)    this.micBtn.classList.remove('listening');
         if (this.chatForm)  this.chatForm.classList.remove('listening-glow');
         if (this.voiceWave) {
@@ -1610,6 +1631,7 @@ class VoiceController {
             let silenceFrameCount   = 0;
             const SILENCE_HYSTERESIS = 4; // ~60ms
 
+            this.speechDetected = false;
             this.isSilenceDetectionActive = true;
             const minSpeechMs = 250;
 
@@ -1635,9 +1657,10 @@ class VoiceController {
 
                 if (rms > threshold) {
                     if (!speechDetected) speechStartTime = Date.now();
-                    speechDetected    = true;
-                    silenceStart      = null;
-                    silenceFrameCount = 0;
+                    speechDetected      = true;
+                    this.speechDetected = true;
+                    silenceStart        = null;
+                    silenceFrameCount   = 0;
 
                     // Barge-in : interruption uniquement en mode manuel (évite que la musique coupe Pixel en mains-libres)
                     if (!this.handsfreeEnabled && (this.isSpeakingSession || this.isSpeakingSentence || this.currentAudio)) {
@@ -1653,8 +1676,8 @@ class VoiceController {
                             const silenceDuration = Date.now() - silenceStart;
                             const speechDuration  = silenceStart - (speechStartTime || silenceStart);
 
-                            // Délais de silence réactifs : 1.1s en mains-libres, 0.9s en manuel
-                            const baseDelay    = this.handsfreeEnabled ? 1100 : 900;
+                            // Délais de silence réactifs : 1.1s en écoute active, 0.5s pour mot-clé court
+                            const baseDelay    = this.isWakeActive ? 1100 : (this.handsfreeEnabled ? (speechDuration < 1200 ? 500 : 1050) : 900);
                             const silenceDelay = speechDuration > 3000 ? baseDelay + 400 : baseDelay;
 
                             if (silenceDuration > silenceDelay && speechDuration > minSpeechMs) {
@@ -1674,9 +1697,18 @@ class VoiceController {
     }
 
     async uploadAudioAndTranscribe() {
+        if (!this.speechDetected) {
+            // Aucune voix détectée pendant la session (auto-refresh silencieux)
+            this.audioChunks = [];
+            if (this.handsfreeEnabled && !this.isSpeakingSession) {
+                setTimeout(() => this.startListening(true), 50);
+            }
+            return;
+        }
+
         if (this.audioChunks.length === 0) {
             if (this.handsfreeEnabled && !this.isSpeakingSession) {
-                setTimeout(() => this.startListening(true), 600);
+                setTimeout(() => this.startListening(true), 100);
             }
             return;
         }
@@ -1691,10 +1723,10 @@ class VoiceController {
         const chunks = this.audioChunks.splice(0);
         const recordingDuration = Date.now() - (this.recordingStartTime || 0);
 
-        if (recordingDuration < 600) {
+        if (recordingDuration < 500) {
             console.log(`[VoiceController] Enregistrement trop court (${recordingDuration}ms), ignoré.`);
             if (this.handsfreeEnabled && !this.isSpeakingSession) {
-                setTimeout(() => this.startListening(true), 600);
+                setTimeout(() => this.startListening(true), 100);
             }
             return;
         }
@@ -1729,7 +1761,7 @@ class VoiceController {
                         console.warn("[VoiceController] Hallucination Whisper ignorée:", cleaned);
                         this.userInput.value = "";
                         if (this.handsfreeEnabled && !this.isSpeakingSession) {
-                            setTimeout(() => this.startListening(true), 600);
+                            setTimeout(() => this.startListening(true), 100);
                         }
                         return;
                     }
@@ -1740,26 +1772,83 @@ class VoiceController {
                             this.userInput.value = "";
                             return;
                         }
+
+                        // 1. Si en écoute active (mot-clé déjà validé)
+                        if (this.isWakeActive) {
+                            const wakeCoreRegex = /\b(?:pixel|pixelle|pixels|picel|picsel|pixl|pixeul|pique[\s\-]*sel(?:le)?|pic[\s\-]*sel(?:le)?|pik[\s\-]*sel(?:le)?|excel|exel|axel|axelle|accel|bruxelles|pixar|picasso|pix|pics|fixel|bixel|bicelle|bicel|xl)\b/gi;
+                            const textWithoutWake = cleaned.replace(wakeCoreRegex, '').replace(/[\s,\.\!\?:;…\-_]+/g, '').trim();
+                            
+                            if (textWithoutWake.length === 0) {
+                                // Répétition du mot-clé en écoute active : prolonger l'écoute active
+                                console.log("[VoiceController] Répétition mot-clé en écoute active :", cleaned);
+                                if (this.wakeActiveTimer) clearTimeout(this.wakeActiveTimer);
+                                this.wakeActiveTimer = setTimeout(() => {
+                                    this.isWakeActive = false;
+                                    if (this.userInput) this.userInput.placeholder = "🎤 Dites « Pixel » pour activer l'écoute...";
+                                }, 25000);
+                                this.userInput.value = "";
+                                this.userInput.placeholder = "🎤 Pixel vous écoute... Posez votre question.";
+                                if (!this.isSpeakingSession) {
+                                    setTimeout(() => this.startListening(true), 100);
+                                }
+                                return;
+                            }
+
+                            // Nettoyer mot-clé de tête éventuel
+                            const leadWakeRegex = /^[\s,:\-\.\!\?]*(?:(?:hey|ok|dis|salut|bonjour|bonsoir|coucou|dis-moi)\s+)?(?:pixel|pixelle|pixels|picel|picsel|pixl|pixeul|pique[\s\-]*sel(?:le)?|pic[\s\-]*sel(?:le)?|pik[\s\-]*sel(?:le)?|excel|exel|axel|axelle|accel|bruxelles|pixar|picasso|pix|pics|fixel|bixel|bicelle|bicel|xl)\b[\s,:\-\.\!\?]*/i;
+                            let cmd = cleaned.replace(leadWakeRegex, '').replace(/[\s,:\-\.\!\?]*(?:envoi|envoyer|envoie)[\s,:\-\.\!\?]*$/i, '').trim();
+                            if (!cmd) cmd = cleaned;
+
+                            console.log('[VoiceController] Mode mains-libres (écoute active) : envoi de la commande :', cmd);
+                            this.isWakeActive = false;
+                            if (this.wakeActiveTimer) clearTimeout(this.wakeActiveTimer);
+                            this.userInput.value = cmd;
+                            setTimeout(() => {
+                                if (this.chatForm && this.userInput && this.userInput.value.trim() === cmd) {
+                                    const submitBtn = this.chatForm.querySelector('button[type="submit"]');
+                                    if (submitBtn) {
+                                        submitBtn.click();
+                                    } else {
+                                        this.chatForm.dispatchEvent(new Event('submit', { cancelable: true }));
+                                    }
+                                }
+                            }, 300);
+                            return;
+                        }
+
+                        // 2. Veille passive : vérifier la présence du mot-clé
                         const cmd = this._extractHandsfreeCommand(cleaned);
                         if (cmd === null) {
                             console.log("[VoiceController] Mains-libres : transcription ignorée (absence du mot-clé 'Pixel') :", cleaned);
                             this.userInput.value = "";
-                            this.userInput.placeholder = "🎤 Dites « Pixel » suivi de votre demande...";
+                            this.userInput.placeholder = "🎤 Dites « Pixel » pour activer l'écoute...";
                             if (!this.isSpeakingSession) {
-                                setTimeout(() => this.startListening(true), 600);
+                                setTimeout(() => this.startListening(true), 100);
                             }
                             return;
                         }
+
                         if (!cmd) {
+                            // Mot d'éveil prononcé seul ("Pixel") → Déclencher l'écoute active de 25s
+                            console.log("[VoiceController] Mot-clé 'Pixel' détecté seul → Écoute active 25s");
+                            this.isWakeActive = true;
+                            if (this.wakeActiveTimer) clearTimeout(this.wakeActiveTimer);
+                            this.wakeActiveTimer = setTimeout(() => {
+                                console.log("[VoiceController] Expiration du délai d'écoute active (25s)");
+                                this.isWakeActive = false;
+                                if (this.userInput) this.userInput.placeholder = "🎤 Dites « Pixel » pour activer l'écoute...";
+                            }, 25000);
                             this.userInput.value = "";
-                            this.userInput.placeholder = "🎤 Pixel : Oui ? Je vous écoute...";
+                            this.userInput.placeholder = "🎤 Pixel vous écoute... Posez votre question.";
                             if (!this.isSpeakingSession) {
-                                setTimeout(() => this.startListening(true), 600);
+                                setTimeout(() => this.startListening(true), 100);
                             }
                             return;
                         }
+
+                        // Mot-clé + commande prononcés d'une traite
                         this.userInput.value = cmd;
-                        console.log('[VoiceController] Mode mains-libres : envoi automatique de la commande :', cmd);
+                        console.log('[VoiceController] Mode mains-libres : envoi automatique de la commande directe :', cmd);
                         setTimeout(() => {
                             if (this.chatForm && this.userInput && this.userInput.value.trim() === cmd) {
                                 const submitBtn = this.chatForm.querySelector('button[type="submit"]');
@@ -1786,12 +1875,15 @@ class VoiceController {
                     }
                 } else {
                     this.userInput.value = "";
-                    if (window.appendMessage) {
-                        window.showToast('Aucune voix détectée — signal trop faible, réessayez', 'info');
-                    }
-                    // Relance automatique en mains-libres même si aucun mot n'a été reconnu
-                    if (this.handsfreeEnabled && !this.isSpeakingSession) {
-                        setTimeout(() => this.startListening(true), 1000);
+                    if (this.isWakeActive) {
+                        this.userInput.placeholder = "🎤 Pixel vous écoute... Posez votre question.";
+                        if (this.handsfreeEnabled && !this.isSpeakingSession) {
+                            setTimeout(() => this.startListening(true), 100);
+                        }
+                    } else {
+                        if (this.handsfreeEnabled && !this.isSpeakingSession) {
+                            setTimeout(() => this.startListening(true), 100);
+                        }
                     }
                 }
             }
@@ -1867,6 +1959,9 @@ class VoiceController {
         this.isSpeakingSentence = false;
         this.isStreamFinished = false;
         this.ttsSummaryApplied = false;
+        if (this.isTtsEnabled) {
+            fetch('/api/media/duck?active=true&volume=18').catch(() => {});
+        }
     }
 
     feedChunk(chunk) {
@@ -1908,6 +2003,7 @@ class VoiceController {
         this.isStreamFinished = true;
         if (!this.isTtsEnabled) {
             this.isSpeakingSession = false;
+            fetch('/api/media/duck?active=false').catch(() => {});
             if (this.handsfreeEnabled && !this.isListening) {
                 setTimeout(() => {
                     if (!this.isListening && !this.isSpeakingSession) this.startListening(true);
@@ -1927,6 +2023,7 @@ class VoiceController {
         if (this.speechQueue.length === 0) {
             if (this.isStreamFinished && !this.currentAudio) {
                 this.isSpeakingSession = false;
+                fetch('/api/media/duck?active=false').catch(() => {});
                 // Mains-libres : relancer l'écoute après que Pixel a fini de parler
                 if (this.handsfreeEnabled && !this.isListening) {
                     setTimeout(() => {
@@ -1938,6 +2035,7 @@ class VoiceController {
         }
 
         this.isSpeakingSentence = true;
+        fetch('/api/media/duck?active=true&volume=18').catch(() => {});
 
         const sentence = this.speechQueue.shift();
         const url = `/api/voice/speak?text=${encodeURIComponent(sentence)}`;
@@ -1965,6 +2063,7 @@ class VoiceController {
         this.speechBuffer     = '';
         this.isSpeakingSentence = false;
         this.isSpeakingSession  = false;
+        fetch('/api/media/duck?active=false').catch(() => {});
     }
 }
 

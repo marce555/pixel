@@ -55,6 +55,22 @@ func (um *UnconsciousManager) ShouldFilterContext(input string, action string, h
 		}
 	}
 
+	// Do not filter context if the user is asking Pixel to greet or speak to a third person
+	// (e.g., "dis bonjour à Lisa qui est là", "salue Paul", "passe le bonjour à..."),
+	// so Pixel can access LTM memories about that person and speak warmly to them.
+	thirdPartyGreetings := []string{
+		"dis bonjour", "dit bonjour", "dire bonjour",
+		"dis salut", "dit salut", "dire salut",
+		"dis coucou", "dit coucou", "dire coucou", "fais coucou", "fais un coucou",
+		"dis bonsoir", "passe le bonjour", "salue ", "saluer ",
+		"souhaite ", "dis-lui", "dis lui", "autre chose",
+	}
+	for _, tpg := range thirdPartyGreetings {
+		if strings.Contains(cleanInput, tpg) {
+			return false
+		}
+	}
+
 	// Basic greetings check or very short casual chat.
 	greetings := []string{
 		"bonjour", "salut", "coucou", "hello", "hi", "ça va", "tu vas bien", "bonsoir", "hey",

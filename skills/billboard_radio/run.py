@@ -4,7 +4,8 @@
 Skill: billboard_radio
 Scrape les 100 titres du classement Billboard Hot 100 pour une année donnée (ex: 1983)
 ou le classement actuel, et retourne la liste des 100 morceaux pour les enchaîner
-dans le lecteur musical de Pixel avec fondu enchaîné (crossfade radio de 5s).
+dans le lecteur musical de Pixel avec enchaînement direct radio (nouveau titre lancé
+directement à 100% avec suppression des silences de début et de fin pendant la descente du volume du morceau précédent).
 """
 
 import html
@@ -80,7 +81,7 @@ def scrape_billboard_direct(year: str | None) -> list[dict]:
                             "rank": len(tracks) + 1,
                             "title": title,
                             "artist": artist,
-                            "query": f"{artist} - {title}",
+                            "query": f"{artist} - {title} lyrics",
                             "source": url,
                         }
                     )
@@ -123,7 +124,7 @@ def scrape_billboard_year_end_archive(year: str) -> list[dict]:
                                 "rank": int(rank_str),
                                 "title": title,
                                 "artist": artist,
-                                "query": f"{artist} - {title}",
+                                "query": f"{artist} - {title} lyrics",
                                 "source": "https://www.billboard.com/charts/hot-100/",
                             }
                         )
@@ -148,17 +149,22 @@ def extract_year(query: str) -> str | None:
 
 def get_billboard_100(query: str) -> tuple[str, list[dict]]:
     year = extract_year(query)
-    tracks = scrape_billboard_direct(year)
-    if len(tracks) < 100:
-        target_year = year or str(datetime.now().year - 1)
-        archive_tracks = scrape_billboard_year_end_archive(target_year)
-        if len(archive_tracks) == 100:
-            tracks = archive_tracks
-            if not year:
-                year = target_year
-        elif len(archive_tracks) > len(tracks):
-            tracks = archive_tracks
-            if not year:
+    tracks = []
+    if year:
+        # Wikipedia conserve l'archive officielle intégrale du Billboard Year-End Hot 100
+        # pour chaque année de 1958 à nos jours (100 titres classés de 1 à 100).
+        tracks = scrape_billboard_year_end_archive(year)
+        if len(tracks) < 50:
+            direct = scrape_billboard_direct(year)
+            if len(direct) > len(tracks):
+                tracks = direct
+    else:
+        # Classement actuel en cours sur billboard.com
+        tracks = scrape_billboard_direct(None)
+        if len(tracks) < 50:
+            target_year = str(datetime.now().year - 1)
+            tracks = scrape_billboard_year_end_archive(target_year)
+            if tracks:
                 year = target_year
 
     label = f"Billboard Hot 100 ({year})" if year else "Billboard Hot 100"
@@ -196,7 +202,7 @@ def main():
     print(
         f"Liste {label} récupérée avec succès ({len(tracks)} titres).\n"
         f"Premiers titres : {preview}...\n"
-        f"Les {len(tracks)} morceaux sont programmés dans le lecteur musical avec mixage radio (fondu enchaîné de 5 secondes entre chaque titre)."
+        f"Les {len(tracks)} morceaux sont programmés dans le lecteur musical avec ambiance Radio DJ (annonces vocales de Pixel à chaque titre, ducking du volume à 20% pendant la voix, et enchaînement direct du morceau suivant à 100% sans silence)."
     )
 
 

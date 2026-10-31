@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chromedp/chromedp"
@@ -383,6 +384,7 @@ func (w *WebAgent) ValidateTitleWithWikipedia(query string) string {
 }
 
 // ResolveMusicURL searches YouTube and returns the target URL, the video title, and whether it is a direct track link.
+// It prioritizes "lyrics" or audio-only versions to avoid promotional video sequences/intros.
 func (w *WebAgent) ResolveMusicURL(songQuery string) (string, string, bool, error) {
 	query := strings.TrimSpace(songQuery)
 	if query == "" {
@@ -392,8 +394,20 @@ func (w *WebAgent) ResolveMusicURL(songQuery string) (string, string, bool, erro
 	targetURL := ""
 	videoTitle := ""
 
-	// 1. Try direct scraping of YouTube's search results page (ultra-fast, native, exact)
-	targetURL, videoTitle = w.ScrapeYouTubeDirect(query)
+	// Build query prioritizing "lyrics" if not already specified
+	queryLower := strings.ToLower(query)
+	lyricsQuery := query
+	if !strings.Contains(queryLower, "lyrics") && !strings.Contains(queryLower, "paroles") &&
+		!strings.Contains(queryLower, "live") && !strings.Contains(queryLower, "remix") &&
+		!strings.Contains(queryLower, "playlist") {
+		lyricsQuery = query + " lyrics"
+	}
+
+	// 1. Try direct scraping of YouTube's search results page prioritizing lyrics
+	targetURL, videoTitle = w.ScrapeYouTubeDirect(lyricsQuery)
+	if targetURL == "" && lyricsQuery != query {
+		targetURL, videoTitle = w.ScrapeYouTubeDirect(query)
+	}
 
 	// If direct scraping found no video, try to validate the title via Wikipedia as fallback
 	if targetURL == "" {
@@ -401,7 +415,10 @@ func (w *WebAgent) ResolveMusicURL(songQuery string) (string, string, bool, erro
 		wikiTitle := w.ValidateTitleWithWikipedia(query)
 		if wikiTitle != "" && strings.ToLower(wikiTitle) != strings.ToLower(query) {
 			fmt.Printf("[WebAgent] Titre validé par Wikipédia : '%s'. Nouvelle recherche YouTube...\n", wikiTitle)
-			newURL, newTitle := w.ScrapeYouTubeDirect(wikiTitle)
+			newURL, newTitle := w.ScrapeYouTubeDirect(wikiTitle + " lyrics")
+			if newURL == "" {
+				newURL, newTitle = w.ScrapeYouTubeDirect(wikiTitle)
+			}
 			if newURL != "" {
 				targetURL = newURL
 				videoTitle = newTitle
@@ -412,8 +429,11 @@ func (w *WebAgent) ResolveMusicURL(songQuery string) (string, string, bool, erro
 	// 2. Fallback to Yahoo search if direct scraping did not return a direct link
 	if targetURL == "" {
 		fmt.Println("[WebAgent] Le scraper en direct n'a pas retourné de lien. Repli sur la recherche Yahoo...")
-		searchQuery := fmt.Sprintf("site:youtube.com %s", query)
+		searchQuery := fmt.Sprintf("site:youtube.com %s", lyricsQuery)
 		results, err := w.SearchWeb(searchQuery)
+		if (err != nil || results == "") && lyricsQuery != query {
+			results, err = w.SearchWeb(fmt.Sprintf("site:youtube.com %s", query))
+		}
 
 		if err == nil && results != "" {
 			// Look for a link containing watch?v=, playlist?list= or shared link in the results
@@ -490,12 +510,18 @@ func (w *WebAgent) PlayMusic(songQuery string) (string, error) {
 		"--no-video",
 		"--ao=pipewire",
 		"--ytdl-format=bestaudio/best",
+		"--af=lavfi=[silenceremove=start_periods=1:start_duration=0.02:start_threshold=-40dB:stop_periods=-1:stop_duration=0.8:stop_threshold=-40dB]",
 		fmt.Sprintf("--ytdl-raw-options=%s", ytdlRawOpts),
 		"--input-ipc-server=/tmp/mpvsocket_webagent",
 	}
 	mpvTarget := targetURL
 	if !isDirect && strings.Contains(targetURL, "youtube.com/results?search_query=") {
-		mpvTarget = fmt.Sprintf("ytdl://ytsearch1:%s", songQuery)
+		cleanQuery := songQuery
+		qLower := strings.ToLower(cleanQuery)
+		if !strings.Contains(qLower, "lyrics") && !strings.Contains(qLower, "paroles") && !strings.Contains(qLower, "live") && !strings.Contains(qLower, "playlist") {
+			cleanQuery += " lyrics"
+		}
+		mpvTarget = fmt.Sprintf("ytdl://ytsearch1:%s", cleanQuery)
 	}
 	args = append(args, mpvTarget)
 
@@ -570,14 +596,26 @@ func (w *WebAgent) ControlMedia(command string) (string, error) {
 	// Try all mpv IPC sockets (used when music launched via Scheduler)
 	sockets, _ := filepath.Glob("/tmp/mpvsocket_*")
 	successCount := 0
+	isNextOrSkip := strings.ToLower(command) == "next" || strings.ToLower(command) == "skip"
 	for _, socket := range sockets {
 		conn, err := net.DialTimeout("unix", socket, 500*time.Millisecond)
 		if err == nil {
+			_ = conn.SetDeadline(time.Now().Add(500 * time.Millisecond))
 			_, writeErr := conn.Write([]byte(mpvCmd + "\n"))
-			conn.Close()
 			if writeErr == nil {
 				successCount++
+				if isNextOrSkip {
+					var resp struct {
+						Error string `json:"error"`
+					}
+					dec := json.NewDecoder(conn)
+					if errDec := dec.Decode(&resp); errDec == nil && resp.Error != "success" {
+						// Single track instance in mpv: playlist-next failed, so quit the track to advance queue
+						_, _ = conn.Write([]byte(`{"command": ["quit"]}` + "\n"))
+					}
+				}
 			}
+			conn.Close()
 		}
 	}
 
@@ -616,6 +654,67 @@ func (w *WebAgent) ControlMedia(command string) (string, error) {
 	}
 
 	return "", fmt.Errorf("impossible de contrôler la lecture : ni le socket IPC de mpv (/tmp/mpvsocket) ni playerctl ne sont disponibles. Assure-toi qu'une musique est en cours de lecture via mon gestionnaire de tâches")
+}
+
+var (
+	mpvSavedVolumes   = make(map[string]float64)
+	mpvSavedVolumesMu sync.Mutex
+)
+
+// DuckAllMedia lowers the volume of all active mpv music processes when duck is true (audio ducking)
+// and restores their original volume when duck is false.
+func DuckAllMedia(duck bool, targetVolume int) {
+	sockets, _ := filepath.Glob("/tmp/mpvsocket_*")
+	if len(sockets) == 0 {
+		if duck {
+			volStr := fmt.Sprintf("%0.2f", float64(targetVolume)/100.0)
+			_ = exec.Command("playerctl", "volume", volStr).Run()
+		} else {
+			_ = exec.Command("playerctl", "volume", "1.0").Run()
+		}
+		return
+	}
+
+	mpvSavedVolumesMu.Lock()
+	defer mpvSavedVolumesMu.Unlock()
+
+	for _, socket := range sockets {
+		conn, err := net.DialTimeout("unix", socket, 250*time.Millisecond)
+		if err != nil {
+			continue
+		}
+		_ = conn.SetDeadline(time.Now().Add(250 * time.Millisecond))
+
+		if duck {
+			// Query current volume before ducking if not already saved
+			if _, alreadySaved := mpvSavedVolumes[socket]; !alreadySaved {
+				_, _ = conn.Write([]byte(`{"command": ["get_property", "volume"]}` + "\n"))
+				var resp struct {
+					Data float64 `json:"data"`
+				}
+				if errDec := json.NewDecoder(conn).Decode(&resp); errDec == nil && resp.Data > 0 {
+					mpvSavedVolumes[socket] = resp.Data
+				} else {
+					mpvSavedVolumes[socket] = 100.0
+				}
+			}
+
+			// Ensure unpaused so quiet background music plays gently under Pixel's voice
+			_, _ = conn.Write([]byte(`{"command": ["set_property", "pause", false]}` + "\n"))
+			setVolCmd := fmt.Sprintf(`{"command": ["set_property", "volume", %d]}`+"\n", targetVolume)
+			_, _ = conn.Write([]byte(setVolCmd))
+		} else {
+			// Restore original volume
+			origVol, exists := mpvSavedVolumes[socket]
+			if !exists {
+				origVol = 100.0
+			}
+			delete(mpvSavedVolumes, socket)
+			setVolCmd := fmt.Sprintf(`{"command": ["set_property", "volume", %f]}`+"\n", origVol)
+			_, _ = conn.Write([]byte(setVolCmd))
+		}
+		conn.Close()
+	}
 }
 
 // ScrapeYouTubeDirect queries YouTube Search page directly (using HTTP GET, acting like curl)
@@ -719,25 +818,67 @@ func (w *WebAgent) ScrapeYouTubeDirect(songQuery string) (string, string) {
 		}
 	}
 
-	// 2. Extract Video ID (first match) and Title
-	// Attempt A: Look for "videoId":"..." inside the search results JSON block
-	reVideoJSON := regexp.MustCompile(`"videoId":"([a-zA-Z0-9_-]{11})"`)
-	matchIndices := reVideoJSON.FindStringSubmatchIndex(body)
-	if len(matchIndices) >= 4 {
-		videoID = body[matchIndices[2]:matchIndices[3]]
-		fmt.Printf("[WebAgent] Scraper: Video ID trouvé en JSON direct : %s\n", videoID)
+	// 2. Extract Video ID and Title with priority on Lyrics / Audio versions
+	type videoCandidate struct {
+		score int
+		id    string
+		title string
+	}
+	var candidates []videoCandidate
+	seen := make(map[string]bool)
 
-		// Find the title text after this videoID
-		searchArea := body[matchIndices[1]:]
-		if len(searchArea) > 2000 {
-			searchArea = searchArea[:2000]
+	// Attempt A: Scan matches inside JSON block
+	reVideoJSON := regexp.MustCompile(`"videoId":"([a-zA-Z0-9_-]{11})"`)
+	allMatches := reVideoJSON.FindAllStringSubmatchIndex(body, -1)
+	for _, m := range allMatches {
+		if len(m) < 4 {
+			continue
+		}
+		vid := body[m[2]:m[3]]
+		if seen[vid] {
+			continue
+		}
+		seen[vid] = true
+
+		// Find title following this video ID
+		searchArea := body[m[1]:]
+		if len(searchArea) > 1500 {
+			searchArea = searchArea[:1500]
 		}
 		reTitle := regexp.MustCompile(`"text":"([^"]+)"`)
 		titleMatch := reTitle.FindStringSubmatch(searchArea)
+		vTitle := ""
 		if len(titleMatch) >= 2 {
-			videoTitle = titleMatch[1]
-			videoTitle = html.UnescapeString(videoTitle)
+			vTitle = html.UnescapeString(titleMatch[1])
 		}
+
+		vLower := strings.ToLower(vTitle)
+		score := 0
+		if strings.Contains(vLower, "lyrics") || strings.Contains(vLower, "lyric") || strings.Contains(vLower, "paroles") {
+			score += 100
+		} else if strings.Contains(vLower, "official audio") || strings.Contains(vLower, "audio officiel") || strings.Contains(vLower, "audio") {
+			score += 60
+		}
+		if strings.Contains(vLower, "official music video") || strings.Contains(vLower, "official video") || strings.Contains(vLower, "clip officiel") || strings.Contains(vLower, "music video") {
+			score -= 30
+		}
+
+		candidates = append(candidates, videoCandidate{score: score, id: vid, title: vTitle})
+		if len(candidates) >= 8 {
+			break
+		}
+	}
+
+	if len(candidates) > 0 {
+		best := candidates[0]
+		for _, c := range candidates[1:] {
+			if c.score > best.score {
+				best = c
+			}
+		}
+		videoID = best.id
+		videoTitle = best.title
+		fmt.Printf("[WebAgent] Scraper: Vidéo sélectionnée (score %d, Lyrics/Audio prioritaire) : %s - %s\n", best.score, videoID, videoTitle)
 	}
 
 	if videoID == "" {

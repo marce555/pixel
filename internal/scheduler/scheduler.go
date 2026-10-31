@@ -34,8 +34,11 @@ type Task struct {
 	Error         string     `json:"error,omitempty"`
 	Log           string     `json:"log,omitempty"`
 	ResolvedURL   string     `json:"resolved_url,omitempty"`
-	ResolvedTitle string     `json:"resolved_title,omitempty"`
-	IsDirect      bool       `json:"is_direct,omitempty"`
+	ResolvedTitle   string     `json:"resolved_title,omitempty"`
+	IsDirect        bool       `json:"is_direct,omitempty"`
+	Announcement    string     `json:"announcement,omitempty"`
+	AnnouncementWav string     `json:"announcement_wav,omitempty"`
+	Announced       bool       `json:"announced,omitempty"`
 
 	// Private fields for execution control
 	mu         sync.Mutex
@@ -102,6 +105,48 @@ func (t *Task) GetResolvedTitle() string {
 	return t.ResolvedTitle
 }
 
+func (t *Task) SetAnnouncement(a string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.Announcement = a
+}
+
+func (t *Task) GetAnnouncement() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.Announcement
+}
+
+func (t *Task) SetAnnouncementWav(w string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.AnnouncementWav = w
+}
+
+func (t *Task) GetAnnouncementWav() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.AnnouncementWav
+}
+
+func (t *Task) SetAnnounced(v bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.Announced = v
+}
+
+func (t *Task) IsAnnounced() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.Announced
+}
+
+// VoiceSpeaker enables synthesizing and playing spoken announcements.
+type VoiceSpeaker interface {
+	SynthesizeToFile(ctx context.Context, text string, destWav string) error
+	SpeakText(ctx context.Context, text string) error
+}
+
 type TaskHandler func(ctx context.Context, task *Task) error
 
 type Scheduler struct {
@@ -114,11 +159,26 @@ type Scheduler struct {
 	// Serializer for music playing to avoid overlapping audio
 	musicSem chan struct{}
 
+	// Voice speaker for radio DJ announcements
+	voiceSpeaker VoiceSpeaker
+
 	// Callback for Autoplay (Infinite Radio)
 	AutoQueueCallback func(ctx context.Context, lastTitle string)
 
 	autoplayCancel context.CancelFunc
 	autoplayMu     sync.Mutex
+}
+
+func (s *Scheduler) SetVoiceSpeaker(sp VoiceSpeaker) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.voiceSpeaker = sp
+}
+
+func (s *Scheduler) GetVoiceSpeaker() VoiceSpeaker {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.voiceSpeaker
 }
 
 func (s *Scheduler) SetBroadcaster(b EventBroadcaster) {
@@ -349,7 +409,7 @@ func (s *Scheduler) runTask(taskCtx context.Context, cancel context.CancelFunc, 
 			if !semReleased {
 				<-s.musicSem
 				semReleased = true
-				task.AppendLog("Canal audio libéré par anticipation (crossfade).")
+				task.AppendLog("Canal audio libéré pour l'enchaînement direct du titre suivant.")
 				go s.TriggerDispatch()
 			}
 		}

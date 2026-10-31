@@ -1,6 +1,6 @@
 {
   "name": "billboard_radio",
-  "description": "Scrape le classement Billboard Hot 100 (les 100 titres d'une année spécifique comme 1983 ou le classement actuel sur billboard.com) et lance la lecture des 100 titres dans le lecteur de musique de Pixel avec mixage radio (crossfade de 5 secondes en fin de morceau).",
+  "description": "Scrape le classement Billboard Hot 100 (les 100 titres d'une année spécifique comme 1983 ou le classement actuel sur billboard.com) et lance la lecture des 100 titres dans le lecteur de musique de Pixel en mode Radio DJ avec annonces vocales de Pixel à chaque titre (ducking du fond musical à 20% pendant la voix et enchaînement direct du morceau suivant à 100% sans silence).",
   "executable": "python3",
   "script": "run.py",
   "router_instructions": "Utilise 'skill_billboard_radio' dès que l'utilisateur demande une liste de musiques, un classement, un Top 100 ou une radio basée sur le Billboard (ou ses variantes phonétiques vocales comme 'vilvoorde', 'bilboard', 'bill board') pour une année spécifique (ex: '1983', 'Billboard 1983', 'Top 100 Billboard de 1985') ou le Billboard actuel. Dans 'query', indique l'année demandée (ex: '1983') ou la requête complète."

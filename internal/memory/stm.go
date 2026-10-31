@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"strings"
 	"sync"
 	"time"
 
@@ -80,6 +81,20 @@ func (s *STM) RemoveOldest(count int) {
 		count = len(s.messages)
 	}
 	s.messages = s.messages[count:]
+}
+
+// RemoveGeminiExchanges removes autonomous Gemini dialogues from the active chat discussion stream.
+func (s *STM) RemoveGeminiExchanges() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cleaned := make([]llm.Message, 0, len(s.messages))
+	for _, m := range s.messages {
+		if strings.Contains(m.Content, "[Échange autonome avec Gemini]") || strings.Contains(m.Content, "[Échange avec Gemini]") {
+			continue
+		}
+		cleaned = append(cleaned, m)
+	}
+	s.messages = cleaned
 }
 
 func (s *STM) IsFull() bool {

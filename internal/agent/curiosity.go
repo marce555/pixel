@@ -13,6 +13,7 @@ import (
 
 	"github.com/marce555/pixel/internal/llm"
 	"github.com/marce555/pixel/internal/memory"
+	"github.com/marce555/pixel/internal/resourceagent"
 	"github.com/marce555/pixel/internal/scheduler"
 	"github.com/marce555/pixel/internal/skills"
 	"github.com/marce555/pixel/internal/timeagent"
@@ -198,9 +199,14 @@ func (c *CuriosityAgent) Start(ctx context.Context) {
 					cooldown := c.getThoughtCooldown(idleDuration)
 
 					// Inconscient : Pixel peut générer des pensées / recherches de fond pour nourrir son monde intérieur
-					if !c.sleepManager.IsBusy() && (c.scheduler == nil || !c.scheduler.HasActiveTasks()) {
+					// (Uniquement si l'utilisateur est réellement inactif depuis plus de 3 minutes, afin d'éviter un faux positif juste après que SleepManager vide la STM)
+					if idleDuration > 3*time.Minute && !c.sleepManager.IsBusy() && (c.scheduler == nil || !c.scheduler.HasActiveTasks()) {
 						if time.Since(c.lastThoughtTime) > cooldown {
-							c.generateThought(ctx)
+							bgCtx := ctx
+							if c.sleepManager != nil {
+								bgCtx = c.sleepManager.AcquireBackgroundContext()
+							}
+							c.generateThought(bgCtx)
 						}
 					}
 
@@ -705,6 +711,10 @@ Réponds UNIQUEMENT avec la phrase, rien d'autre.`, topic, knowledge)
 	log.Println("[CuriosityAgent] Pensée interne vectorisée et intégrée à l'inconscient.")
 
 	if os.Getenv("PIXEL_AUTO_PUBLISH") == "true" {
+		if ctx.Err() != nil || (c.stm != nil && hasActiveDialogue(c.stm.GetMessages()) && time.Since(c.stm.GetLastActivity()) < 3*time.Minute) {
+			log.Println("[CuriosityAgent] Conversation utilisateur active détectée : report de la rédaction autonome d'article.")
+			return
+		}
 		// Limit auto-publishing to at most one article per day
 		todayStr := time.Now().Format("2006-01-02")
 		lastPublishDate := ""
@@ -1126,14 +1136,14 @@ Réponds UNIQUEMENT avec cette phrase de résumé.`, question, geminiRes)
 	c.lastThoughtTopic = "Dialogue autonome avec Gemini : " + question
 	log.Println("[CuriosityAgent] Échange avec Gemini mémorisé et intégré à la conscience.")
 
-	if c.broadcaster != nil {
-		broadcastMsg := fmt.Sprintf("💭 [Échange autonome avec Gemini]\n\n🤖 Pixel : %s\n\n☁️ Gemini : %s", question, geminiRes)
-		if c.stm != nil {
-			// Utiliser AddPassiveMessage pour ne pas réinitialiser l'idleDuration de la conversation utilisateur
-			c.stm.AddPassiveMessage(llm.Message{Role: llm.RoleAssistant, Content: broadcastMsg})
-		}
-		c.broadcaster.Broadcast(broadcastMsg)
+	// Les dialogues autonomes de Pixel et Gemini doivent rester STRICTEMENT dans le flux de pensée
+	// interne (ThoughtStream, LTM et SelfAwareness) et ne JAMAIS être exposés à l'utilisateur dans le flux
+	// de discussion (STM / chat UI) ni transmis à la synthèse vocale (TTS).
+	if c.stm != nil {
+		c.stm.RemoveGeminiExchanges()
 	}
+	resourceagent.AddLiveLog("Pensée", fmt.Sprintf("Dialogue autonome avec Gemini conservé en for intérieur : %s", question))
+	log.Println("[CuriosityAgent] Échange avec Gemini conservé dans le flux de pensée interne (non exposé au chat).")
 }
 
 func (c *CuriosityAgent) proposeToShare(ctx context.Context) {

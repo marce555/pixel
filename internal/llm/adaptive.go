@@ -44,12 +44,20 @@ func NewAdaptiveProvider(activeMode, cloudAPIKey, cloudBaseURL, cloudModel, loca
 		localModel:   localModel,
 	}
 	localEmbed := "nomic-embed-text-v2-moe-GGUF"
-	if strings.Contains(localBaseURL, "52625") {
+	if strings.Contains(localBaseURL, "52625") || strings.Contains(localBaseURL, "18081") || strings.Contains(localBaseURL, "18082") {
 		localEmbed = "embed-gemma:300m"
 	}
 	p.localProvider = NewOpenAICompatibleProvider(localBaseURL, "", localModel, localEmbed)
 	p.cloudProvider = NewOpenAICompatibleProvider(cloudBaseURL, cloudAPIKey, cloudModel, "gemini-embedding-2")
 	return p
+}
+
+func (p *AdaptiveProvider) SetLocalFallback(fallbackBaseURL, fallbackModel string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.localProvider != nil {
+		p.localProvider.SetFallback(fallbackBaseURL, fallbackModel)
+	}
 }
 
 func (p *AdaptiveProvider) UpdateSettings(activeMode, cloudAPIKey, cloudBaseURL, cloudModel, localBaseURL, localModel string) {

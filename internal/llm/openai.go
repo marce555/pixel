@@ -14,12 +14,14 @@ import (
 
 // OpenAICompatibleProvider is designed to work with llama-server, LM Studio, Ollama, or OpenAI.
 type OpenAICompatibleProvider struct {
-	BaseURL        string
-	APIKey         string
-	ChatModel      string
-	EmbeddingModel string
-	Temperature    *float64
-	Client         *http.Client
+	BaseURL         string
+	FallbackBaseURL string
+	FallbackModel   string
+	APIKey          string
+	ChatModel       string
+	EmbeddingModel  string
+	Temperature     *float64
+	Client          *http.Client
 }
 
 func NewOpenAICompatibleProvider(baseURL, apiKey, chatModel, embeddingModel string) *OpenAICompatibleProvider {
@@ -40,6 +42,11 @@ func NewOpenAICompatibleProvider(baseURL, apiKey, chatModel, embeddingModel stri
 			},
 		},
 	}
+}
+
+func (p *OpenAICompatibleProvider) SetFallback(fallbackBaseURL, fallbackModel string) {
+	p.FallbackBaseURL = fallbackBaseURL
+	p.FallbackModel = fallbackModel
 }
 
 func (p *OpenAICompatibleProvider) SetTemperature(temp float64) {
@@ -157,7 +164,18 @@ func (p *OpenAICompatibleProvider) GenerateDetailed(ctx context.Context, message
 			return GenerationResult{}, ctxErr
 		}
 		baseURL := strings.TrimSuffix(p.BaseURL, "/")
-		req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/chat/completions", bytes.NewBuffer(jsonData))
+		payload := jsonData
+		if attempt > 1 && p.FallbackBaseURL != "" {
+			baseURL = strings.TrimSuffix(p.FallbackBaseURL, "/")
+			if p.FallbackModel != "" && p.FallbackModel != p.ChatModel {
+				fbReq := reqBody
+				fbReq.Model = p.FallbackModel
+				if fbData, errM := json.Marshal(fbReq); errM == nil {
+					payload = fbData
+				}
+			}
+		}
+		req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/chat/completions", bytes.NewBuffer(payload))
 		if err != nil {
 			return GenerationResult{}, err
 		}
@@ -174,6 +192,11 @@ func (p *OpenAICompatibleProvider) GenerateDetailed(ctx context.Context, message
 
 		if attempt == 8 {
 			return GenerationResult{}, fmt.Errorf("after 8 attempts, failed to contact LLM: %w", err)
+		}
+
+		if attempt == 1 && p.FallbackBaseURL != "" {
+			fmt.Printf("[LLM Fallback] Accélérateur secondaire (%s) indisponible (%v), basculement immédiat sur %s...\n", p.BaseURL, err, p.FallbackBaseURL)
+			continue
 		}
 
 		fmt.Printf("[LLM Warning] Connection error (attempt %d/8): %v. Retrying in 1.5s...\n", attempt, err)
@@ -338,6 +361,10 @@ func (p *OpenAICompatibleProvider) CreateEmbedding(ctx context.Context, text str
 		baseURL := strings.TrimSuffix(p.BaseURL, "/")
 		if strings.Contains(baseURL, "52625") {
 			baseURL = strings.Replace(baseURL, "52625", "52626", 1)
+		} else if strings.Contains(baseURL, "18081") {
+			baseURL = strings.Replace(baseURL, "18081", "52626", 1)
+		} else if strings.Contains(baseURL, "18082") {
+			baseURL = strings.Replace(baseURL, "18082", "52626", 1)
 		}
 		// NOTE: L'endpoint standard est "/embeddings" (ou "/v1/embeddings" selon la BaseURL)
 		req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/embeddings", bytes.NewBuffer(jsonData))

@@ -658,14 +658,11 @@ func TestSuperiorAgentProcessInputStreamStatus(t *testing.T) {
 	}
 
 	// Verify that the status announcement is NOT sent to the conversation chat stream (no pollution)
+	// and direct music playback doesn't chatter over the music (chunks is empty or free of status announcements)
 	for _, chunk := range chunks {
 		if strings.Contains(chunk, "Recherche musicale") {
 			t.Errorf("Status announcement should not appear in chat chunks, got: %q", chunk)
 		}
-	}
-
-	if len(chunks) == 0 || chunks[len(chunks)-1] != "Bonne écoute !" {
-		t.Errorf("Expected stream chunk to be 'Bonne écoute !', got: %v", chunks)
 	}
 
 	// Verify that the status was recorded in the real-time live logs (Flux en temps réel)

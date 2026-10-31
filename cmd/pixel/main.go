@@ -17,6 +17,7 @@ import (
 	"github.com/marce555/pixel/internal/scheduler"
 	"github.com/marce555/pixel/internal/skills"
 	"github.com/marce555/pixel/internal/timeagent"
+	"github.com/marce555/pixel/internal/voice"
 )
 
 func loadEnv() {
@@ -54,8 +55,9 @@ func main() {
 	ltm := memory.NewLTM()
 	projectManager := memory.NewProjectManager("active_project.mp")
 
-	// 2. Init LLM Adaptive Provider
+	// 2. Init Multi-Accelerator LLM Providers (dGPU CUDA :52625 + iGPU Vulkan :18081 + NPU XDNA2 :18082)
 	llmSettings := coreMem.GetLLMSettings()
+	// Primary Chat & Vision Provider -> dGPU NVIDIA RTX 5060 (CUDA, port 52625)
 	adaptiveProvider := llm.NewAdaptiveProvider(
 		llmSettings.ActiveMode,
 		llmSettings.CloudAPIKey,
@@ -66,13 +68,51 @@ func main() {
 	)
 	provider := adaptiveProvider
 
-	// 3. Init Sub-Agents
-	rAgent := resourceagent.NewResourceAgent(stm)
-	profiler := agent.NewProfilingAgent(provider, coreMem)
-	projectAgent := agent.NewProjectAgent(provider, projectManager)
+	// Fast Parallel Router & Heavy Background Agents -> iGPU AMD Radeon 890M (Vulkan0, port 18081)
+	igpuBaseURL := os.Getenv("PIXEL_IGPU_URL")
+	if igpuBaseURL == "" {
+		igpuBaseURL = "http://127.0.0.1:18081/v1"
+	}
+	igpuModel := os.Getenv("PIXEL_IGPU_MODEL")
+	if igpuModel == "" {
+		igpuModel = "qwen3.5:9b"
+	}
+	igpuProvider := llm.NewAdaptiveProvider(
+		llmSettings.ActiveMode,
+		llmSettings.CloudAPIKey,
+		llmSettings.CloudBaseURL,
+		llmSettings.CloudModel,
+		igpuBaseURL,
+		igpuModel,
+	)
+	igpuProvider.SetLocalFallback(llmSettings.LocalBaseURL, llmSettings.LocalModel)
 
-	// 4. Init SleepManager and start background loop
-	sleepManager := agent.NewSleepManager(stm, ltm, coreMem, rAgent, profiler, provider)
+	// Continuous Cognitive Subconscious Agents -> NPU AMD Ryzen AI XDNA 2 (FastFlowLM, port 18082)
+	npuBaseURL := os.Getenv("PIXEL_NPU_URL")
+	if npuBaseURL == "" {
+		npuBaseURL = "http://127.0.0.1:18082/v1"
+	}
+	npuModel := os.Getenv("PIXEL_NPU_MODEL")
+	if npuModel == "" {
+		npuModel = "qwen3.5:2b"
+	}
+	npuProvider := llm.NewAdaptiveProvider(
+		llmSettings.ActiveMode,
+		llmSettings.CloudAPIKey,
+		llmSettings.CloudBaseURL,
+		llmSettings.CloudModel,
+		npuBaseURL,
+		npuModel,
+	)
+	npuProvider.SetLocalFallback(igpuBaseURL, igpuModel)
+
+	// 3. Init Sub-Agents (Offloaded to NPU / iGPU so primary dGPU stays 100% free for user chat)
+	rAgent := resourceagent.NewResourceAgent(stm)
+	profiler := agent.NewProfilingAgent(npuProvider, coreMem)
+	projectAgent := agent.NewProjectAgent(npuProvider, projectManager)
+
+	// 4. Init SleepManager and start background loop (NPU)
+	sleepManager := agent.NewSleepManager(stm, ltm, coreMem, rAgent, profiler, npuProvider)
 	sleepManager.Start(ctx)
 
 	// 5. Init Web Agent, EventHub, Tasks Scheduler and Thought Stream
@@ -81,24 +121,32 @@ func main() {
 	taskScheduler := scheduler.NewScheduler()
 	taskScheduler.SetBroadcaster(eventHub)
 
-	webResearcher := agent.NewWebResearcherAgent(provider, webAgent)
-	sysadminAgent := agent.NewSysadminAgent(provider)
+	// VoiceManager for TTS and Radio DJ announcements
+	voiceMgr, err := voice.NewVoiceManager()
+	if err != nil {
+		fmt.Printf("[Main] Avertissement initialisation VoiceManager : %v\n", err)
+	} else {
+		taskScheduler.SetVoiceSpeaker(voiceMgr)
+	}
+
+	webResearcher := agent.NewWebResearcherAgent(igpuProvider, webAgent)
+	sysadminAgent := agent.NewSysadminAgent(igpuProvider)
 
 	draftManager := scheduler.NewDraftManager("drafts")
-	reviewerAgent := agent.NewReviewerAgent(provider)
-	// Agent Vérificateur indépendant : modèle cloud distinct du rédacteur local, contexte isolé, sources propres
-	factCheckerAgent := agent.NewFactCheckerAgent(adaptiveProvider, webAgent)
+	reviewerAgent := agent.NewReviewerAgent(igpuProvider)
+	// Agent Vérificateur indépendant : isolé sur l'iGPU (ou Cloud si mode cloud) pour ne jamais bloquer le chat principal
+	factCheckerAgent := agent.NewFactCheckerAgent(igpuProvider, webAgent)
 	// Agent de Police Bibliographique : traque les chimères statistiques, co-auteurs fictifs et affiliations erronées
-	biblioAuditorAgent := agent.NewBibliographicAuditorAgent(adaptiveProvider, webAgent)
+	biblioAuditorAgent := agent.NewBibliographicAuditorAgent(igpuProvider, webAgent)
 
 	// Register scheduler handlers
 	taskScheduler.RegisterHandler("play_music", scheduler.NewPlayMusicHandler(webAgent, taskScheduler))
-	taskScheduler.RegisterHandler("agent_task", scheduler.NewAgentTaskHandler(provider, webAgent, eventHub, stm))
+	taskScheduler.RegisterHandler("agent_task", scheduler.NewAgentTaskHandler(igpuProvider, webAgent, eventHub, stm))
 	taskScheduler.RegisterHandler("research_task", agent.NewResearchTaskHandler(webResearcher, eventHub, stm, ltm))
 	taskScheduler.RegisterHandler("sysadmin", agent.NewSysadminTaskHandler(sysadminAgent, eventHub, stm))
-	taskScheduler.RegisterHandler("publish_article", scheduler.NewPublishArticleHandlerWithBibliographicAuditor(eventHub, stm, provider, webAgent, draftManager, reviewerAgent, factCheckerAgent, biblioAuditorAgent))
-	taskScheduler.RegisterHandler("depublish_duplicates", scheduler.NewDepublishDuplicatesHandler(eventHub, stm, provider))
-	taskScheduler.RegisterHandler("audit_and_fix_articles", scheduler.NewAuditAndFixArticlesHandlerWithBibliographicAuditor(eventHub, stm, provider, draftManager, reviewerAgent, factCheckerAgent, biblioAuditorAgent))
+	taskScheduler.RegisterHandler("publish_article", scheduler.NewPublishArticleHandlerWithBibliographicAuditor(eventHub, stm, igpuProvider, webAgent, draftManager, reviewerAgent, factCheckerAgent, biblioAuditorAgent))
+	taskScheduler.RegisterHandler("depublish_duplicates", scheduler.NewDepublishDuplicatesHandler(eventHub, stm, igpuProvider))
+	taskScheduler.RegisterHandler("audit_and_fix_articles", scheduler.NewAuditAndFixArticlesHandlerWithBibliographicAuditor(eventHub, stm, igpuProvider, draftManager, reviewerAgent, factCheckerAgent, biblioAuditorAgent))
 
 	codeProvider := llm.NewOpenAICompatibleProvider(
 		llmSettings.CodeBaseURL,
@@ -126,22 +174,24 @@ func main() {
 
 	thoughtStream := memory.NewThoughtStream(50)
 	unconscious := memory.NewUnconsciousManager()
-	selfAwareness := agent.NewSelfAwarenessAgent(provider, coreMem, ltm, thoughtStream, projectManager, unconscious, "pixel_self_knowledge.json")
+	selfAwareness := agent.NewSelfAwarenessAgent(npuProvider, coreMem, ltm, thoughtStream, projectManager, unconscious, "pixel_self_knowledge.json")
 
 	superior := agent.NewSuperiorAgent(provider, coreMem, ltm, webAgent, thoughtStream, unconscious, projectManager, taskScheduler, skillManager)
+	superior.SetFastProvider(igpuProvider)
+	superior.SetBackgroundProvider(npuProvider)
 	superior.SetDraftManager(draftManager)
 	superior.SetSelfAwareness(selfAwareness)
 
 	sleepManager.SetSelfAwareness(selfAwareness)
 
-	// 6. Init Curiosity Agent & Thalamic Gate
+	// 6. Init Curiosity Agent (iGPU) & Thalamic Gate (NPU)
 	timeAgent := timeagent.NewTimeAgent()
-	thalamicGate := agent.NewThalamicGate(provider)
-	curiosityAgent := agent.NewCuriosityAgent(provider, coreMem, stm, ltm, eventHub, timeAgent, webAgent, thoughtStream, sleepManager, taskScheduler, thalamicGate)
+	thalamicGate := agent.NewThalamicGate(npuProvider)
+	curiosityAgent := agent.NewCuriosityAgent(igpuProvider, coreMem, stm, ltm, eventHub, timeAgent, webAgent, thoughtStream, sleepManager, taskScheduler, thalamicGate)
 	curiosityAgent.SetSkillManager(skillManager)
 	curiosityAgent.SetSelfAwareness(selfAwareness)
 
-	// 7. Init VisionAgent and start background sensory vision loop
+	// 7. Init VisionAgent (dGPU multimodal) and start background sensory vision loop
 	visionAgent := agent.NewVisionAgent(provider, coreMem, ltm, stm, thoughtStream, func(msg string) {
 		eventHub.Broadcast(msg)
 	})
@@ -150,12 +200,12 @@ func main() {
 	curiosityAgent.SetVisionAgent(visionAgent)
 	curiosityAgent.Start(ctx)
 
-	// 7b. Init GmailAgent and start background check loop
-	gmailAgent := agent.NewGmailAgent(provider, coreMem, stm, ltm, thoughtStream, eventHub)
+	// 7b. Init GmailAgent (NPU) and start background check loop
+	gmailAgent := agent.NewGmailAgent(npuProvider, coreMem, stm, ltm, thoughtStream, eventHub)
 	gmailAgent.Start(ctx)
 
-	// 7c. Init ServerMonitorAgent and start background hourly monitoring loop on appliyou.fr
-	serverMonitorAgent := agent.NewServerMonitorAgent(provider, coreMem, stm, ltm, thoughtStream, eventHub, skillManager)
+	// 7c. Init ServerMonitorAgent (NPU) and start background hourly monitoring loop on appliyou.fr
+	serverMonitorAgent := agent.NewServerMonitorAgent(npuProvider, coreMem, stm, ltm, thoughtStream, eventHub, skillManager)
 	serverMonitorAgent.Start(ctx)
 
 	// 8. Démarrage de l'Interface Web locale

@@ -4,6 +4,9 @@
 import os
 import sys
 import time
+import math
+import wave
+import shutil
 from datetime import datetime
 import json
 import struct
@@ -12,6 +15,8 @@ import subprocess
 import requests
 import re
 import urllib.request
+import glob
+import socket
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLabel, QTextBrowser, QLineEdit, 
                              QPushButton, QTabWidget, QTextEdit, QComboBox, 
@@ -19,7 +24,110 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QScrollArea, QFrame, QSizePolicy, QMessageBox)
 from PyQt6.QtCore import QThread, pyqtSignal, QTimer, Qt, QUrl, QFile, QIODevice
 from PyQt6.QtGui import QIcon, QAction, QTextCursor, QFont, QColor
-from PyQt6.QtMultimedia import QAudioSource, QAudioFormat, QMediaDevices, QMediaPlayer, QAudioOutput
+from PyQt6.QtMultimedia import (QAudioSource, QAudioFormat, QMediaDevices, QMediaPlayer, 
+                                QAudioOutput, QSoundEffect)
+
+def control_active_mpv(command):
+    """Envoie une commande JSON IPC à toutes les instances mpv actives via /tmp/mpvsocket_*."""
+    success = False
+    for s in glob.glob("/tmp/mpvsocket_*"):
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(0.15)
+            sock.connect(s)
+            sock.sendall((json.dumps({"command": command}) + "\n").encode())
+            sock.close()
+            success = True
+        except Exception:
+            try:
+                os.remove(s)
+            except Exception:
+                pass
+    return success
+
+_mpv_saved_volumes = {}
+
+def duck_active_mpv(duck=True, target_volume=18):
+    """Baisse le volume de mpv (audio ducking) quand Pixel parle et le restaure à la fin."""
+    global _mpv_saved_volumes
+    for s in glob.glob("/tmp/mpvsocket_*"):
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(0.2)
+            sock.connect(s)
+            if duck:
+                if s not in _mpv_saved_volumes:
+                    sock.sendall(b'{"command": ["get_property", "volume"]}\n')
+                    try:
+                        res = json.loads(sock.recv(1024).decode())
+                        _mpv_saved_volumes[s] = res.get("data", 100.0)
+                    except Exception:
+                        _mpv_saved_volumes[s] = 100.0
+                # Unpause et réglage du volume réduit pendant la voix de Pixel
+                sock.sendall(b'{"command": ["set_property", "pause", false]}\n')
+                try: sock.recv(512)
+                except Exception: pass
+                sock.sendall((json.dumps({"command": ["set_property", "volume", target_volume]}) + "\n").encode())
+            else:
+                orig_vol = _mpv_saved_volumes.pop(s, 100.0)
+                sock.sendall((json.dumps({"command": ["set_property", "volume", orig_vol]}) + "\n").encode())
+            sock.close()
+        except Exception:
+            pass
+
+def ensure_acknowledged_sound():
+    """Génère un carillon audio moderne et chaleureux (earcon) si non présent."""
+    sounds_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sounds")
+    os.makedirs(sounds_dir, exist_ok=True)
+    sound_path = os.path.join(sounds_dir, "acknowledged.wav")
+    if not os.path.exists(sound_path) or os.path.getsize(sound_path) < 1000:
+        sample_rate = 44100
+        duration = 0.22
+        num_samples = int(sample_rate * duration)
+        samples = []
+        for i in range(num_samples):
+            t = i / sample_rate
+            if t < 0.08:
+                freq = 587.33
+                env = min(1.0, t / 0.015) * math.exp(-t * 8.0)
+            else:
+                t2 = t - 0.08
+                freq = 880.0
+                env = min(1.0, t2 / 0.015) * math.exp(-t2 * 12.0)
+            val = (0.75 * math.sin(2 * math.pi * freq * t) +
+                   0.20 * math.sin(2 * math.pi * freq * 2 * t) +
+                   0.05 * math.sin(2 * math.pi * (freq / 2) * t))
+            val *= env * 0.75
+            ival = int(val * 32767.0)
+            ival = max(-32768, min(32767, ival))
+            samples.append(ival)
+        with wave.open(sound_path, "w") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sample_rate)
+            data = struct.pack(f"<{len(samples)}h", *samples)
+            wf.writeframes(data)
+    return sound_path
+
+# Single-instance enforcement to prevent audio device contention (parec)
+def ensure_single_instance():
+    """Garantit qu'une seule instance de l'interface GUI s'exécute pour éviter la concurrence sur parec/audio."""
+    import fcntl
+    lock_path = os.path.join(tempfile.gettempdir(), "pixel_gui.lock")
+    try:
+        lock_file = open(lock_path, "w")
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return lock_file
+    except (BlockingIOError, IOError):
+        print("[GUI] ⚠️ Une autre instance de pixel_gui.py est déjà en cours d'exécution. Fermeture.")
+        sys.exit(0)
+
+# Wake word patterns (supportant 'Pixel', 'Excel', 'Axel', 'Pique sel' et variantes Whisper phonétiques fréquentes)
+WAKE_WORDS_CORE_PATTERN = r'(?:pixel|pixelle|pixels|picel|picsel|pixl|pixeul|pique[\s\-]*sel(?:le)?|pic[\s\-]*sel(?:le)?|pik[\s\-]*sel(?:le)?|excel|exel|axel|axelle|accel|bruxelles|pixar|picasso|pix|pics|fixel|bixel|bicelle|bicel|xl)'
+WAKE_WORDS_PATTERN = re.compile(
+    r'(.*?)\b' + WAKE_WORDS_CORE_PATTERN + r'\b[\s,:\-\.\!\?]*(.*)',
+    re.IGNORECASE | re.DOTALL
+)
 
 # Constants
 API_BASE = "http://127.0.0.1:8080"
@@ -254,9 +362,10 @@ class RecordReaderThread(QThread):
     finished_signal = pyqtSignal(str) # Emits wav_path
     speech_started_signal = pyqtSignal() # Emits when speech begins for barge-in
     
-    def __init__(self, is_handsfree=False):
+    def __init__(self, is_handsfree=False, is_wake_active=False):
         super().__init__()
         self.is_handsfree = is_handsfree
+        self.is_wake_active = is_wake_active
         self.temp_wav_path = os.path.join(tempfile.gettempdir(), f"mic_{int(time.time()*1000)}.wav")
         self.process = None
         self.should_stop = False
@@ -289,14 +398,15 @@ class RecordReaderThread(QThread):
         from collections import deque
         pre_roll = deque(maxlen=20)     # ~640ms de pré-roll audio avant détection de la voix
         audio_data = bytearray()
-        noise_floor = 500.0     # Valeur initiale basse (niveaux parec s16le typiques : 200–2000)
+        noise_floor = 450.0     # Valeur initiale basse (niveaux parec s16le typiques : 150–600)
         speech_detected = False
         speech_start_time = None
         silence_start_time = None
         silence_frame_count = 0         # Hysteresis : frames consécutives de silence confirmé
+        voice_frame_count = 0           # Frames consécutives au-dessus du seuil
         SILENCE_HYSTERESIS = 4          # Nombre de frames silencieuses avant démarrage du compteur
         start_time = time.time()
-        min_speech_ms = 300             # Durée minimale de parole pour déclencher la transcription
+        min_speech_ms = 280             # Durée minimale de parole pour déclencher la transcription
         
         while not self.should_stop:
             # Read a small chunk (1024 bytes = 512 samples = ~32ms of audio)
@@ -317,60 +427,93 @@ class RecordReaderThread(QThread):
                 now = time.time()
                 
                 # Adapt background noise floor dynamically — mise à jour lente (τ ≈ 17 frames)
-                # uniquement hors parole, avec plafond pour éviter la dérive sur le bruit
+                # uniquement hors parole, avec plafond à 1000 pour éviter la dérive sur le bruit ambiant/musique
                 if not speech_detected:
-                    noise_floor = noise_floor * 0.94 + min(ac_rms, 2500.0) * 0.06
+                    noise_floor = noise_floor * 0.94 + min(ac_rms, 1000.0) * 0.06
                 
-                # Seuil dynamique robuste : au moins 800 unités, ou 2.2× le bruit de fond
-                threshold = max(800.0, noise_floor * 2.2)
+                # Seuil dynamique adapté :
+                # - En écoute active (l'utilisateur pose sa question) : très sensible (550-1500)
+                # - En veille passive (détection du mot d'éveil "Pixel") : calibré (700-1800)
+                if self.is_wake_active:
+                    threshold = max(550.0, min(1500.0, noise_floor * 1.5))
+                else:
+                    threshold = max(700.0, min(1800.0, noise_floor * 1.8))
                 
                 # Check for speech detection
                 if ac_rms > threshold:
+                    voice_frame_count += 1
                     if not speech_detected:
-                        speech_start_time = now
-                        speech_detected = True
-                        for prev_chunk in pre_roll:
-                            audio_data.extend(prev_chunk)
-                        pre_roll.clear()
-                        self.speech_started_signal.emit()
+                        if voice_frame_count >= 2:
+                            speech_start_time = now
+                            speech_detected = True
+                            for prev_chunk in pre_roll:
+                                audio_data.extend(prev_chunk)
+                            pre_roll.clear()
+                            self.speech_started_signal.emit()
+                    else:
+                        # Si le silence était déjà entamé, il faut au moins 3 frames consécutives de voix pour l'annuler
+                        # Cela protège contre les transitoires/percussions de fond d'une musique
+                        if voice_frame_count >= 3:
+                            silence_start_time = None
+                            silence_frame_count = 0
                     audio_data.extend(chunk)
-                    silence_start_time = None
-                    silence_frame_count = 0
-                elif speech_detected:
-                    audio_data.extend(chunk)
-                    # Silence potentiel — hysteresis avant de démarrer le compteur
-                    silence_frame_count += 1
-                    if silence_frame_count >= SILENCE_HYSTERESIS:
-                        if silence_start_time is None:
-                            silence_start_time = now
-                        else:
-                            silence_dur = now - silence_start_time
-                            speech_dur = (silence_start_time - speech_start_time) * 1000
-                            # Délai de silence réactif : 1.1s mains-libres, 0.9s manuel
-                            base_delay = 1.1 if self.is_handsfree else 0.9
-                            adaptive_delay = base_delay + (0.4 if speech_dur > 3000 else 0.0)
-                            
-                            if silence_dur > adaptive_delay:
-                                if speech_dur > min_speech_ms:
-                                    print(f"[GUI] VAD v2 : parole={int(speech_dur)}ms, silence={int(silence_dur*1000)}ms, seuil={threshold:.0f} → Transcription")
-                                    break
-                                else:
-                                    # Bruit impulsif trop court (< 300ms) : réinitialiser sans couper l'écoute
-                                    speech_detected = False
-                                    speech_start_time = None
-                                    silence_start_time = None
-                                    silence_frame_count = 0
-                                    audio_data.clear()
                 else:
-                    # Hors parole : conserver uniquement les ~640ms précédant la voix
-                    pre_roll.append(chunk)
-                    if not self.is_handsfree and (now - start_time > 15.0):
-                        print("[GUI] Aucune voix détectée en 15s (mode manuel)")
-                        break
+                    voice_frame_count = 0
+                    if speech_detected:
+                        audio_data.extend(chunk)
+                        # Silence potentiel — hysteresis avant de démarrer le compteur
+                        silence_frame_count += 1
+                        if silence_frame_count >= SILENCE_HYSTERESIS:
+                            if silence_start_time is None:
+                                silence_start_time = now
+                            else:
+                                silence_dur = now - silence_start_time
+                                speech_dur = (silence_start_time - speech_start_time) * 1000
+                                # Délais de silence réactifs :
+                                if self.is_wake_active:
+                                    # Écoute active : pause naturelle confortable pour formuler la question
+                                    adaptive_delay = 1.10 + (0.35 if speech_dur > 3000 else 0.0)
+                                elif self.is_handsfree:
+                                    # En veille mot-clé court ("Pixel") : coupure rapide à 0.50s
+                                    if speech_dur < 1200:
+                                        adaptive_delay = 0.50
+                                    else:
+                                        adaptive_delay = 1.05 + (0.35 if speech_dur > 3000 else 0.0)
+                                else:
+                                    base_delay = 0.85
+                                    adaptive_delay = base_delay + (0.35 if speech_dur > 3000 else 0.0)
+                                
+                                if silence_dur > adaptive_delay:
+                                    if speech_dur > min_speech_ms:
+                                        print(f"[GUI] VAD v2 : parole={int(speech_dur)}ms, silence={int(silence_dur*1000)}ms, seuil={threshold:.0f} → Transcription")
+                                        break
+                                    else:
+                                        # Bruit impulsif trop court (< 280ms) : réinitialiser sans couper l'écoute
+                                        speech_detected = False
+                                        speech_start_time = None
+                                        silence_start_time = None
+                                        silence_frame_count = 0
+                                        audio_data.clear()
+                    else:
+                        # Hors parole : conserver uniquement les ~640ms précédant la voix
+                        pre_roll.append(chunk)
+                        # Auto-refresh du buffer audio pour éviter la dérive de parec PipeWire :
+                        # En mode mains-libres passif : cycle de 10s max sans parole
+                        # En écoute active : cycle de 6s max sans parole pour préserver la réactivité
+                        timeout_silence = 6.0 if self.is_wake_active else 10.0
+                        if self.is_handsfree and (now - start_time > timeout_silence):
+                            # Cycle d'auto-refresh sans parole détectée
+                            break
+                        elif not self.is_handsfree and (now - start_time > 15.0):
+                            print("[GUI] Aucune voix détectée en 15s (mode manuel)")
+                            break
                             
-            # Max speech duration safety (15s à compter du début de la parole, pas de l'attente)
-            if speech_detected and speech_start_time and (time.time() - speech_start_time > 15.0):
-                print("[GUI] Durée max de parole atteinte (15s)")
+            # Max speech duration safety:
+            # En écoute active (utilisateur pose sa question) : jusqu'à 15s.
+            # En attente du mot-clé / veille passive : max 4.5s (évite de rester bloqué sur la musique des haut-parleurs)
+            max_speech_dur = 15.0 if self.is_wake_active else 4.5
+            if speech_detected and speech_start_time and (time.time() - speech_start_time > max_speech_dur):
+                print(f"[GUI] Durée max de parole atteinte ({max_speech_dur}s, wake_active={self.is_wake_active})")
                 break
                 
         # Terminate subprocess
@@ -583,6 +726,19 @@ class MainWindow(QMainWindow):
         self.audio_output = QAudioOutput()
         self.media_player.setAudioOutput(self.audio_output)
         self.media_player.mediaStatusChanged.connect(self._on_media_status_changed)
+        
+        # Earcon chime sound for voice comprehension acknowledgment
+        self.ack_sound_path = ensure_acknowledged_sound()
+        self.ack_sound = QSoundEffect(self)
+        if os.path.exists(self.ack_sound_path):
+            self.ack_sound.setSource(QUrl.fromLocalFile(self.ack_sound_path))
+            self.ack_sound.setVolume(0.7)
+        
+        # Wake word state for hands-free dialogue
+        self.is_wake_active = False
+        self.wake_active_timer = QTimer(self)
+        self.wake_active_timer.setSingleShot(True)
+        self.wake_active_timer.timeout.connect(self._on_wake_active_timeout)
         
         # TTS queue
         self.speech_queue = []
@@ -1558,8 +1714,11 @@ class MainWindow(QMainWindow):
                     return
                 # Render initial chat
                 for msg in messages:
+                    content = msg.get("content", "")
+                    if "[Échange autonome avec Gemini]" in content or "[Échange avec Gemini]" in content:
+                        continue
                     sender = "pixel" if msg.get("role") == "assistant" else "user"
-                    self.append_chat_bubble(msg.get("content", ""), sender, msg.get("timestamp"))
+                    self.append_chat_bubble(content, sender, msg.get("timestamp"))
         except Exception as e:
             print(f"[GUI] Erreur fetch history : {e}")
 
@@ -1671,12 +1830,51 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Erreur Réseau", str(e))
 
+    # ── AUDIO EARCON & MUSIC HELPERS ──
+    def is_music_request(self, text: str) -> bool:
+        if not text:
+            return False
+        clean = text.lower().strip()
+        play_verbs = ["joue", "mets", "met", "lance", "écouter", "ecouter", "play", "musique", "chanson", "radio"]
+        has_play = any(v in clean for v in play_verbs)
+        is_question = any(clean.startswith(q) for q in ["qui", "quel", "quelle", "quels", "quelles", "est-ce", "existe", "combien", "pourquoi", "comment", "c'est quoi", "qu'est"])
+        if is_question and not any(clean.startswith(p) for p in ["joue", "mets", "met", "lance", "play"]):
+            return False
+        return has_play
+
+    def play_ack_sound(self):
+        """Joue un carillon moderne et discret pour confirmer l'activation de l'écoute vocale."""
+        try:
+            # 1. Si une musique mpv est en cours de lecture, on la met en pause temporairement
+            # pour que le bip retentisse clairement et que le micro capture la voix sans pollution
+            if control_active_mpv(["set_property", "pause", True]):
+                self.was_music_paused_by_wake = True
+                print("[GUI] ⏸️ Musique mpv mise en pause pour l'écoute vocale.")
+
+            sound_path = getattr(self, "ack_sound_path", None)
+            if not sound_path or not os.path.exists(sound_path):
+                sound_path = ensure_acknowledged_sound()
+                self.ack_sound_path = sound_path
+
+            for player in ["pw-play", "paplay", "aplay"]:
+                if shutil.which(player):
+                    subprocess.Popen([player, sound_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    print(f"[GUI] 🔔 Bip moderne d'écoute déclenché via {player} : {sound_path}")
+                    return
+
+            if hasattr(self, 'ack_sound'):
+                self.ack_sound.play()
+                print(f"[GUI] 🔔 Bip moderne d'écoute déclenché via QSoundEffect")
+        except Exception as e:
+            print(f"[GUI] Erreur lecture carillon earcon : {e}")
+
     # ── DISCUSSION (CHAT) HANDLING ──
     def send_chat_message(self):
         msg = self.input_field.text().strip()
         if not msg:
             return
             
+        self.last_sent_msg = msg
         # Cancel any active TTS playback
         self.stop_speaking()
         
@@ -1687,6 +1885,10 @@ class MainWindow(QMainWindow):
         # Prepare bubble for streaming response
         self.stream_accumulated = ""
         curr_time = format_timestamp()
+        
+        is_music = self.is_music_request(msg)
+        status_text = "Lancement direct de la musique... 🎵" if is_music else "Pixel réfléchit..."
+        
         self.chat_display.append(
             f'<table width="100%" border="0" cellspacing="0" cellpadding="0" style="margin-bottom: 14px; margin-top: 6px;">'
             f'<tr><td align="left">'
@@ -1696,7 +1898,7 @@ class MainWindow(QMainWindow):
             f'<span>✨ Pixel</span>'
             f'<span style="color: rgba(56, 189, 248, 0.6); font-weight: 400; font-size: 0.9em; margin-left: 8px;">{curr_time}</span>'
             f'</div>'
-            f'<div style="color: #94a3b8; font-size: 14px;"><i>Pixel réfléchit...</i></div>'
+            f'<div style="color: #94a3b8; font-size: 14px;"><i>{status_text}</i></div>'
             f'</td></tr></table>'
             f'</td></tr></table>'
         )
@@ -1754,8 +1956,33 @@ class MainWindow(QMainWindow):
             if not hasattr(self, "chat_history_cache"):
                 self.chat_history_cache = []
             self.chat_history_cache.append((self.stream_accumulated, "pixel", format_timestamp()))
+        else:
+            # Si aucun token n'a été produit, rafraîchir pour retirer la bulle "Pixel réfléchit..."
+            self.refresh_chat_display_from_cache()
+
+        # Si la musique avait été mise en pause pour l'écoute vocale et que la réponse n'était pas un arrêt média
+        if getattr(self, "was_music_paused_by_wake", False):
+            self.was_music_paused_by_wake = False
+            last_resp = getattr(self, "stream_accumulated", "").lower()
+            last_msg = getattr(self, "last_sent_msg", "").lower()
+            if not any(k in last_resp for k in ["arrêté", "arrete", "stop"]) and not any(k in last_msg for k in ["stop", "arrête", "arrete", "coupe"]) and not self.is_music_request(last_msg):
+                control_active_mpv(["set_property", "pause", False])
             
         self.poll_server_data()
+
+    def refresh_chat_display_from_cache(self):
+        if not hasattr(self, "chat_history_cache"):
+            self.chat_history_cache = []
+            
+        html = ""
+        for item in self.chat_history_cache:
+            msg = item[0]
+            sender = item[1]
+            ts = item[2] if len(item) > 2 else None
+            html += self.build_bubble_html(msg, sender, ts)
+            
+        self.chat_display.setHtml(html)
+        self.chat_display.moveCursor(QTextCursor.MoveOperation.End)
 
     def refresh_chat_display_with_active_stream(self, active_html):
         if not hasattr(self, "chat_history_cache"):
@@ -1793,6 +2020,10 @@ class MainWindow(QMainWindow):
         self.chat_display.moveCursor(QTextCursor.MoveOperation.End)
 
     def append_chat_bubble(self, content, sender, timestamp=None):
+        if "[Échange autonome avec Gemini]" in content or "[Échange avec Gemini]" in content:
+            # Ne pas afficher les dialogues internes de Gemini dans le fil de discussion
+            return
+
         if not hasattr(self, "chat_history_cache"):
             self.chat_history_cache = []
             
@@ -1903,6 +2134,9 @@ class MainWindow(QMainWindow):
         if message.startswith("VISION:"):
             desc = message[7:]
             self.txt_vision.setPlainText(desc)
+        elif "[Échange autonome avec Gemini]" in message or "[Échange avec Gemini]" in message:
+            # Dialogue autonome conservé dans le flux intérieur : ne pas exposer dans le chat ni au TTS
+            return
         else:
             stripped_msg = re.sub(r'[\s\.\!\?,:;…]+', '', message).lower()
             if stripped_msg in ("hm", "hmm", "hum", "euh", ""):
@@ -1934,23 +2168,44 @@ class MainWindow(QMainWindow):
             )
 
     # ── MICROPHONE / AUDIO RECORDING (STT) ──
+    def _on_wake_active_timeout(self):
+        print("[GUI] Délai d'inactivité après mot-clé 'Pixel' écoulé (25s). Retour en veille.")
+        self.is_wake_active = False
+        if getattr(self, "was_music_paused_by_wake", False):
+            control_active_mpv(["set_property", "pause", False])
+            self.was_music_paused_by_wake = False
+        if self.continuous_voice:
+            self.input_field.setPlaceholderText("Dites « Pixel » pour activer l'écoute.")
+            self.btn_mic.setText("🔴")
+            self.btn_mic.setStyleSheet("background: rgba(239, 68, 68, 0.2); border: 2px solid #ef4444;")
+
     def toggle_microphone(self):
         if self.is_recording:
             self.stop_microphone_recording()
         else:
+            self.play_ack_sound()
             self.start_microphone_recording()
 
     def start_microphone_recording(self):
-        self.stop_speaking()
-        
+        if self.is_recording or self.is_speaking_session or self.is_speaking_sentence:
+            return
+            
         self.is_recording = True
-        self.btn_mic.setText("🔴")
-        self.btn_mic.setStyleSheet("background: rgba(239, 68, 68, 0.2); border: 2px solid #ef4444;")
-        self.input_field.setPlaceholderText("Pixel vous écoute... Dites « Pixel » suivi de votre demande." if self.continuous_voice else "Pixel vous écoute... Cliquez sur 🔴 ou parlez.")
+        if getattr(self, "is_wake_active", False):
+            self.btn_mic.setText("🟢")
+            self.btn_mic.setStyleSheet("background: rgba(34, 197, 94, 0.25); border: 2px solid #22c55e;")
+            self.input_field.setPlaceholderText("Pixel vous écoute... Posez votre question.")
+        else:
+            self.btn_mic.setText("🔴")
+            self.btn_mic.setStyleSheet("background: rgba(239, 68, 68, 0.2); border: 2px solid #ef4444;")
+            self.input_field.setPlaceholderText("Dites « Pixel » pour activer l'écoute." if self.continuous_voice else "Pixel vous écoute... Cliquez sur 🔴 ou parlez.")
         
         # Start QThread-based recording with real-time silence detection
         self._safe_stop_thread("record_thread", 1000)
-        self.record_thread = RecordReaderThread(is_handsfree=self.continuous_voice)
+        self.record_thread = RecordReaderThread(
+            is_handsfree=self.continuous_voice,
+            is_wake_active=getattr(self, "is_wake_active", False)
+        )
         self._track_thread(self.record_thread)
         self.record_thread.finished_signal.connect(self.handle_record_finished, Qt.ConnectionType.QueuedConnection)
         if not self.continuous_voice:
@@ -1970,47 +2225,116 @@ class MainWindow(QMainWindow):
 
     def handle_record_finished(self, wav_path):
         self.is_recording = False
-        self.btn_mic.setText("🎙️")
-        self.btn_mic.setStyleSheet("")
-        self.input_field.setPlaceholderText("Écrivez un message ou parlez...")
         
         if wav_path and os.path.exists(wav_path):
             self.send_wav_for_transcription(wav_path)
         else:
-            # Re-enable input if recording failed / empty
+            # Re-enable input if recording finished without audio (e.g. timeout / no speech)
             self.input_field.setEnabled(True)
-            if self.continuous_voice:
-                QTimer.singleShot(1200, self.start_microphone_recording)
+            if getattr(self, "is_wake_active", False) and hasattr(self, "wake_active_timer") and self.wake_active_timer.isActive():
+                # Cycle d'auto-refresh en écoute active : conserver l'état vert et relancer immédiatement parec
+                self.btn_mic.setText("🟢")
+                self.btn_mic.setStyleSheet("background: rgba(34, 197, 94, 0.25); border: 2px solid #22c55e;")
+                self.input_field.setPlaceholderText("Pixel vous écoute... Posez votre question.")
+                if self.continuous_voice:
+                    QTimer.singleShot(50, self.start_microphone_recording)
+            else:
+                # Cycle d'auto-refresh en veille passive
+                self.is_wake_active = False
+                if hasattr(self, "wake_active_timer"):
+                    self.wake_active_timer.stop()
+                if self.continuous_voice:
+                    self.btn_mic.setText("🔴")
+                    self.btn_mic.setStyleSheet("background: rgba(239, 68, 68, 0.2); border: 2px solid #ef4444;")
+                    self.input_field.setPlaceholderText("Dites « Pixel » pour activer l'écoute.")
+                    QTimer.singleShot(50, self.start_microphone_recording)
+                else:
+                    self.btn_mic.setText("🎙️")
+                    self.btn_mic.setStyleSheet("")
+                    self.input_field.setPlaceholderText("Écrivez un message ou parlez...")
 
     def send_wav_for_transcription(self, wav_path):
         self.input_field.setText("... (Pixel décode votre voix) ...")
         self.input_field.setEnabled(False)
+        # Conserver l'indicateur vert si on est en écoute active pour rassurer l'utilisateur
+        if getattr(self, "is_wake_active", False):
+            self.btn_mic.setText("🟢")
+            self.btn_mic.setStyleSheet("background: rgba(34, 197, 94, 0.25); border: 2px solid #22c55e;")
+        else:
+            self.btn_mic.setText("🎙️")
+            self.btn_mic.setStyleSheet("")
         
         self._safe_stop_thread("transcribe_thread", 1000)
         self.transcribe_thread = TranscribeThread(wav_path, engine=self.stt_engine)
         self._track_thread(self.transcribe_thread)
         self.transcribe_thread.finished_signal.connect(self.handle_transcription_finished, Qt.ConnectionType.QueuedConnection)
         self.transcribe_thread.start()
-        
+
     def handle_transcription_finished(self, text):
         self.input_field.setEnabled(True)
         if text:
-            # Check for trailing keywords like "envoi", "envoyer", "envoie"
+            # 0. Arrêt d'urgence de la musique : toujours prioritaire même sans mot-clé
+            clean_lower = text.lower().strip()
+            if any(s in clean_lower for s in [
+                "arrête la musique", "arrete la musique", "arrête la lecture", "arrete la lecture",
+                "stop la musique", "coupe le son", "coupe la musique"
+            ]):
+                print(f"[GUI] 🛑 Arrêt d'urgence média reconnu sans mot-clé : '{text}'")
+                self.play_ack_sound()
+                self.is_wake_active = False
+                if hasattr(self, "wake_active_timer"):
+                    self.wake_active_timer.stop()
+                self.input_field.setText("stop la musique")
+                self.send_chat_message()
+                return
+
             has_send_keyword = text.lower().rstrip('.,!?* ').endswith(('envoi', 'envoyer', 'envoie'))
             
             if self.continuous_voice:
-                # En mode mains-libres, détecter le mot-clé d'éveil "Pixel" (avec variantes courantes de transcription, même précédé de quelques mots)
-                wake_match = re.search(
-                    r'(.*?)\b(?:pixel|pixelle|pixels|picel|picsel|pixl)\b[\s,:\-\.\!\?]*(.*)',
-                    text,
-                    re.IGNORECASE | re.DOTALL
-                )
+                # 1. Si nous sommes déjà en écoute active (mot-clé 'Pixel' déjà validé)
+                if getattr(self, "is_wake_active", False):
+                    cleaned_text = re.sub(r'[\s,:\-\.\!\?]*(envoi|envoyer|envoie)[\s,:\-\.\!\?]*$', '', text, flags=re.IGNORECASE).strip()
+                    cleaned_without_lead_wake = re.sub(r'^[\s,:\-\.\!\?]*' + WAKE_WORDS_CORE_PATTERN + r'\b[\s,:\-\.\!\?]*', '', cleaned_text, flags=re.IGNORECASE).strip()
+                    
+                    # Vérifier si c'est UNIQUEMENT une répétition du mot d'éveil
+                    text_without_wake = re.sub(r'\b' + WAKE_WORDS_CORE_PATTERN + r'\b', '', cleaned_text, flags=re.IGNORECASE).strip()
+                    if len(re.sub(r'[\s,\.\!\?:;…\-_]+', '', text_without_wake)) == 0:
+                        # Répétition du mot-clé : relancer le bip et prolonger l'écoute active
+                        print(f"[GUI] Répétition du mot-clé en écoute active : '{text}' → Prolongation")
+                        self.play_ack_sound()
+                        self.is_wake_active = True
+                        self.wake_active_timer.start(25000)
+                        self.input_field.setText("")
+                        self.input_field.setPlaceholderText("Pixel vous écoute... Posez votre question.")
+                        self.btn_mic.setText("🟢")
+                        self.btn_mic.setStyleSheet("background: rgba(34, 197, 94, 0.25); border: 2px solid #22c55e;")
+                        if not self.is_recording:
+                            QTimer.singleShot(100, self.start_microphone_recording)
+                        return
+
+                    final_query = cleaned_without_lead_wake if cleaned_without_lead_wake else cleaned_text
+                    if final_query:
+                        print(f"[GUI] Demande vocale reçue en écoute active : '{final_query}'")
+                        self.wake_active_timer.stop()
+                        self.is_wake_active = False
+                        self.input_field.setText(final_query)
+                        self.send_chat_message()
+                        return
+                    else:
+                        if not self.is_recording and not self.is_speaking_session and not self.is_speaking_sentence:
+                            QTimer.singleShot(100, self.start_microphone_recording)
+                        return
+
+                # 2. En veille passive : Détecter le mot-clé d'éveil "Pixel" (avec variantes de transcription)
+                wake_match = WAKE_WORDS_PATTERN.search(text)
                 if not wake_match:
                     print(f"[GUI] Mains-libres : transcription ignorée (absence du mot-clé 'Pixel') : '{text}'")
                     self.input_field.setText("")
-                    self.input_field.setPlaceholderText("Mot-clé « Pixel » non détecté — phrase ignorée.")
+                    self.input_field.setPlaceholderText("Dites « Pixel » pour activer l'écoute.")
+                    self.btn_mic.setText("🔴")
+                    self.btn_mic.setStyleSheet("background: rgba(239, 68, 68, 0.2); border: 2px solid #ef4444;")
                     if not self.is_recording and not self.is_speaking_session and not self.is_speaking_sentence:
-                        QTimer.singleShot(400, self.start_microphone_recording)
+                        QTimer.singleShot(100, self.start_microphone_recording)
                     return
 
                 after_wake = wake_match.group(2).strip()
@@ -2021,30 +2345,55 @@ class MainWindow(QMainWindow):
                     flags=re.IGNORECASE
                 ).strip()
                 cleaned_text = after_wake if after_wake else before_wake
-                
-                # Nettoyer les mots-clés d'envoi éventuels en fin de phrase
                 cleaned_text = re.sub(r'[\s,:\-\.\!\?]*(envoi|envoyer|envoie)[\s,:\-\.\!\?]*$', '', cleaned_text, flags=re.IGNORECASE).strip()
-                
-                if cleaned_text and cleaned_text.lower() not in ("pixel", "pixelle", "pixels", "picel", "picsel", "pixl"):
+
+                text_without_wake = re.sub(r'\b' + WAKE_WORDS_CORE_PATTERN + r'\b', '', text, flags=re.IGNORECASE).strip()
+                is_wake_only = len(re.sub(r'[\s,\.\!\?:;…\-_]+', '', text_without_wake)) == 0 or (not cleaned_text)
+
+                if is_wake_only:
+                    print(f"[GUI] Mot-clé d'éveil reconnu : '{text}' → Activation de l'écoute active (25s)")
+                    self.play_ack_sound()
+                    self.is_wake_active = True
+                    self.wake_active_timer.start(25000)
+                    self.input_field.setText("")
+                    self.input_field.setPlaceholderText("Pixel vous écoute... Posez votre question.")
+                    self.btn_mic.setText("🟢")
+                    self.btn_mic.setStyleSheet("background: rgba(34, 197, 94, 0.25); border: 2px solid #22c55e;")
+                    if not self.is_recording:
+                        QTimer.singleShot(100, self.start_microphone_recording)
+                else:
+                    print(f"[GUI] Demande vocale avec mot-clé direct : '{cleaned_text}'")
+                    self.play_ack_sound()
+                    self.is_wake_active = False
+                    if hasattr(self, "wake_active_timer"):
+                        self.wake_active_timer.stop()
                     self.input_field.setText(cleaned_text)
                     self.send_chat_message()
-                else:
-                    # Si seul "Pixel" a été dit, inviter à parler
-                    self.input_field.setText("")
-                    self.input_field.setPlaceholderText("Pixel : Oui ? Je vous écoute...")
-                    if not self.is_recording:
-                        QTimer.singleShot(400, self.start_microphone_recording)
             else:
-                # Manual microphone activation: strip trailing send keyword if present
+                # Mode microphone manuel : supprimer mot-clé d'envoi éventuel
                 cleaned_text = re.sub(r'[\s,:\-\.\!\?]*(envoi|envoyer|envoie)[\s,:\-\.\!\?]*$', '', text, flags=re.IGNORECASE).strip()
                 self.input_field.setText(cleaned_text)
                 if has_send_keyword:
                     self.send_chat_message()
         else:
-            self.input_field.setText("")
-            self.input_field.setPlaceholderText("Aucune voix détectée. Réessayez.")
-            if self.continuous_voice and not self.is_recording and not self.is_speaking_session and not self.is_speaking_sentence:
-                QTimer.singleShot(400, self.start_microphone_recording)
+            # Transcription vide ou inaudible
+            if getattr(self, "is_wake_active", False) and hasattr(self, "wake_active_timer") and self.wake_active_timer.isActive():
+                # L'utilisateur a marqué une pause naturelle en écoute active : NE PAS COUPER le mode actif !
+                print("[GUI] Transcription vide en écoute active (pause naturelle). Maintien de l'écoute active.")
+                self.input_field.setText("")
+                self.input_field.setPlaceholderText("Pixel vous écoute... Posez votre question.")
+                self.btn_mic.setText("🟢")
+                self.btn_mic.setStyleSheet("background: rgba(34, 197, 94, 0.25); border: 2px solid #22c55e;")
+                if self.continuous_voice and not self.is_recording and not self.is_speaking_session and not self.is_speaking_sentence:
+                    QTimer.singleShot(100, self.start_microphone_recording)
+            else:
+                self.input_field.setText("")
+                self.input_field.setPlaceholderText("Dites « Pixel » pour activer l'écoute." if self.continuous_voice else "Écrivez un message ou parlez...")
+                self.is_wake_active = False
+                if hasattr(self, "wake_active_timer"):
+                    self.wake_active_timer.stop()
+                if self.continuous_voice and not self.is_recording and not self.is_speaking_session and not self.is_speaking_sentence:
+                    QTimer.singleShot(100, self.start_microphone_recording)
 
     # ── TTS ENGINE (PIPER/GO BACKEND) ──
     def start_speech_session(self):
@@ -2057,6 +2406,10 @@ class MainWindow(QMainWindow):
         self.is_speaking_sentence = False
         self.is_stream_finished = False
         self.tts_thoughts_stopped = False
+        if getattr(self, "was_music_paused_by_wake", False):
+            self.was_music_paused_by_wake = False
+        if self.voice_enabled:
+            duck_active_mpv(True, 18)
 
     def feed_chunk(self, chunk):
         if not self.voice_enabled or getattr(self, "tts_thoughts_stopped", False):
@@ -2133,6 +2486,7 @@ class MainWindow(QMainWindow):
         self.is_stream_finished = True
         if not self.voice_enabled:
             self.is_speaking_session = False
+            duck_active_mpv(False)
             # Hands-free: start recording if continuous voice is enabled, mic not recording, and chat didn't fail
             if self.continuous_voice and not self.is_recording and not self.chat_failed:
                 QTimer.singleShot(1200, self.start_microphone_recording)
@@ -2152,11 +2506,13 @@ class MainWindow(QMainWindow):
         if not self.speech_queue:
             if self.is_stream_finished and not self.is_speaking_sentence:
                 self.is_speaking_session = False
+                duck_active_mpv(False)
                 if self.continuous_voice and not self.is_recording and not self.chat_failed:
                     QTimer.singleShot(1200, self.start_microphone_recording)
             return
             
         self.is_speaking_sentence = True
+        duck_active_mpv(True, 18)
         sentence = self.speech_queue.pop(0)
         
         # Get speed and pitch settings from UI
@@ -2203,6 +2559,7 @@ class MainWindow(QMainWindow):
         self.speech_buffer = ""
         self.is_speaking_sentence = False
         self.is_speaking_session = False
+        duck_active_mpv(False)
 
     # ── CLEAN EXIT ──
     def closeEvent(self, event):
@@ -2234,6 +2591,7 @@ class MainWindow(QMainWindow):
         event.accept()
 
 if __name__ == "__main__":
+    _app_lock = ensure_single_instance()
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()

@@ -111,16 +111,50 @@ def ensure_acknowledged_sound():
 
 # Single-instance enforcement to prevent audio device contention (parec)
 def ensure_single_instance():
-    """Garantit qu'une seule instance de l'interface GUI s'exécute pour éviter la concurrence sur parec/audio."""
+    """Garantit qu'une seule instance de l'interface GUI s'exécute. Si une ancienne instance est bloquée en arrière-plan, la remplace proprement."""
     import fcntl
+    import signal
     lock_path = os.path.join(tempfile.gettempdir(), "pixel_gui.lock")
+    lock_file = open(lock_path, "a+")
     try:
-        lock_file = open(lock_path, "w")
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return lock_file
     except (BlockingIOError, IOError):
-        print("[GUI] ⚠️ Une autre instance de pixel_gui.py est déjà en cours d'exécution. Fermeture.")
-        sys.exit(0)
+        print("[GUI] ♻️ Fermeture de l'ancienne instance de pixel_gui.py en arrière-plan pour relancer la fenêtre...")
+        try:
+            lock_file.seek(0)
+            old_pid_str = lock_file.read().strip()
+            if old_pid_str.isdigit():
+                old_pid = int(old_pid_str)
+                if old_pid != os.getpid():
+                    os.kill(old_pid, signal.SIGTERM)
+                    time.sleep(0.4)
+                    try:
+                        os.kill(old_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+        except Exception:
+            pass
+        # Fallback: kill any other stuck pixel_gui.py processes
+        try:
+            my_pid = str(os.getpid())
+            out = subprocess.check_output(["pgrep", "-f", "pixel_gui.py"], text=True)
+            for line in out.splitlines():
+                pid = line.strip()
+                if pid and pid != my_pid:
+                    try:
+                        os.kill(int(pid), signal.SIGKILL)
+                    except Exception:
+                        pass
+            time.sleep(0.3)
+        except Exception:
+            pass
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+    lock_file.seek(0)
+    lock_file.truncate()
+    lock_file.write(str(os.getpid()))
+    lock_file.flush()
+    return lock_file
 
 # Wake word patterns (supportant 'Pixel', 'Excel', 'Axel', 'Pique sel' et variantes Whisper phonétiques fréquentes)
 WAKE_WORDS_CORE_PATTERN = r'(?:pixel|pixelle|pixels|picel|picsel|pixl|pixeul|pique[\s\-]*sel(?:le)?|pic[\s\-]*sel(?:le)?|pik[\s\-]*sel(?:le)?|excel|exel|axel|axelle|accel|bruxelles|pixar|picasso|pix|pics|fixel|bixel|bicelle|bicel|xl)'
@@ -2581,6 +2615,9 @@ class MainWindow(QMainWindow):
                     except Exception: pass
                 t.wait(500)
             
+        if hasattr(self, "tray_icon") and self.tray_icon:
+            self.tray_icon.hide()
+
         if self.server_process:
             print("[GUI] Arrêt du serveur backend Pixel...")
             self.server_process.terminate()
@@ -2589,6 +2626,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 self.server_process.kill()
         event.accept()
+        os._exit(0)
 
 if __name__ == "__main__":
     _app_lock = ensure_single_instance()

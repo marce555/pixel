@@ -39,6 +39,7 @@ type Task struct {
 	Announcement    string     `json:"announcement,omitempty"`
 	AnnouncementWav string     `json:"announcement_wav,omitempty"`
 	Announced       bool       `json:"announced,omitempty"`
+	TargetDevice    string     `json:"target_device,omitempty"` // "pc" (default, mpv PipeWire) or "android" / "mobile" (streamed to smartphone)
 
 	// Private fields for execution control
 	mu         sync.Mutex
@@ -159,6 +160,10 @@ type Scheduler struct {
 	// Serializer for music playing to avoid overlapping audio
 	musicSem chan struct{}
 
+	// Sync for mobile/android audio streaming
+	streamSyncMu   sync.Mutex
+	streamSyncDone map[string]chan struct{}
+
 	// Voice speaker for radio DJ announcements
 	voiceSpeaker VoiceSpeaker
 
@@ -189,10 +194,64 @@ func (s *Scheduler) SetBroadcaster(b EventBroadcaster) {
 
 func NewScheduler() *Scheduler {
 	return &Scheduler{
-		tasks:    make([]*Task, 0),
-		handlers: make(map[string]TaskHandler),
-		musicSem: make(chan struct{}, 1),
+		tasks:          make([]*Task, 0),
+		handlers:       make(map[string]TaskHandler),
+		musicSem:       make(chan struct{}, 1),
+		streamSyncDone: make(map[string]chan struct{}),
 	}
+}
+
+// RegisterStreamWait creates and registers a channel that unblocks when a mobile stream finishes.
+func (s *Scheduler) RegisterStreamWait(taskID string) chan struct{} {
+	s.streamSyncMu.Lock()
+	defer s.streamSyncMu.Unlock()
+	if s.streamSyncDone == nil {
+		s.streamSyncDone = make(map[string]chan struct{})
+	}
+	ch := make(chan struct{})
+	s.streamSyncDone[taskID] = ch
+	return ch
+}
+
+// UnregisterStreamWait cleans up a wait channel.
+func (s *Scheduler) UnregisterStreamWait(taskID string) {
+	s.streamSyncMu.Lock()
+	defer s.streamSyncMu.Unlock()
+	if s.streamSyncDone != nil {
+		delete(s.streamSyncDone, taskID)
+	}
+}
+
+// NotifyStreamDone notifies that a mobile stream track has finished playing or was skipped/stopped.
+func (s *Scheduler) NotifyStreamDone(taskID string) bool {
+	s.streamSyncMu.Lock()
+	defer s.streamSyncMu.Unlock()
+	if s.streamSyncDone == nil {
+		return false
+	}
+	if taskID == "" {
+		notified := false
+		for id, ch := range s.streamSyncDone {
+			select {
+			case <-ch:
+			default:
+				close(ch)
+				notified = true
+			}
+			delete(s.streamSyncDone, id)
+		}
+		return notified
+	}
+	if ch, ok := s.streamSyncDone[taskID]; ok {
+		select {
+		case <-ch:
+		default:
+			close(ch)
+		}
+		delete(s.streamSyncDone, taskID)
+		return true
+	}
+	return false
 }
 
 // RegisterHandler registers a new task type runner.
@@ -232,18 +291,28 @@ func (s *Scheduler) CancelAutoplay() {
 
 // Enqueue adds a new task to the queue.
 func (s *Scheduler) Enqueue(taskType string, name string, payload string, delay time.Duration) *Task {
+	return s.EnqueueWithDevice(taskType, name, payload, delay, "pc")
+}
+
+// EnqueueWithDevice adds a new task with a specified target execution device ("pc" or "android").
+func (s *Scheduler) EnqueueWithDevice(taskType string, name string, payload string, delay time.Duration, targetDevice string) *Task {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	task := &Task{
-		ID:          uuid.New().String(),
-		Type:        taskType,
-		Name:        name,
-		Status:      StatusPending,
-		Payload:     payload,
-		ScheduledAt: time.Now().Add(delay),
+	if targetDevice == "" {
+		targetDevice = "pc"
 	}
-	task.AppendLog(fmt.Sprintf("Tâche créée et planifiée pour %s", task.ScheduledAt.Format("15:04:05")))
+
+	task := &Task{
+		ID:           uuid.New().String(),
+		Type:         taskType,
+		Name:         name,
+		Status:       StatusPending,
+		Payload:      payload,
+		TargetDevice: targetDevice,
+		ScheduledAt:  time.Now().Add(delay),
+	}
+	task.AppendLog(fmt.Sprintf("Tâche créée pour '%s' et planifiée pour %s", targetDevice, task.ScheduledAt.Format("15:04:05")))
 	s.tasks = append(s.tasks, task)
 	return task
 }
@@ -273,6 +342,7 @@ func (s *Scheduler) Cancel(taskID string) error {
 	if task.cancelFunc != nil {
 		task.cancelFunc()
 	}
+	s.NotifyStreamDone(taskID)
 	if task.cmd != nil && task.cmd.Process != nil {
 		task.cmd.Process.Kill()
 		task.Log += fmt.Sprintf("[%s] Processus mpv tué avec succès.\n", task.FinishedAt.Format("15:04:05"))

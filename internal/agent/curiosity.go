@@ -344,18 +344,12 @@ func (c *CuriosityAgent) checkPresenceWithCamera(ctx context.Context) bool {
 		log.Println("[CuriosityAgent] Vérification de la présence via VisionAgent...")
 		desc, err := va.ScanOnce(ctx)
 		if err == nil && desc != "" {
-			descLower := strings.ToLower(desc)
-			if strings.Contains(descLower, "absent") || strings.Contains(descLower, "parti") ||
-				strings.Contains(descLower, "aucune personne") || strings.Contains(descLower, "non, aucune") ||
-				strings.Contains(descLower, "ne vois personne") || strings.Contains(descLower, "vide") ||
-				strings.Contains(descLower, "aucun") || strings.Contains(descLower, "seulement un plafond") {
-				log.Println("[CuriosityAgent] Résultat VisionAgent : Utilisateur absent.")
+			if IsEmptyOrBlackVision(desc) || !hasHumanPresence(desc) {
+				log.Println("[CuriosityAgent] Résultat VisionAgent : Utilisateur absent (écran noir ou scène vide).")
 				return false
 			}
-			if strings.Contains(descLower, "homme") || strings.Contains(descLower, "femme") || strings.Contains(descLower, "marcelo") {
-				log.Println("[CuriosityAgent] Résultat VisionAgent : Utilisateur présent.")
-				return true
-			}
+			log.Println("[CuriosityAgent] Résultat VisionAgent : Utilisateur présent.")
+			return true
 		}
 	}
 

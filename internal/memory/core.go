@@ -28,14 +28,56 @@ type DynamicGoal struct {
 }
 
 type LLMSettings struct {
-	ActiveMode   string `json:"active_mode"` // "local", "cloud", "auto"
-	CloudAPIKey  string `json:"cloud_api_key"`
-	CloudBaseURL string `json:"cloud_base_url"`
-	CloudModel   string `json:"cloud_model"`
-	LocalBaseURL string `json:"local_base_url"`
-	LocalModel   string `json:"local_model"`
-	CodeBaseURL  string `json:"code_base_url"`
-	CodeModel    string `json:"code_model"`
+	ActiveMode     string `json:"active_mode"` // "local", "cloud", "auto"
+	CloudAPIKey    string `json:"cloud_api_key"`
+	OneMinAPIKey   string `json:"onemin_api_key,omitempty"`
+	CloudBaseURL   string `json:"cloud_base_url"`
+	CloudModel     string `json:"cloud_model"`
+	LocalBaseURL   string `json:"local_base_url"`
+	LocalModel     string `json:"local_model"`
+	PublishBaseURL string `json:"publish_base_url,omitempty"`
+	PublishModel   string `json:"publish_model,omitempty"`
+	ReviewBaseURL  string `json:"review_base_url,omitempty"`
+	ReviewModel    string `json:"review_model,omitempty"`
+	CodeBaseURL    string `json:"code_base_url"`
+	CodeModel      string `json:"code_model"`
+}
+
+func (s LLMSettings) ResolveAPIKeyForURL(baseURL string) string {
+	u := strings.ToLower(strings.TrimSpace(baseURL))
+	if strings.Contains(u, "1min.ai") {
+		if strings.TrimSpace(s.OneMinAPIKey) != "" {
+			return strings.TrimSpace(s.OneMinAPIKey)
+		}
+		if k := strings.TrimSpace(os.Getenv("ONEMIN_API_KEY")); k != "" {
+			return k
+		}
+		if k := strings.TrimSpace(os.Getenv("KEY_1MIN")); k != "" {
+			return k
+		}
+		if data, err := os.ReadFile(".key_1min.txt"); err == nil && strings.TrimSpace(string(data)) != "" {
+			return strings.TrimSpace(string(data))
+		}
+		return strings.TrimSpace(s.CloudAPIKey)
+	}
+	if strings.Contains(u, "googleapis.com") {
+		if strings.TrimSpace(s.CloudAPIKey) != "" {
+			return strings.TrimSpace(s.CloudAPIKey)
+		}
+		if k := strings.TrimSpace(os.Getenv("GEMINI_API_KEY")); k != "" {
+			return k
+		}
+		if data, err := os.ReadFile(".key_Gemini.txt"); err == nil && strings.TrimSpace(string(data)) != "" {
+			return strings.TrimSpace(string(data))
+		}
+	}
+	if strings.TrimSpace(s.CloudAPIKey) != "" {
+		return strings.TrimSpace(s.CloudAPIKey)
+	}
+	if strings.TrimSpace(s.OneMinAPIKey) != "" {
+		return strings.TrimSpace(s.OneMinAPIKey)
+	}
+	return ""
 }
 
 type GmailSettings struct {
@@ -397,11 +439,52 @@ func (cm *CoreMemory) ClearAutoCorrections() {
 
 func (cm *CoreMemory) GetLLMSettings() LLMSettings {
 	cm.mu.RLock()
-	defer cm.mu.RUnlock()
-	return cm.LLMSettings
+	s := cm.LLMSettings
+	cm.mu.RUnlock()
+
+	if strings.TrimSpace(s.OneMinAPIKey) == "" {
+		if k := strings.TrimSpace(os.Getenv("ONEMIN_API_KEY")); k != "" {
+			s.OneMinAPIKey = k
+		} else if k := strings.TrimSpace(os.Getenv("KEY_1MIN")); k != "" {
+			s.OneMinAPIKey = k
+		} else if data, err := os.ReadFile(".key_1min.txt"); err == nil && strings.TrimSpace(string(data)) != "" {
+			s.OneMinAPIKey = strings.TrimSpace(string(data))
+		}
+	}
+	if strings.TrimSpace(s.PublishBaseURL) == "" {
+		if s.OneMinAPIKey != "" {
+			s.PublishBaseURL = "https://api.1min.ai/openai/v1"
+			if s.PublishModel == "" {
+				s.PublishModel = "gpt-4.1-mini"
+			}
+		} else {
+			s.PublishBaseURL = "http://127.0.0.1:18081/v1"
+			if s.PublishModel == "" {
+				s.PublishModel = "qwen3.5:9b"
+			}
+		}
+	}
+	if strings.TrimSpace(s.ReviewBaseURL) == "" {
+		if s.OneMinAPIKey != "" {
+			s.ReviewBaseURL = "https://api.1min.ai/openai/v1"
+			if s.ReviewModel == "" {
+				s.ReviewModel = "gpt-4.1-mini"
+			}
+		} else {
+			s.ReviewBaseURL = s.PublishBaseURL
+			if s.ReviewModel == "" {
+				s.ReviewModel = s.PublishModel
+			}
+		}
+	}
+	return s
 }
 
 func (cm *CoreMemory) UpdateLLMSettings(settings LLMSettings) {
+	if strings.TrimSpace(settings.OneMinAPIKey) != "" {
+		_ = os.WriteFile(".key_1min.txt", []byte(strings.TrimSpace(settings.OneMinAPIKey)+"\n"), 0600)
+		_ = os.Setenv("ONEMIN_API_KEY", strings.TrimSpace(settings.OneMinAPIKey))
+	}
 	cm.mu.Lock()
 	cm.LLMSettings = settings
 	cm.mu.Unlock()

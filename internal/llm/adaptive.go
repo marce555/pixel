@@ -24,15 +24,38 @@ type AdaptiveProvider struct {
 	cloudProvider      *OpenAICompatibleProvider
 }
 
-func NewAdaptiveProvider(activeMode, cloudAPIKey, cloudBaseURL, cloudModel, localBaseURL, localModel string) *AdaptiveProvider {
+func resolveCloudAPIKey(cloudBaseURL, cloudAPIKey string) string {
+	if strings.Contains(strings.ToLower(cloudBaseURL), "1min.ai") {
+		if k := strings.TrimSpace(os.Getenv("ONEMIN_API_KEY")); k != "" && cloudAPIKey == "" {
+			return k
+		}
+		if k := strings.TrimSpace(os.Getenv("KEY_1MIN")); k != "" && cloudAPIKey == "" {
+			return k
+		}
+		if cloudAPIKey == "" {
+			if data, err := os.ReadFile(".key_1min.txt"); err == nil && strings.TrimSpace(string(data)) != "" {
+				return strings.TrimSpace(string(data))
+			}
+		}
+		return strings.TrimSpace(cloudAPIKey)
+	}
 	if cloudAPIKey == "" {
 		if k := os.Getenv("GEMINI_API_KEY"); k != "" {
-			cloudAPIKey = k
+			return k
 		} else if data, err := os.ReadFile(".key_Gemini.txt"); err == nil {
-			cloudAPIKey = strings.TrimSpace(string(data))
+			return strings.TrimSpace(string(data))
 		}
 	}
-	if cloudModel == "" || cloudModel == "gemini-3.6-flash" || cloudModel == "gemini-1.5-flash" {
+	return cloudAPIKey
+}
+
+func NewAdaptiveProvider(activeMode, cloudAPIKey, cloudBaseURL, cloudModel, localBaseURL, localModel string) *AdaptiveProvider {
+	cloudAPIKey = resolveCloudAPIKey(cloudBaseURL, cloudAPIKey)
+	if strings.Contains(strings.ToLower(cloudBaseURL), "1min.ai") {
+		if cloudModel == "" {
+			cloudModel = "gpt-4.1-mini"
+		}
+	} else if cloudModel == "" || cloudModel == "gemini-3.6-flash" || cloudModel == "gemini-1.5-flash" {
 		cloudModel = "gemini-3.5-flash"
 	}
 	p := &AdaptiveProvider{
@@ -60,9 +83,57 @@ func (p *AdaptiveProvider) SetLocalFallback(fallbackBaseURL, fallbackModel strin
 	}
 }
 
+func isLocalEndpoint(baseURL string) bool {
+	u := strings.ToLower(strings.TrimSpace(baseURL))
+	return u == "" || strings.Contains(u, "127.0.0.1") || strings.Contains(u, "localhost") || strings.Contains(u, "0.0.0.0") || strings.Contains(u, "192.168.")
+}
+
+// NewTaskAdaptiveProvider creates an AdaptiveProvider tailored for a specific cognitive task
+// (e.g., Publications, Review/Fact-Check, or Code/Skills), using cloud (1min.AI / Gemini) when a
+// cloud URL is selected and automatically falling back to fallbackLocalURL/fallbackLocalModel.
+func NewTaskAdaptiveProvider(targetBaseURL, targetModel, apiKey, fallbackLocalURL, fallbackLocalModel string) *AdaptiveProvider {
+	if isLocalEndpoint(targetBaseURL) {
+		localURL := targetBaseURL
+		if localURL == "" {
+			localURL = fallbackLocalURL
+		}
+		localMod := targetModel
+		if localMod == "" {
+			localMod = fallbackLocalModel
+		}
+		p := NewAdaptiveProvider("local", apiKey, "https://api.1min.ai/openai/v1", "gpt-4.1-mini", localURL, localMod)
+		if localURL != fallbackLocalURL && fallbackLocalURL != "" {
+			p.SetLocalFallback(fallbackLocalURL, fallbackLocalModel)
+		}
+		return p
+	}
+	return NewAdaptiveProvider("adaptive", apiKey, targetBaseURL, targetModel, fallbackLocalURL, fallbackLocalModel)
+}
+
+// UpdateTaskSettings dynamically updates a task-specific AdaptiveProvider when GUI settings change.
+func (p *AdaptiveProvider) UpdateTaskSettings(targetBaseURL, targetModel, apiKey, fallbackLocalURL, fallbackLocalModel string) {
+	if isLocalEndpoint(targetBaseURL) {
+		localURL := targetBaseURL
+		if localURL == "" {
+			localURL = fallbackLocalURL
+		}
+		localMod := targetModel
+		if localMod == "" {
+			localMod = fallbackLocalModel
+		}
+		p.UpdateSettings("local", apiKey, "https://api.1min.ai/openai/v1", "gpt-4.1-mini", localURL, localMod)
+		if localURL != fallbackLocalURL && fallbackLocalURL != "" {
+			p.SetLocalFallback(fallbackLocalURL, fallbackLocalModel)
+		}
+		return
+	}
+	p.UpdateSettings("adaptive", apiKey, targetBaseURL, targetModel, fallbackLocalURL, fallbackLocalModel)
+}
+
 func (p *AdaptiveProvider) UpdateSettings(activeMode, cloudAPIKey, cloudBaseURL, cloudModel, localBaseURL, localModel string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	cloudAPIKey = resolveCloudAPIKey(cloudBaseURL, cloudAPIKey)
 	p.activeMode = activeMode
 	p.cloudAPIKey = cloudAPIKey
 	p.cloudBaseURL = cloudBaseURL
@@ -71,12 +142,12 @@ func (p *AdaptiveProvider) UpdateSettings(activeMode, cloudAPIKey, cloudBaseURL,
 	p.localModel = localModel
 
 	localEmbed := "nomic-embed-text-v2-moe-GGUF"
-	if strings.Contains(localBaseURL, "52625") {
+	if strings.Contains(localBaseURL, "52625") || strings.Contains(localBaseURL, "18081") || strings.Contains(localBaseURL, "18082") {
 		localEmbed = "embed-gemma:300m"
 	}
 	p.localProvider = NewOpenAICompatibleProvider(localBaseURL, "", localModel, localEmbed)
 	p.cloudProvider = NewOpenAICompatibleProvider(cloudBaseURL, cloudAPIKey, cloudModel, "gemini-embedding-2")
-	fmt.Printf("[AdaptiveProvider] Config updated: Mode=%s, CloudModel=%s, LocalModel=%s (Embed=%s)\n", activeMode, cloudModel, localModel, localEmbed)
+	fmt.Printf("[AdaptiveProvider] Config updated: Mode=%s, CloudURL=%s, CloudModel=%s, LocalModel=%s (Embed=%s)\n", activeMode, cloudBaseURL, cloudModel, localModel, localEmbed)
 }
 
 func (p *AdaptiveProvider) SetTemperature(temp float64) {
@@ -149,9 +220,9 @@ func (p *AdaptiveProvider) GenerateDetailed(ctx context.Context, messages []Mess
 		if cloud.APIKey != "" {
 			cloudCtx := ctx
 			if mode == "auto" || mode == "adaptive" {
-				timeout := 15 * time.Second
+				timeout := 90 * time.Second
 				if maxTokens > 2048 {
-					timeout = 120 * time.Second
+					timeout = 180 * time.Second
 				}
 				var cancel context.CancelFunc
 				cloudCtx, cancel = context.WithTimeout(ctx, timeout)

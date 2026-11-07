@@ -121,6 +121,9 @@ document.addEventListener('DOMContentLoaded', () => {
                             visionDescEl.style.opacity = '1';
                         }, 50);
                     }
+                } else if (data.proactive_message.startsWith("AUDIO_STREAM:")) {
+                    // Événement interne pour le streaming audio vers l'application Android : ne pas afficher dans le chat web
+                    return;
                 } else if (data.proactive_message.includes("[Échange autonome avec Gemini]") || data.proactive_message.includes("[Échange avec Gemini]")) {
                     // Dialogue autonome interne : ne pas afficher dans le chat web ni synthétiser au TTS
                     return;
@@ -871,21 +874,34 @@ document.addEventListener('DOMContentLoaded', () => {
     window.pixelLLM = {
         // Définition des fournisseurs avec leurs métadonnées
         providers: {
-            'local-pixel':  { url: 'http://127.0.0.1:52625/v1',                              isCloud: false, label: 'Pixel Interne' },
+            'local-pixel':  { url: 'http://127.0.0.1:52625/v1',                              isCloud: false, label: 'Pixel dGPU' },
+            'local-igpu':   { url: 'http://127.0.0.1:18081/v1',                              isCloud: false, label: 'Pixel iGPU' },
             'local-ollama': { url: 'http://127.0.0.1:11434/v1',                              isCloud: false, label: 'Ollama' },
             'local-lm':     { url: 'http://127.0.0.1:1234/v1',                               isCloud: false, label: 'LM Studio' },
+            'onemin':       { url: 'https://api.1min.ai/openai/v1',                          isCloud: true,  label: '1min.AI',
+                              models: [
+                                  'gpt-4.1-mini', 'gpt-4.1', 'gpt-4o', 'gpt-4o-mini',
+                                  'gpt-5', 'gpt-5-mini', 'gpt-5-nano', 'gpt-5.1', 'gpt-5.2', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.5',
+                                  'gpt-6-sol', 'gpt-6-luna', 'gpt-6-astra', 'o3',
+                                  'deepseek-flash', 'deepseek-v4-pro',
+                                  'qwen3.7-max', 'qwen3.7-plus', 'qwen3.7-flash', 'qwen3.6-plus', 'qwen3.6-flash', 'qwen-max', 'qwen-plus',
+                                  'mistral-large-latest', 'mistral-medium-3-5', 'mistral-small-latest', 'magistral-medium-latest',
+                                  'moonshotai/kimi-k2.7-code', 'moonshotai/kimi-k2.6',
+                                  'glm-5.3', 'glm-5.2', 'meta/muse-spark-1.3'
+                              ] },
             'gemini':       { url: 'https://generativelanguage.googleapis.com/v1beta/openai', isCloud: true,  label: 'Google Gemini',
-                              models: ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash', 'gemini-2.5-flash'] },
+                              models: ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash'] },
             'openai':       { url: 'https://api.openai.com/v1',                               isCloud: true,  label: 'OpenAI',
-                              models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo'] },
+                              models: ['gpt-4.1', 'gpt-4.1-mini', 'gpt-4o', 'gpt-4o-mini'] },
             'groq':         { url: 'https://api.groq.com/openai/v1',                          isCloud: true,  label: 'Groq',
                               models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768'] },
             'anthropic':    { url: 'https://api.anthropic.com/v1',                            isCloud: true,  label: 'Anthropic',
-                              models: ['claude-3-5-sonnet-20241022', 'claude-3-haiku-20240307', 'claude-3-opus-20240229'] },
+                              models: ['claude-3-7-sonnet-20250219', 'claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022'] },
         },
 
-        // Cache des modèles locaux chargés depuis le serveur
+        // Cache des modèles locaux et 1min.AI chargés depuis le serveur
         _localModels: null,
+        _oneMinModels: null,
 
         // Charge la liste des modèles locaux depuis /api/local-models
         async loadLocalModels() {
@@ -900,19 +916,71 @@ document.addEventListener('DOMContentLoaded', () => {
             return this._localModels;
         },
 
+        // Charge la liste des modèles 1min.AI depuis /api/cloud-models?provider=onemin
+        async loadOneMinModels(forceRefresh = false) {
+            if (this._oneMinModels && !forceRefresh) return this._oneMinModels;
+            try {
+                const apiKey = document.getElementById('llm-onemin-key')?.value || '';
+                const url = '/api/cloud-models?provider=onemin' + (apiKey ? `&api_key=${encodeURIComponent(apiKey)}` : '');
+                const res = await fetch(url);
+                const data = await res.json();
+                if (data.models && data.models.length > 0) {
+                    this._oneMinModels = data.models;
+                    this.providers['onemin'].models = data.models;
+                    return this._oneMinModels;
+                }
+            } catch(e) {
+                console.warn("Impossible de charger la liste distante 1min.AI, utilisation de la liste de référence", e);
+            }
+            return this.providers['onemin'].models;
+        },
+
+        // Rafraîchit manuellement la liste des modèles 1min.AI dans tous les menus déroulants
+        async refreshOneMinModels() {
+            const models = await this.loadOneMinModels(true);
+            const defaults = { publish: 'gpt-4.1', review: 'mistral-large-latest', code: 'qwen3.7-max' };
+            for (const sec of ['publish', 'review', 'code']) {
+                const provSel = document.getElementById(`${sec}-provider`);
+                if (provSel && provSel.value !== 'onemin') {
+                    provSel.value = 'onemin';
+                    await this.onProviderChange(sec, 'onemin');
+                }
+            }
+            for (const sec of ['main', 'publish', 'review', 'code']) {
+                const provSel = document.getElementById(`${sec}-provider`);
+                if (provSel && provSel.value === 'onemin') {
+                    const modSel = document.getElementById(`${sec}-model-select`);
+                    const current = (modSel && models.includes(modSel.value)) ? modSel.value : (defaults[sec] || 'gpt-4.1-mini');
+                    await this.populateModelSelect(`${sec}-model-select`, 'onemin', current);
+                }
+            }
+            if (window.showToast) {
+                window.showToast(`✅ ${models.length} modèles 1min.AI chargés dans les menus !`, "info");
+            }
+        },
+
         // Peuple un <select> de modèles
         async populateModelSelect(selectId, providerId, currentModel) {
             const sel = document.getElementById(selectId);
             if (!sel) return;
             sel.innerHTML = '<option value="">— chargement… —</option>';
 
-            const prov = this.providers[providerId];
+            const prov = this.providers[providerId] || this.providers['local-pixel'];
             let models = [];
 
-            if (prov.isCloud) {
+            if (providerId === 'onemin') {
+                models = await this.loadOneMinModels();
+            } else if (prov.isCloud) {
                 models = prov.models || [];
+            } else if (providerId === 'local-igpu') {
+                const loc = await this.loadLocalModels();
+                models = Array.from(new Set(['qwen3.5:9b', ...loc]));
             } else {
                 models = await this.loadLocalModels();
+            }
+
+            if (currentModel && !models.includes(currentModel)) {
+                models = [currentModel, ...models];
             }
 
             sel.innerHTML = '';
@@ -927,8 +995,17 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (m === currentModel) opt.selected = true;
                 sel.appendChild(opt);
             });
-            // Si pas de valeur sélectionnée, prendre le premier
             if (!sel.value && models.length > 0) sel.value = models[0];
+        },
+
+        _sectionElements(section) {
+            const map = {
+                main:    { urlDisp: 'main-url-display',    urlHid: 'llm-local-url',   modSel: 'main-model-select',    modHid: 'llm-local-model' },
+                publish: { urlDisp: 'publish-url-display', urlHid: 'llm-publish-url', modSel: 'publish-model-select', modHid: 'llm-publish-model' },
+                review:  { urlDisp: 'review-url-display',  urlHid: 'llm-review-url',  modSel: 'review-model-select',  modHid: 'llm-review-model' },
+                code:    { urlDisp: 'code-url-display',    urlHid: 'llm-code-url',    modSel: 'code-model-select',    modHid: 'llm-code-model' },
+            };
+            return map[section] || map.main;
         },
 
         // Appelé quand l'utilisateur change de fournisseur
@@ -936,57 +1013,59 @@ document.addEventListener('DOMContentLoaded', () => {
             const prov = this.providers[providerId];
             if (!prov) return;
 
-            const urlDisplayId = section === 'main' ? 'main-url-display' : 'code-url-display';
-            const urlHiddenId  = section === 'main' ? 'llm-local-url'    : 'llm-code-url';
-            const modelSelId   = section === 'main' ? 'main-model-select' : 'code-model-select';
-            const modelHidId   = section === 'main' ? 'llm-local-model'   : 'llm-code-model';
+            const ids = this._sectionElements(section);
 
-            // Mettre à jour l'URL affichée et cachée
-            const urlDisplay = document.getElementById(urlDisplayId);
-            const urlHidden  = document.getElementById(urlHiddenId);
+            const urlDisplay = document.getElementById(ids.urlDisp);
+            const urlHidden  = document.getElementById(ids.urlHid);
             if (urlDisplay) urlDisplay.textContent = prov.url;
             if (urlHidden)  urlHidden.value = prov.url;
 
-            // Si cloud, mettre à jour aussi cloud-url caché (pour main)
             if (section === 'main') {
                 const cloudUrlHidden = document.getElementById('llm-cloud-url');
-                if (cloudUrlHidden) cloudUrlHidden.value = prov.isCloud ? prov.url : 'https://generativelanguage.googleapis.com/v1beta/openai';
-                // Mettre à jour le mode
+                if (cloudUrlHidden) cloudUrlHidden.value = prov.isCloud ? prov.url : 'https://api.1min.ai/openai/v1';
                 const modeHidden = document.getElementById('llm-mode-select');
                 if (modeHidden) modeHidden.value = prov.isCloud ? 'cloud' : 'local';
             }
 
-            // Charger les modèles correspondants
-            const currentModel = document.getElementById(modelHidId)?.value || '';
-            await this.populateModelSelect(modelSelId, providerId, currentModel);
+            const currentModel = document.getElementById(ids.modHid)?.value || '';
+            await this.populateModelSelect(ids.modSel, providerId, currentModel);
 
-            // Synchroniser le champ caché du modèle
-            const modelSel = document.getElementById(modelSelId);
+            const modelSel = document.getElementById(ids.modSel);
             if (modelSel) {
-                document.getElementById(modelHidId).value = modelSel.value;
-                if (section === 'main') document.getElementById('llm-cloud-model').value = modelSel.value;
+                const hidEl = document.getElementById(ids.modHid);
+                if (hidEl) hidEl.value = modelSel.value;
+                if (section === 'main') {
+                    const cmEl = document.getElementById('llm-cloud-model');
+                    if (cmEl) cmEl.value = modelSel.value;
+                }
             }
 
-            // Afficher/masquer la section clé API si au moins un provider est cloud
             this.updateApiKeyVisibility();
         },
 
-        // Affiche la clé API uniquement si au moins un provider est cloud
+        // Affiche la clé API Cloud secondaire uniquement si un provider cloud non-1min est sélectionné
         updateApiKeyVisibility() {
-            const mainProv = document.getElementById('main-provider')?.value || '';
-            const codeProv = document.getElementById('code-provider')?.value || '';
-            const isAnyCloud = (this.providers[mainProv]?.isCloud) || (this.providers[codeProv]?.isCloud);
+            const sections = ['main', 'publish', 'review', 'code'];
+            let isOtherCloud = false;
+            for (const s of sections) {
+                const p = document.getElementById(`${s}-provider`)?.value || '';
+                if (this.providers[p]?.isCloud && p !== 'onemin') {
+                    isOtherCloud = true;
+                }
+            }
             const section = document.getElementById('api-key-section');
-            if (section) section.style.display = isAnyCloud ? 'block' : 'none';
+            if (section) section.style.display = isOtherCloud ? 'block' : 'none';
         },
 
         // Détecte le provider à partir d'une URL
         providerFromUrl(url) {
             if (!url) return 'local-pixel';
+            if (url.includes('1min.ai')) return 'onemin';
             if (url.includes('generativelanguage.googleapis.com')) return 'gemini';
             if (url.includes('api.openai.com')) return 'openai';
             if (url.includes('api.groq.com')) return 'groq';
             if (url.includes('api.anthropic.com')) return 'anthropic';
+            if (url.includes('18081')) return 'local-igpu';
             if (url.includes('11434')) return 'local-ollama';
             if (url.includes('1234')) return 'local-lm';
             return 'local-pixel';
@@ -994,58 +1073,64 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Initialise l'interface à partir des settings sauvegardés
         async init(settings) {
-            // Restaurer clé API
+            const oneminKeyInput = document.getElementById('llm-onemin-key');
+            if (oneminKeyInput) oneminKeyInput.value = settings.onemin_api_key || '';
+
             const keyInput = document.getElementById('llm-cloud-key');
             if (keyInput) keyInput.value = settings.cloud_api_key || '';
 
-            // Restaurer les URLs cachées
-            const localUrlH = document.getElementById('llm-local-url');
-            if (localUrlH) localUrlH.value = settings.local_base_url || 'http://127.0.0.1:52625/v1';
-            const cloudUrlH = document.getElementById('llm-cloud-url');
-            if (cloudUrlH) cloudUrlH.value = settings.cloud_base_url || '';
-            const codeUrlH = document.getElementById('llm-code-url');
-            if (codeUrlH) codeUrlH.value = settings.code_base_url || 'http://127.0.0.1:52625/v1';
+            const publishUrl = settings.publish_base_url || 'https://api.1min.ai/openai/v1';
+            const publishMod = settings.publish_model || 'gpt-4.1-mini';
+            const reviewUrl  = settings.review_base_url  || 'https://api.1min.ai/openai/v1';
+            const reviewMod  = settings.review_model  || 'gpt-4.1-mini';
+            const codeUrl    = settings.code_base_url    || 'http://127.0.0.1:52625/v1';
+            const codeMod    = settings.code_model    || '';
 
-            // Restaurer les modèles cachés
-            const localModH = document.getElementById('llm-local-model');
-            if (localModH) localModH.value = settings.local_model || '';
-            const cloudModH = document.getElementById('llm-cloud-model');
-            if (cloudModH) cloudModH.value = settings.cloud_model || '';
-            const codeModH = document.getElementById('llm-code-model');
-            if (codeModH) codeModH.value = settings.code_model || '';
+            // Restaurer les champs cachés
+            const setVal = (id, val) => { const el = document.getElementById(id); if (el) el.value = val; };
+            setVal('llm-local-url',     settings.local_base_url || 'http://127.0.0.1:52625/v1');
+            setVal('llm-cloud-url',     settings.cloud_base_url || 'https://api.1min.ai/openai/v1');
+            setVal('llm-local-model',   settings.local_model || '');
+            setVal('llm-cloud-model',   settings.cloud_model || '');
+            setVal('llm-publish-url',   publishUrl);
+            setVal('llm-publish-model', publishMod);
+            setVal('llm-review-url',    reviewUrl);
+            setVal('llm-review-model',  reviewMod);
+            setVal('llm-code-url',      codeUrl);
+            setVal('llm-code-model',    codeMod);
 
             // Déduire le bon provider pour chaque section
             const mainUrl = settings.active_mode === 'cloud' ? settings.cloud_base_url : settings.local_base_url;
-            const mainProviderId = this.providerFromUrl(mainUrl);
-            const codeProviderId = this.providerFromUrl(settings.code_base_url);
+            const mainProviderId    = this.providerFromUrl(mainUrl);
+            const publishProviderId = this.providerFromUrl(publishUrl);
+            const reviewProviderId  = this.providerFromUrl(reviewUrl);
+            const codeProviderId    = this.providerFromUrl(codeUrl);
 
-            // Sélectionner le provider dans les menus
-            const mainProvSel = document.getElementById('main-provider');
-            if (mainProvSel) mainProvSel.value = mainProviderId;
-            const codeProvSel = document.getElementById('code-provider');
-            if (codeProvSel) codeProvSel.value = codeProviderId;
+            setVal('main-provider',    mainProviderId);
+            setVal('publish-provider', publishProviderId);
+            setVal('review-provider',  reviewProviderId);
+            setVal('code-provider',    codeProviderId);
 
-            // Mettre à jour les URL affichées
-            const mainUrl2 = this.providers[mainProviderId]?.url || mainUrl;
-            const codeUrl2 = this.providers[codeProviderId]?.url || settings.code_base_url;
-            const mainDisp = document.getElementById('main-url-display');
-            if (mainDisp) mainDisp.textContent = mainUrl2;
-            const codeDisp = document.getElementById('code-url-display');
-            if (codeDisp) codeDisp.textContent = codeUrl2;
+            const setTxt = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+            setTxt('main-url-display',    this.providers[mainProviderId]?.url    || mainUrl);
+            setTxt('publish-url-display', this.providers[publishProviderId]?.url || publishUrl);
+            setTxt('review-url-display',  this.providers[reviewProviderId]?.url  || reviewUrl);
+            setTxt('code-url-display',    this.providers[codeProviderId]?.url    || codeUrl);
 
-            // Charger les listes de modèles
+            // Charger les listes de modèles pour les 4 cerveaux
             const mainCurrentModel = settings.active_mode === 'cloud' ? settings.cloud_model : settings.local_model;
-            await this.populateModelSelect('main-model-select', mainProviderId, mainCurrentModel);
-            await this.populateModelSelect('code-model-select', codeProviderId, settings.code_model);
+            await this.populateModelSelect('main-model-select',    mainProviderId,    mainCurrentModel);
+            await this.populateModelSelect('publish-model-select', publishProviderId, publishMod);
+            await this.populateModelSelect('review-model-select',  reviewProviderId,  reviewMod);
+            await this.populateModelSelect('code-model-select',    codeProviderId,    codeMod);
 
-            // Visibilité clé API
             this.updateApiKeyVisibility();
 
             // Mettre à jour l'indicateur de connexion
             const connectionEl = document.querySelector('.header-info p');
             if (connectionEl) {
-                const modelName = settings.active_mode === 'cloud' ? (settings.cloud_model || 'Gemini') : (settings.local_model || 'Local');
-                const modeLabel = { local: 'Local', cloud: 'Cloud', auto: 'Hybride' }[settings.active_mode] || 'Local';
+                const modelName = settings.active_mode === 'cloud' ? (settings.cloud_model || '1min.AI') : (settings.local_model || 'Local');
+                const modeLabel = { local: 'Local', cloud: 'Cloud', auto: 'Hybride', adaptive: 'Hybride' }[settings.active_mode] || 'Local';
                 connectionEl.textContent = `Connexion neurale établie via ${modelName} (${modeLabel})`;
             }
         }
@@ -1062,46 +1147,58 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // Bouton Enregistrer — construit le payload à partir des champs cachés
+    // Bouton Enregistrer — construit le payload à partir des 4 sections
     const saveLlmBtn = document.getElementById('save-llm-btn');
     if (saveLlmBtn) {
         saveLlmBtn.addEventListener('click', async () => {
-            // Lire les providers choisis et en déduire les URLs
-            const mainProvId = document.getElementById('main-provider')?.value || 'local-pixel';
-            const codeProvId = document.getElementById('code-provider')?.value || 'local-pixel';
-            const mainProv   = pixelLLM.providers[mainProvId];
-            const codeProv   = pixelLLM.providers[codeProvId];
+            const mainProvId    = document.getElementById('main-provider')?.value    || 'local-pixel';
+            const publishProvId = document.getElementById('publish-provider')?.value || 'onemin';
+            const reviewProvId  = document.getElementById('review-provider')?.value  || 'onemin';
+            const codeProvId    = document.getElementById('code-provider')?.value    || 'local-pixel';
 
-            // Lire les modèles choisis dans les selects
-            const mainModel = document.getElementById('main-model-select')?.value || '';
-            const codeModel = document.getElementById('code-model-select')?.value || '';
+            const mainProv    = pixelLLM.providers[mainProvId];
+            const publishProv = pixelLLM.providers[publishProvId];
+            const reviewProv  = pixelLLM.providers[reviewProvId];
+            const codeProv    = pixelLLM.providers[codeProvId];
 
-            // Déduire mode et URLs à partir des providers
-            const isMainCloud  = mainProv?.isCloud || false;
-            const activeMode   = isMainCloud ? 'cloud' : 'local';
-            const localBaseURL = isMainCloud ? 'http://127.0.0.1:52625/v1' : (mainProv?.url || 'http://127.0.0.1:52625/v1');
-            const cloudBaseURL = isMainCloud ? mainProv.url : 'https://generativelanguage.googleapis.com/v1beta/openai';
-            const codeBaseURL  = codeProv?.url || 'http://127.0.0.1:52625/v1';
-            const cloudAPIKey  = document.getElementById('llm-cloud-key')?.value || '';
+            const mainModel    = document.getElementById('main-model-select')?.value    || '';
+            const publishModel = document.getElementById('publish-model-select')?.value || 'gpt-4.1-mini';
+            const reviewModel  = document.getElementById('review-model-select')?.value  || 'gpt-4.1-mini';
+            const codeModel    = document.getElementById('code-model-select')?.value    || '';
+
+            const isMainCloud    = mainProv?.isCloud || false;
+            const activeMode     = isMainCloud ? 'cloud' : 'local';
+            const localBaseURL   = isMainCloud ? 'http://127.0.0.1:52625/v1' : (mainProv?.url || 'http://127.0.0.1:52625/v1');
+            const cloudBaseURL   = isMainCloud ? mainProv.url : 'https://api.1min.ai/openai/v1';
+            const publishBaseURL = publishProv?.url || 'https://api.1min.ai/openai/v1';
+            const reviewBaseURL  = reviewProv?.url  || 'https://api.1min.ai/openai/v1';
+            const codeBaseURL    = codeProv?.url    || 'http://127.0.0.1:52625/v1';
+            const oneMinAPIKey   = document.getElementById('llm-onemin-key')?.value || '';
+            const cloudAPIKey    = document.getElementById('llm-cloud-key')?.value  || '';
 
             try {
                 const res = await fetch('/api/llm_settings', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        active_mode:    activeMode,
-                        cloud_api_key:  cloudAPIKey,
-                        cloud_base_url: cloudBaseURL,
-                        cloud_model:    isMainCloud ? mainModel : (document.getElementById('llm-cloud-model')?.value || ''),
-                        local_base_url: localBaseURL,
-                        local_model:    mainModel,
-                        code_base_url:  codeBaseURL,
-                        code_model:     codeModel
+                        active_mode:      activeMode,
+                        onemin_api_key:   oneMinAPIKey,
+                        cloud_api_key:    cloudAPIKey,
+                        cloud_base_url:   cloudBaseURL,
+                        cloud_model:      isMainCloud ? mainModel : (document.getElementById('llm-cloud-model')?.value || 'gpt-4.1-mini'),
+                        local_base_url:   localBaseURL,
+                        local_model:      isMainCloud ? (document.getElementById('llm-local-model')?.value || 'qwen3.5:9b') : mainModel,
+                        publish_base_url: publishBaseURL,
+                        publish_model:    publishModel,
+                        review_base_url:  reviewBaseURL,
+                        review_model:     reviewModel,
+                        code_base_url:    codeBaseURL,
+                        code_model:       codeModel
                     })
                 });
                 const data = await res.json();
                 if (data.status === 'ok') {
-                    window.showToast("✅ Configuration sauvegardée !", "info");
+                    window.showToast("✅ Configuration Multi-LLM & 1min.AI sauvegardée !", "info");
                     fetchLLMSettings();
                 } else {
                     window.showToast("Erreur lors de la mise à jour", "error");

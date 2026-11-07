@@ -933,6 +933,7 @@ class MainWindow(QMainWindow):
         self.fetch_chat_history()
         self.poll_server_data()
         self.fetch_tasks()
+        self.fetch_llm_settings()
         self.fetch_gmail_settings()
         
         # Start a faster timer for Tasks (every 2s)
@@ -1190,10 +1191,14 @@ class MainWindow(QMainWindow):
         
         self.tabs.addTab(tasks_tab, "⏳ Tâches")
         
-        # Tab 5: Configuration
+        # Tab 5: Configuration (Scrollable)
+        config_scroll = QScrollArea()
+        config_scroll.setWidgetResizable(True)
+        config_scroll.setFrameShape(QFrame.Shape.NoFrame)
         config_tab = QWidget()
         config_layout = QVBoxLayout(config_tab)
         config_layout.setSpacing(12)
+        config_scroll.setWidget(config_tab)
         
         # Voice Config Block
         voice_group = QFrame()
@@ -1252,56 +1257,112 @@ class MainWindow(QMainWindow):
         llm_group.setObjectName("survieBlock")
         l_lay = QVBoxLayout(llm_group)
         l_lay.setSpacing(10)
-        l_lay.addWidget(QLabel("🧠 PARAMÈTRES LLM"))
-        
-        # Main Provider
-        prov_lay = QHBoxLayout()
-        prov_lay.addWidget(QLabel("Cerveau Principal :"))
-        self.cb_provider = QComboBox()
-        self.cb_provider.addItems([
-            "🖥️ Pixel Interne (llama-server)",
+        l_lay.addWidget(QLabel("🧠 PARAMÈTRES MULTI-LLM & 1MIN.AI"))
+
+        self._provider_items = [
+            "🚀 1min.AI (Multi-LLM : GPT-4.1, Claude, DeepSeek...)",
+            "🖥️ Pixel dGPU (RTX 5060 :52625)",
+            "🖥️ Pixel iGPU (Radeon 890M :18081)",
             "🖥️ Ollama (port 11434)",
             "🖥️ LM Studio (port 1234)",
             "☁️ Google Gemini",
             "☁️ OpenAI",
             "☁️ Groq",
             "☁️ Anthropic"
-        ])
+        ]
+
+        # 1min.AI API Key
+        onemin_key_lay = QHBoxLayout()
+        onemin_key_lay.addWidget(QLabel("🚀 Clé API 1min.AI (ONEMIN_API_KEY) :"))
+        self.txt_onemin_key = QLineEdit()
+        self.txt_onemin_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.txt_onemin_key.setPlaceholderText("Clé API 1min.AI (https://api.1min.ai/openai/v1)...")
+        onemin_key_lay.addWidget(self.txt_onemin_key)
+        btn_refresh_models = QPushButton("🔄 Modèles 1min.AI")
+        btn_refresh_models.clicked.connect(self.refresh_onemin_models_gui)
+        onemin_key_lay.addWidget(btn_refresh_models)
+        l_lay.addLayout(onemin_key_lay)
+
+        # 1. Cerveau Principal (Chat)
+        prov_lay = QHBoxLayout()
+        prov_lay.addWidget(QLabel("💬 Cerveau Principal (Chat) :"))
+        self.cb_provider = QComboBox()
+        self.cb_provider.addItems(self._provider_items)
+        self.cb_main_model = QComboBox()
+        self.cb_main_model.setEditable(True)
+        self.cb_provider.currentIndexChanged.connect(lambda: self._on_gui_provider_changed(self.cb_provider, self.cb_main_model))
         prov_lay.addWidget(self.cb_provider)
+        prov_lay.addWidget(self.cb_main_model)
         l_lay.addLayout(prov_lay)
-        
-        # API Key
+
+        # 2. Cerveau Publications (Rédaction d'Articles)
+        pub_lay = QHBoxLayout()
+        pub_lay.addWidget(QLabel("📰 Cerveau Publications (Articles) :"))
+        self.cb_publish_provider = QComboBox()
+        self.cb_publish_provider.addItems(self._provider_items)
+        self.cb_publish_model = QComboBox()
+        self.cb_publish_model.setEditable(True)
+        self.cb_publish_provider.currentIndexChanged.connect(lambda: self._on_gui_provider_changed(self.cb_publish_provider, self.cb_publish_model))
+        pub_lay.addWidget(self.cb_publish_provider)
+        pub_lay.addWidget(self.cb_publish_model)
+        l_lay.addLayout(pub_lay)
+
+        # 3. Cerveau Relecture & Validation IA (Fact-Checker & Audit)
+        rev_lay = QHBoxLayout()
+        rev_lay.addWidget(QLabel("🔍 Relecture & Validation IA :"))
+        self.cb_review_provider = QComboBox()
+        self.cb_review_provider.addItems(self._provider_items)
+        self.cb_review_model = QComboBox()
+        self.cb_review_model.setEditable(True)
+        self.cb_review_provider.currentIndexChanged.connect(lambda: self._on_gui_provider_changed(self.cb_review_provider, self.cb_review_model))
+        rev_lay.addWidget(self.cb_review_provider)
+        rev_lay.addWidget(self.cb_review_model)
+        l_lay.addLayout(rev_lay)
+
+        # 4. Cerveau Code (Création de Skills & Briques)
+        code_lay = QHBoxLayout()
+        code_lay.addWidget(QLabel("🛠️ Cerveau Code (Skills & Briques) :"))
+        self.cb_code_provider = QComboBox()
+        self.cb_code_provider.addItems(self._provider_items)
+        self.cb_code_model = QComboBox()
+        self.cb_code_model.setEditable(True)
+        self.cb_code_provider.currentIndexChanged.connect(lambda: self._on_gui_provider_changed(self.cb_code_provider, self.cb_code_model))
+        code_lay.addWidget(self.cb_code_provider)
+        code_lay.addWidget(self.cb_code_model)
+        l_lay.addLayout(code_lay)
+
+        # Secondary Cloud API Key
         key_lay = QHBoxLayout()
-        key_lay.addWidget(QLabel("Clé API Cloud :"))
+        key_lay.addWidget(QLabel("🔑 Clé API Cloud secondaire (Gemini/Autre) :"))
         self.txt_api_key = QLineEdit()
         self.txt_api_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.txt_api_key.setPlaceholderText("Clé API pour les providers cloud...")
+        self.txt_api_key.setPlaceholderText("Clé API optionnelle pour Gemini / OpenAI / Groq...")
         key_lay.addWidget(self.txt_api_key)
         l_lay.addLayout(key_lay)
-        
+
         btn_save_config = QPushButton("Enregistrer la configuration LLM")
         btn_save_config.clicked.connect(self.save_llm_settings)
         l_lay.addWidget(btn_save_config)
-        
+
         config_layout.addWidget(llm_group)
-        
+
         # Gmail Settings Block
         gmail_group = QFrame()
         gmail_group.setObjectName("survieBlock")
         g_lay = QVBoxLayout(gmail_group)
         g_lay.setSpacing(10)
         g_lay.addWidget(QLabel("📬 PARAMÈTRES GMAIL"))
-        
+
         self.chk_gmail_enabled = QCheckBox("Activer la surveillance des e-mails Gmail")
         g_lay.addWidget(self.chk_gmail_enabled)
-        
+
         email_lay = QHBoxLayout()
         email_lay.addWidget(QLabel("Adresse E-mail :"))
         self.txt_gmail_email = QLineEdit()
         self.txt_gmail_email.setPlaceholderText("votre.adresse@gmail.com")
         email_lay.addWidget(self.txt_gmail_email)
         g_lay.addLayout(email_lay)
-        
+
         pass_lay = QHBoxLayout()
         pass_lay.addWidget(QLabel("Mot de passe d'application :"))
         self.txt_gmail_password = QLineEdit()
@@ -1309,7 +1370,7 @@ class MainWindow(QMainWindow):
         self.txt_gmail_password.setPlaceholderText("Mot de passe à 16 caractères...")
         pass_lay.addWidget(self.txt_gmail_password)
         g_lay.addLayout(pass_lay)
-        
+
         interval_lay = QHBoxLayout()
         interval_lay.addWidget(QLabel("Intervalle de vérification (minutes) :"))
         self.sb_gmail_interval = QComboBox()
@@ -1317,15 +1378,15 @@ class MainWindow(QMainWindow):
         self.sb_gmail_interval.setCurrentText("2")
         interval_lay.addWidget(self.sb_gmail_interval)
         g_lay.addLayout(interval_lay)
-        
+
         btn_save_gmail = QPushButton("Enregistrer la configuration Gmail")
         btn_save_gmail.clicked.connect(self.save_gmail_settings)
         g_lay.addWidget(btn_save_gmail)
-        
+
         config_layout.addWidget(gmail_group)
-        
+
         config_layout.addStretch()
-        self.tabs.addTab(config_tab, "⚙️ Configuration")
+        self.tabs.addTab(config_scroll, "⚙️ Configuration")
         
         # System Tray Icon Setup
         self.setup_tray_icon()
@@ -1787,44 +1848,219 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 print(f"[GUI] Erreur cancel task : {e}")
 
-    def save_llm_settings(self):
-        prov = self.cb_provider.currentText()
-        # Mapping to match API fields
+    def _gui_provider_meta(self, label):
         mapping = {
-            "🖥️ Pixel Interne (llama-server)": "local-pixel",
-            "🖥️ Ollama (port 11434)": "local-ollama",
-            "🖥️ LM Studio (port 1234)": "local-lm",
-            "☁️ Google Gemini": "gemini",
-            "☁️ OpenAI": "openai",
-            "☁️ Groq": "groq",
-            "☁️ Anthropic": "anthropic"
+            "🚀 1min.AI (Multi-LLM : GPT-4.1, Claude, DeepSeek...)": ("onemin", "https://api.1min.ai/openai/v1", True),
+            "🖥️ Pixel dGPU (RTX 5060 :52625)": ("local-pixel", "http://127.0.0.1:52625/v1", False),
+            "🖥️ Pixel iGPU (Radeon 890M :18081)": ("local-igpu", "http://127.0.0.1:18081/v1", False),
+            "🖥️ Ollama (port 11434)": ("local-ollama", "http://127.0.0.1:11434/v1", False),
+            "🖥️ LM Studio (port 1234)": ("local-lm", "http://127.0.0.1:1234/v1", False),
+            "☁️ Google Gemini": ("gemini", "https://generativelanguage.googleapis.com/v1beta/openai", True),
+            "☁️ OpenAI": ("openai", "https://api.openai.com/v1", True),
+            "☁️ Groq": ("groq", "https://api.groq.com/openai/v1", True),
+            "☁️ Anthropic": ("anthropic", "https://api.anthropic.com/v1", True),
         }
-        prov_id = mapping.get(prov, "local-pixel")
-        is_cloud = prov_id in ["gemini", "openai", "groq", "anthropic"]
-        active_mode = "cloud" if is_cloud else "local"
-        
-        # Simple configurations depending on providers
-        local_url = "http://127.0.0.1:52625/v1"
-        if prov_id == "local-ollama":
-            local_url = "http://127.0.0.1:11434/v1"
-        elif prov_id == "local-lm":
-            local_url = "http://127.0.0.1:1234/v1"
-            
+        return mapping.get(label, ("local-pixel", "http://127.0.0.1:52625/v1", False))
+
+    def _gui_label_from_url(self, url):
+        u = (url or "").lower()
+        if "1min.ai" in u:
+            return "🚀 1min.AI (Multi-LLM : GPT-4.1, Claude, DeepSeek...)"
+        if "generativelanguage.googleapis.com" in u:
+            return "☁️ Google Gemini"
+        if "api.openai.com" in u:
+            return "☁️ OpenAI"
+        if "api.groq.com" in u:
+            return "☁️ Groq"
+        if "api.anthropic.com" in u:
+            return "☁️ Anthropic"
+        if "18081" in u:
+            return "🖥️ Pixel iGPU (Radeon 890M :18081)"
+        if "11434" in u:
+            return "🖥️ Ollama (port 11434)"
+        if "1234" in u:
+            return "🖥️ LM Studio (port 1234)"
+        return "🖥️ Pixel dGPU (RTX 5060 :52625)"
+
+    def _get_models_for_provider(self, prov_id):
+        if prov_id == "onemin":
+            if getattr(self, "_cached_onemin_models", None):
+                return self._cached_onemin_models
+            try:
+                key = self.txt_onemin_key.text().strip() if hasattr(self, "txt_onemin_key") else ""
+                url = f"{API_BASE}/api/cloud-models?provider=onemin"
+                if key:
+                    url += f"&api_key={urllib.parse.quote(key)}"
+                r = requests.get(url, timeout=4)
+                if r.status_code == 200:
+                    models = r.json().get("models", [])
+                    if models:
+                        self._cached_onemin_models = models
+                        return models
+            except Exception:
+                pass
+            return [
+                "gpt-4.1-mini", "gpt-4.1", "gpt-4.1-nano", "gpt-4o", "gpt-4o-mini",
+                "o3-mini", "o1-mini", "claude-3-7-sonnet-20250219", "claude-3-5-sonnet-20241022",
+                "claude-3-5-haiku-20241022", "deepseek-chat", "deepseek-r1",
+                "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash",
+                "mistral-large-latest", "codestral-latest", "qwen-2.5-coder-32b-instruct",
+                "llama-3.3-70b-instruct", "grok-2-latest"
+            ]
+        if prov_id == "gemini":
+            return ["gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"]
+        if prov_id == "openai":
+            return ["gpt-4.1", "gpt-4.1-mini", "gpt-4o", "gpt-4o-mini"]
+        if prov_id == "groq":
+            return ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"]
+        if prov_id == "anthropic":
+            return ["claude-3-7-sonnet-20250219", "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022"]
+
+        if not getattr(self, "_cached_local_models", None):
+            try:
+                r = requests.get(f"{API_BASE}/api/local-models", timeout=2)
+                if r.status_code == 200:
+                    self._cached_local_models = r.json().get("models", [])
+            except Exception:
+                self._cached_local_models = []
+        loc = list(self._cached_local_models or [])
+        for m in ["qwen3.5:9b", "qwen3.5:2b"]:
+            if m not in loc:
+                loc.insert(0, m)
+        return loc
+
+    def _on_gui_provider_changed(self, cb_prov, cb_model, target_model=None):
+        prov_id, _, _ = self._gui_provider_meta(cb_prov.currentText())
+        models = self._get_models_for_provider(prov_id)
+        current = target_model if target_model is not None else cb_model.currentText().strip()
+        cb_model.blockSignals(True)
+        cb_model.clear()
+        # Si changement interactif de provider (target_model is None) et que l'ancien modèle n'appartient pas au nouveau provider, sélectionner un modèle du nouveau provider
+        if target_model is not None and current and current not in models:
+            cb_model.addItem(current)
+        cb_model.addItems(models)
+        if current and current in models:
+            cb_model.setCurrentText(current)
+        elif target_model is not None and current:
+            cb_model.setCurrentText(current)
+        elif models:
+            # Défaut intelligent selon le rôle si 1min.AI est choisi
+            default_mod = models[0]
+            if prov_id == "onemin":
+                if cb_model == getattr(self, "cb_code_model", None) and "qwen3.7-max" in models:
+                    default_mod = "qwen3.7-max"
+                elif cb_model == getattr(self, "cb_review_model", None) and "mistral-large-latest" in models:
+                    default_mod = "mistral-large-latest"
+                elif cb_model == getattr(self, "cb_publish_model", None) and "gpt-4.1" in models:
+                    default_mod = "gpt-4.1"
+                elif "gpt-4.1-mini" in models:
+                    default_mod = "gpt-4.1-mini"
+            cb_model.setCurrentText(default_mod)
+        cb_model.blockSignals(False)
+
+    def refresh_onemin_models_gui(self):
+        self._cached_onemin_models = None
+        models = self._get_models_for_provider("onemin")
+        onemin_label = "🚀 1min.AI (Multi-LLM : GPT-4.1, Claude, DeepSeek...)"
+        # Basculer automatiquement Publications, Validation IA et Code sur 1min.AI s'ils étaient encore sur un modèle local
+        for cb_p, cb_m, def_mod in [
+            (self.cb_publish_provider, self.cb_publish_model, "gpt-4.1"),
+            (self.cb_review_provider, self.cb_review_model, "mistral-large-latest"),
+            (self.cb_code_provider, self.cb_code_model, "qwen3.7-max"),
+        ]:
+            prov_id, _, _ = self._gui_provider_meta(cb_p.currentText())
+            if prov_id != "onemin":
+                cb_p.blockSignals(True)
+                cb_p.setCurrentText(onemin_label)
+                cb_p.blockSignals(False)
+                self._on_gui_provider_changed(cb_p, cb_m, def_mod if def_mod in models else None)
+            else:
+                cur = cb_m.currentText().strip()
+                self._on_gui_provider_changed(cb_p, cb_m, cur if cur in models else def_mod)
+
+        # Mettre aussi à jour Cerveau Principal s'il est sur 1min.AI
+        prov_id, _, _ = self._gui_provider_meta(self.cb_provider.currentText())
+        if prov_id == "onemin":
+            cur = self.cb_main_model.currentText().strip()
+            self._on_gui_provider_changed(self.cb_provider, self.cb_main_model, cur if cur in models else "gpt-4.1-mini")
+
+        QMessageBox.information(
+            self,
+            "Modèles 1min.AI",
+            f"✅ {len(models)} modèles 1min.AI chargés !\n\n"
+            f"• Publications : {self.cb_publish_model.currentText()}\n"
+            f"• Relecture & Validation IA : {self.cb_review_model.currentText()}\n"
+            f"• Code (Skills & Briques) : {self.cb_code_model.currentText()}\n\n"
+            f"Cliquez sur les listes déroulantes à droite pour choisir parmi les {len(models)} modèles, puis sur 'Enregistrer la configuration LLM'."
+        )
+
+    def fetch_llm_settings(self):
+        try:
+            r = requests.get(f"{API_BASE}/api/llm_settings", timeout=3)
+            if r.status_code == 200:
+                s = r.json()
+                self.txt_onemin_key.setText(s.get("onemin_api_key", ""))
+                self.txt_api_key.setText(s.get("cloud_api_key", ""))
+
+                active_mode = s.get("active_mode", "local")
+                main_url = s.get("cloud_base_url", "") if active_mode == "cloud" else s.get("local_base_url", "")
+                main_mod = s.get("cloud_model", "") if active_mode == "cloud" else s.get("local_model", "")
+
+                pub_url = s.get("publish_base_url", "https://api.1min.ai/openai/v1")
+                pub_mod = s.get("publish_model", "gpt-4.1-mini")
+                rev_url = s.get("review_base_url", "https://api.1min.ai/openai/v1")
+                rev_mod = s.get("review_model", "gpt-4.1-mini")
+                code_url = s.get("code_base_url", "http://127.0.0.1:52625/v1")
+                code_mod = s.get("code_model", "qwen3.5:9b")
+
+                for cb_p, cb_m, u, m in [
+                    (self.cb_provider, self.cb_main_model, main_url, main_mod),
+                    (self.cb_publish_provider, self.cb_publish_model, pub_url, pub_mod),
+                    (self.cb_review_provider, self.cb_review_model, rev_url, rev_mod),
+                    (self.cb_code_provider, self.cb_code_model, code_url, code_mod),
+                ]:
+                    cb_p.blockSignals(True)
+                    cb_p.setCurrentText(self._gui_label_from_url(u))
+                    cb_p.blockSignals(False)
+                    self._on_gui_provider_changed(cb_p, cb_m, m)
+        except Exception as e:
+            print(f"[GUI] Erreur fetch llm settings : {e}")
+
+    def save_llm_settings(self):
+        main_id, main_url, is_main_cloud = self._gui_provider_meta(self.cb_provider.currentText())
+        _, pub_url, _ = self._gui_provider_meta(self.cb_publish_provider.currentText())
+        _, rev_url, _ = self._gui_provider_meta(self.cb_review_provider.currentText())
+        _, code_url, _ = self._gui_provider_meta(self.cb_code_provider.currentText())
+
+        main_mod = self.cb_main_model.currentText().strip() or "qwen3.5:9b"
+        pub_mod = self.cb_publish_model.currentText().strip() or "gpt-4.1-mini"
+        rev_mod = self.cb_review_model.currentText().strip() or "gpt-4.1-mini"
+        code_mod = self.cb_code_model.currentText().strip() or "qwen3.5:9b"
+
+        active_mode = "cloud" if is_main_cloud else "local"
+        local_url = "http://127.0.0.1:52625/v1" if is_main_cloud else main_url
+        cloud_url = main_url if is_main_cloud else "https://api.1min.ai/openai/v1"
+
         payload = {
             "active_mode": active_mode,
+            "onemin_api_key": self.txt_onemin_key.text().strip(),
             "cloud_api_key": self.txt_api_key.text().strip(),
-            "cloud_base_url": "https://generativelanguage.googleapis.com/v1beta/openai" if prov_id == "gemini" else "https://api.openai.com/v1",
-            "cloud_model": "gemini-2.5-flash" if prov_id == "gemini" else "gpt-4o",
+            "cloud_base_url": cloud_url,
+            "cloud_model": main_mod if is_main_cloud else "gpt-4.1-mini",
             "local_base_url": local_url,
-            "local_model": "qwen3vl-it:4b" if prov_id == "local-pixel" else "",
-            "code_base_url": local_url,
-            "code_model": ""
+            "local_model": "qwen3.5:9b" if is_main_cloud else main_mod,
+            "publish_base_url": pub_url,
+            "publish_model": pub_mod,
+            "review_base_url": rev_url,
+            "review_model": rev_mod,
+            "code_base_url": code_url,
+            "code_model": code_mod,
         }
-        
+
         try:
             r = requests.post(f"{API_BASE}/api/llm_settings", json=payload, timeout=5)
             if r.status_code == 200:
-                QMessageBox.information(self, "Succès", "Configuration LLM enregistrée !")
+                QMessageBox.information(self, "Succès", "Configuration Multi-LLM & 1min.AI enregistrée !")
                 self.poll_server_data()
             else:
                 QMessageBox.warning(self, "Erreur", f"Erreur de sauvegarde : {r.text}")
@@ -1869,7 +2105,7 @@ class MainWindow(QMainWindow):
         if not text:
             return False
         clean = text.lower().strip()
-        play_verbs = ["joue", "mets", "met", "lance", "écouter", "ecouter", "play", "musique", "chanson", "radio"]
+        play_verbs = ["joue", "mets", "met", "lance", "écouter", "ecouter", "play", "musique", "chanson", "radio", "remix"]
         has_play = any(v in clean for v in play_verbs)
         is_question = any(clean.startswith(q) for q in ["qui", "quel", "quelle", "quels", "quelles", "est-ce", "existe", "combien", "pourquoi", "comment", "c'est quoi", "qu'est"])
         if is_question and not any(clean.startswith(p) for p in ["joue", "mets", "met", "lance", "play"]):
@@ -2168,6 +2404,9 @@ class MainWindow(QMainWindow):
         if message.startswith("VISION:"):
             desc = message[7:]
             self.txt_vision.setPlainText(desc)
+        elif message.startswith("AUDIO_STREAM:"):
+            # Flux audio interne vers smartphone Android : ne pas afficher dans le chat PC ni synthétiser
+            return
         elif "[Échange autonome avec Gemini]" in message or "[Échange avec Gemini]" in message:
             # Dialogue autonome conservé dans le flux intérieur : ne pas exposer dans le chat ni au TTS
             return

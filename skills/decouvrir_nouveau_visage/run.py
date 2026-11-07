@@ -140,17 +140,24 @@ def match_person(description, memory):
     """Compare la description visuelle avec les interlocuteurs connus de Pixel."""
     desc_lower = description.lower()
     
-    # 1. Vérifier si aucun visage / aucune personne
+    # 1. Vérifier si écran noir / sombre / aucun visage / aucune personne
     no_person_markers = [
-        "aucune personne", "aucun visage", "personne n'est visible",
-        "pièce vide", "chambre vide", "ne vois personne", "pas de personne",
-        "pas de visage", "seulement un plafond", "mur vide"
+        "image complètement noire", "image noire", "écran noir", "ecran noir",
+        "tout noir", "fond noir", "entièrement noir", "totalement noir",
+        "très sombre", "trop sombre", "image sombre", "obscurité", "dans le noir",
+        "mal éclairée", "aucun détail visible", "ne vois rien", "rien n'est visible",
+        "objectif obstrué", "caméra masquée", "caméra cachée",
+        "sans personne", "aucune personne", "aucun visage", "personne n'est",
+        "il n'y a personne", "ne vois personne", "ne vois clairement personne",
+        "pas de personne", "pas de visage", "aucune présence", "non, aucune",
+        "pièce vide", "chambre vide", "bureau vide", "fauteuil vide", "chaise vide",
+        "seulement un plafond", "mur vide"
     ]
-    if any(m in desc_lower for m in no_person_markers) and not ("il y a une personne" in desc_lower or "un homme" in desc_lower or "une femme" in desc_lower):
+    if any(m in desc_lower for m in no_person_markers):
         return {
             "status": "AUCUN_VISAGE",
             "matched_name": None,
-            "details": "Aucune présence humaine n'a été détectée devant la caméra."
+            "details": "Aucune présence humaine n'a été détectée devant la caméra (image sombre ou pièce vide)."
         }
 
     # 2. Vérification des profils enregistrés

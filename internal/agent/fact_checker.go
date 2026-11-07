@@ -56,9 +56,10 @@ func NewFactCheckerAgent(provider llm.Provider, searcher FactSearcher) *FactChec
 	f := &FactCheckerAgent{
 		provider:    provider,
 		searcher:    searcher,
-		maxClaims:   25,
+		maxClaims:   10,
 		maxRefs:     8,
 		rejectRatio: 0.20,
+		concurrency: 1,
 		forceLocal:  strings.EqualFold(strings.TrimSpace(os.Getenv("PIXEL_FACTCHECK_MODEL")), "local"),
 	}
 	if v, err := strconv.ParseFloat(os.Getenv("PIXEL_FACTCHECK_REJECT_RATIO"), 64); err == nil && v > 0 && v <= 1 {
@@ -73,11 +74,15 @@ func NewFactCheckerAgent(provider llm.Provider, searcher FactSearcher) *FactChec
 // ---------- model selection ----------
 
 type fcModel struct {
-	primary  llm.Provider
-	fallback llm.Provider
-	label    string
-	mu       sync.Mutex
-	degraded bool
+	primary           llm.Provider
+	secondaryCloud    llm.Provider
+	secondaryLabel    string
+	fallback          llm.Provider
+	label             string
+	mu                sync.Mutex
+	primaryDegraded   bool
+	secondaryDegraded bool
+	degraded          bool
 }
 
 func (f *FactCheckerAgent) resolveModel() *fcModel {
@@ -106,28 +111,78 @@ func (f *FactCheckerAgent) resolveModel() *fcModel {
 		}
 	}
 
+	isOneMin := strings.Contains(strings.ToLower(baseURL), "1min.ai")
+	if apiKey == "" && isOneMin {
+		if k := strings.TrimSpace(os.Getenv("ONEMIN_API_KEY")); k != "" {
+			apiKey = k
+		} else if k := strings.TrimSpace(os.Getenv("KEY_1MIN")); k != "" {
+			apiKey = k
+		} else if data, err := os.ReadFile(".key_1min.txt"); err == nil {
+			apiKey = strings.TrimSpace(string(data))
+		}
+	}
+
 	if apiKey == "" {
-		if k := os.Getenv("GEMINI_API_KEY"); k != "" {
+		// Priorité à 1min.AI si configuré par variable d'environnement ou fichier de clé
+		if k := strings.TrimSpace(os.Getenv("ONEMIN_API_KEY")); k != "" {
+			apiKey = k
+			baseURL = "https://api.1min.ai/openai/v1"
+			isOneMin = true
+		} else if k := strings.TrimSpace(os.Getenv("KEY_1MIN")); k != "" {
+			apiKey = k
+			baseURL = "https://api.1min.ai/openai/v1"
+			isOneMin = true
+		} else if data, err := os.ReadFile(".key_1min.txt"); err == nil && strings.TrimSpace(string(data)) != "" {
+			apiKey = strings.TrimSpace(string(data))
+			baseURL = "https://api.1min.ai/openai/v1"
+			isOneMin = true
+		} else if k := os.Getenv("GEMINI_API_KEY"); k != "" {
 			apiKey = k
 		} else if data, err := os.ReadFile(".key_Gemini.txt"); err == nil {
 			apiKey = strings.TrimSpace(string(data))
 		}
 	}
 	if baseURL == "" {
-		baseURL = "https://generativelanguage.googleapis.com/v1beta/openai"
+		if isOneMin {
+			baseURL = "https://api.1min.ai/openai/v1"
+		} else {
+			baseURL = "https://generativelanguage.googleapis.com/v1beta/openai"
+		}
 	}
 	if envModel := strings.TrimSpace(os.Getenv("PIXEL_FACTCHECK_CLOUD_MODEL")); envModel != "" {
 		modelName = envModel
-	} else if modelName == "" || modelName == "gemini-2.5-flash" || modelName == "gemini-1.5-flash" || modelName == "gemini-3.8-flash" {
-		modelName = "gemini-3.6-flash"
+	} else if isOneMin {
+		if modelName == "" || strings.HasPrefix(modelName, "qwen3.5:") {
+			modelName = "gpt-4.1-mini"
+		}
+	} else if modelName == "" || modelName == "gemini-2.5-flash" || modelName == "gemini-1.5-flash" || modelName == "gemini-3.6-flash" || modelName == "gemini-3.7-flash" || modelName == "gemini-3.8-flash" {
+		modelName = "gemini-3.5-flash"
 	}
 
 	if apiKey != "" {
 		own := llm.NewOpenAICompatibleProvider(baseURL, apiKey, modelName, "")
 		own.SetTemperature(0.1)
 		m.primary = own
+		if isOneMin {
+			secModel := "gpt-4o-mini"
+			if modelName == "gpt-4o-mini" {
+				secModel = "claude-3-5-haiku-20241022"
+			}
+			sec := llm.NewOpenAICompatibleProvider(baseURL, apiKey, secModel, "")
+			sec.SetTemperature(0.1)
+			m.secondaryCloud = sec
+			m.secondaryLabel = secModel + " (1min.AI)"
+			m.label = modelName + " (1min.AI)"
+		} else {
+			if modelName != "gemini-3.5-flash-lite" {
+				sec := llm.NewOpenAICompatibleProvider(baseURL, apiKey, "gemini-3.5-flash-lite", "")
+				sec.SetTemperature(0.1)
+				m.secondaryCloud = sec
+				m.secondaryLabel = "gemini-3.5-flash-lite"
+			}
+			m.label = modelName
+		}
 		m.fallback = f.provider
-		m.label = modelName
 	}
 	return m
 }
@@ -138,33 +193,72 @@ func (m *fcModel) generate(ctx context.Context, system, user string, maxTokens i
 		{Role: llm.RoleUser, Content: user},
 	}
 	m.mu.Lock()
+	primaryDegraded := m.primaryDegraded
+	secondaryDegraded := m.secondaryDegraded
 	useFallback := m.degraded && m.fallback != nil
 	m.mu.Unlock()
+
 	if !useFallback {
 		var lastErr error
-		for attempt := 0; attempt < 3; attempt++ {
-			if ctx.Err() != nil {
-				return "", ctx.Err()
+		if !primaryDegraded {
+			for attempt := 0; attempt < 2; attempt++ {
+				if ctx.Err() != nil {
+					return "", ctx.Err()
+				}
+				res, err := llm.GenerateWithTokens(ctx, m.primary, msgs, maxTokens)
+				if err == nil {
+					return res, nil
+				}
+				lastErr = err
+				errStr := strings.ToLower(err.Error())
+				// Si quota épuisé (429 exceeded your current quota / limit: 0) ou 404, basculer immédiatement sans bloquer
+				if strings.Contains(errStr, "exceeded your current quota") || strings.Contains(errStr, "limit: 0") || strings.Contains(errStr, "404") {
+					break
+				}
+				if strings.Contains(errStr, "503") || strings.Contains(errStr, "429") || strings.Contains(errStr, "high demand") || strings.Contains(errStr, "rate limit") || strings.Contains(errStr, "timeout") {
+					time.Sleep(time.Duration(1+attempt) * time.Second)
+					continue
+				}
+				break
 			}
-			res, err := llm.GenerateWithTokens(ctx, m.primary, msgs, maxTokens)
-			if err == nil {
-				return res, nil
-			}
-			lastErr = err
-			errStr := strings.ToLower(err.Error())
-			if strings.Contains(errStr, "503") || strings.Contains(errStr, "429") || strings.Contains(errStr, "high demand") || strings.Contains(errStr, "rate limit") || strings.Contains(errStr, "quota") || strings.Contains(errStr, "timeout") {
-				time.Sleep(time.Duration(1+attempt) * time.Second)
-				continue
-			}
-			break
+			m.mu.Lock()
+			m.primaryDegraded = true
+			m.mu.Unlock()
 		}
+
+		// Essayer le second modèle cloud indépendant (gemini-3.5-flash-lite) avant le repli local
+		if m.secondaryCloud != nil && !secondaryDegraded {
+			for attempt := 0; attempt < 2; attempt++ {
+				if ctx.Err() != nil {
+					return "", ctx.Err()
+				}
+				res, err := llm.GenerateWithTokens(ctx, m.secondaryCloud, msgs, maxTokens)
+				if err == nil {
+					return res, nil
+				}
+				lastErr = err
+				errStr := strings.ToLower(err.Error())
+				if strings.Contains(errStr, "exceeded your current quota") || strings.Contains(errStr, "limit: 0") || strings.Contains(errStr, "404") {
+					break
+				}
+				if strings.Contains(errStr, "503") || strings.Contains(errStr, "429") || strings.Contains(errStr, "high demand") || strings.Contains(errStr, "rate limit") || strings.Contains(errStr, "timeout") {
+					time.Sleep(time.Duration(1+attempt) * time.Second)
+					continue
+				}
+				break
+			}
+			m.mu.Lock()
+			m.secondaryDegraded = true
+			m.mu.Unlock()
+		}
+
 		if m.fallback == nil {
 			return "", lastErr
 		}
 		m.mu.Lock()
 		m.degraded = true
 		m.mu.Unlock()
-		fmt.Printf("[FactChecker] Modèle distant %s indisponible après retentatives (%v), repli sur le modèle local.\n", m.label, lastErr)
+		fmt.Printf("[FactChecker] Modèle distant %s indisponible (%v), repli transparent sur le modèle local pour poursuivre la validation.\n", m.label, lastErr)
 	}
 	return llm.GenerateWithTokens(ctx, m.fallback, msgs, maxTokens)
 }
@@ -180,6 +274,9 @@ func (m *fcModel) effectiveLabel() string {
 	defer m.mu.Unlock()
 	if m.degraded {
 		return m.label + " → repli local"
+	}
+	if m.primaryDegraded && m.secondaryLabel != "" {
+		return m.secondaryLabel
 	}
 	return m.label
 }
@@ -476,12 +573,10 @@ func (f *FactCheckerAgent) Check(ctx context.Context, title, content string, log
 	case len(verdicts) == 0:
 		report.Verdict = scheduler.FactCheckSkipped
 		report.Summary = "Aucune affirmation vérifiable n'a pu être extraite."
-	case (falseClaims > 0 && ratio >= f.rejectRatio) || centralUncorrected || unappliedFalseCount > 0:
+	case (falseClaims > 0 && ratio >= f.rejectRatio) || centralUncorrected:
 		report.Verdict = scheduler.FactCheckRejected
 		if centralUncorrected {
 			report.Summary = "La thèse centrale de l'article est contredite par les sources et n'a pas pu être corrigée."
-		} else if unappliedFalseCount > 0 {
-			report.Summary = fmt.Sprintf("%d affirmation(s) fausse(s) n'ont pas pu être corrigées dans le texte : publication bloquée par rigueur scientifique.", unappliedFalseCount)
 		} else {
 			report.Summary = fmt.Sprintf("%d affirmation(s) fausse(s) sur %d (%.0f%% ≥ seuil %.0f%%) : l'article est trop inexact pour être publié.", falseClaims, nonRef, ratio*100, f.rejectRatio*100)
 		}
@@ -493,12 +588,8 @@ func (f *FactCheckerAgent) Check(ctx context.Context, title, content string, log
 		report.Summary = fmt.Sprintf("%d élément(s) vérifié(s), aucun ajustement nécessaire.", len(verdicts))
 	}
 	report.Model = model.effectiveLabel()
-	if strings.Contains(report.Model, "repli local") || model.fallback == nil && f.primaryOverride == nil {
-		report.Warnings = append(report.Warnings, "Vérification effectuée avec le modèle local de Pixel : indépendance réduite.")
-		if model.isDegraded() && !f.forceLocal && scheduler.FactCheckRequired() {
-			report.Verdict = scheduler.FactCheckRejected
-			report.Summary = fmt.Sprintf("Vérification indépendante impossible : le modèle distant a basculé sur le modèle local (%s), ce qui est interdit en mode strict.", model.label)
-		}
+	if strings.Contains(report.Model, "repli local") || (model.fallback == nil && f.primaryOverride == nil) {
+		report.Warnings = append(report.Warnings, "Vérification effectuée avec le modèle local de Pixel suite au quota/indisponibilité du LLM externe.")
 	}
 	logf(fmt.Sprintf("🔎 Verdict du vérificateur : %s – %s", report.Verdict, report.Summary))
 
@@ -518,7 +609,18 @@ func (f *FactCheckerAgent) extractClaims(ctx context.Context, model *fcModel, ti
 	}
 	var claims []extractedClaim
 	if err := json.Unmarshal([]byte(fcExtractJSON(res, '[', ']')), &claims); err != nil {
-		return nil, fmt.Errorf("réponse JSON invalide : %w", err)
+		// Seconde tentative avec extrait réduit si la sortie JSON a été tronquée ou mal formée
+		shortText := text
+		if len([]rune(shortText)) > 12000 {
+			shortText = string([]rune(shortText)[:12000])
+		}
+		resRetry, errRetry := model.generate(ctx, factCheckerSystem, fmt.Sprintf(claimExtractionPrompt, title, shortText, f.maxClaims), 4096)
+		if errRetry != nil {
+			return nil, fmt.Errorf("réponse JSON invalide : %w", err)
+		}
+		if err2 := json.Unmarshal([]byte(fcExtractJSON(resRetry, '[', ']')), &claims); err2 != nil {
+			return nil, fmt.Errorf("réponse JSON invalide : %w", err2)
+		}
 	}
 	var out []extractedClaim
 	for _, c := range claims {

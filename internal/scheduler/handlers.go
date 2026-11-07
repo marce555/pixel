@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -77,6 +78,82 @@ func NewPlayMusicHandler(resolver MusicResolver, s *Scheduler) TaskHandler {
 			task.AppendLog(fmt.Sprintf("Piste directe non trouvée. Ouverture de la page de recherche : %s", targetURL))
 		}
 
+		// Si la tâche cible le smartphone Android, diffuser l'URL directe via SSE et attendre la fin de lecture
+		if task.TargetDevice == "android" || task.TargetDevice == "mobile" {
+			task.AppendLog("Redirection du flux musical vers le smartphone Android...")
+			streamTarget := targetURL
+			if !isDirect && strings.Contains(targetURL, "youtube.com/results?search_query=") {
+				streamTarget = fmt.Sprintf("ytsearch1:%s", task.Payload)
+			}
+			ytdlPath := "/home/marceloc/Documents/Pixel/bin/yt-dlp"
+			if _, statErr := os.Stat(ytdlPath); statErr != nil {
+				ytdlPath = "yt-dlp"
+			}
+			extractCmd := exec.CommandContext(ctx, ytdlPath, "--print", "%(duration)s", "-g", "-f", "bestaudio[ext=m4a]/bestaudio/best", streamTarget)
+			outBytes, extractErr := extractCmd.Output()
+			rawOut := strings.TrimSpace(string(outBytes))
+			var finalStreamURL string
+			durationSec := 240 // Valeur par défaut : 4 minutes
+
+			lines := strings.Split(rawOut, "\n")
+			if len(lines) >= 2 {
+				durFloat, errDur := strconv.ParseFloat(strings.TrimSpace(lines[0]), 64)
+				if errDur == nil && durFloat > 0 {
+					durationSec = int(durFloat)
+				}
+				finalStreamURL = strings.TrimSpace(lines[1])
+			} else if len(lines) == 1 && rawOut != "" {
+				finalStreamURL = rawOut
+			}
+
+			if extractErr != nil || finalStreamURL == "" {
+				task.AppendLog(fmt.Sprintf("Avertissement : extraction de flux direct m4a échouée (%v). Utilisation de targetURL : %s", extractErr, targetURL))
+				finalStreamURL = targetURL
+			}
+
+			streamDone := s.RegisterStreamWait(task.ID)
+			defer s.UnregisterStreamWait(task.ID)
+
+			// Informer le client Android via EventBroadcaster (SSE)
+			s.mu.RLock()
+			broadcaster := s.Broadcaster
+			s.mu.RUnlock()
+			if broadcaster != nil {
+				trackTitle := task.ResolvedTitle
+				if trackTitle == "" {
+					trackTitle = task.Name
+				}
+				evtPayload, _ := json.Marshal(map[string]interface{}{
+					"type":         "audio_play",
+					"task_id":      task.ID,
+					"title":        trackTitle,
+					"stream_url":   finalStreamURL,
+					"announcement": task.GetAnnouncement(),
+					"duration":     durationSec,
+				})
+				broadcaster.Broadcast(fmt.Sprintf("AUDIO_STREAM:%s", string(evtPayload)))
+			}
+
+			task.AppendLog(fmt.Sprintf("Flux audio transmis au smartphone (%ds). En attente de fin de lecture...", durationSec))
+
+			maxWait := time.Duration(durationSec+15) * time.Second
+			if maxWait < 30*time.Second {
+				maxWait = 4 * time.Minute
+			}
+
+			select {
+			case <-streamDone:
+				task.AppendLog("Le smartphone a terminé la lecture de la piste.")
+				return nil
+			case <-time.After(maxWait):
+				task.AppendLog("Délai de lecture de la piste écoulé.")
+				return nil
+			case <-ctx.Done():
+				task.AppendLog("Lecture interrompue.")
+				return ctx.Err()
+			}
+		}
+
 		// Build env with corrected PATH: remove existing PATH entry and prepend localBin.
 		// IMPORTANT: appending PATH= doesn't work in Go exec — the first occurrence wins.
 		localBin := "/home/marceloc/Documents/Pixel/bin"
@@ -113,7 +190,7 @@ func NewPlayMusicHandler(resolver MusicResolver, s *Scheduler) TaskHandler {
 		if !isDirect && strings.Contains(targetURL, "youtube.com/results?search_query=") {
 			cleanPayload := task.Payload
 			qLower := strings.ToLower(cleanPayload)
-			if !strings.Contains(qLower, "lyrics") && !strings.Contains(qLower, "paroles") && !strings.Contains(qLower, "live") && !strings.Contains(qLower, "playlist") {
+			if !strings.Contains(qLower, "lyrics") && !strings.Contains(qLower, "paroles") && !strings.Contains(qLower, "live") && !strings.Contains(qLower, "remix") && !strings.Contains(qLower, "extended") && !strings.Contains(qLower, "rework") && !strings.Contains(qLower, "mix") && !strings.Contains(qLower, "playlist") {
 				cleanPayload += " lyrics"
 			}
 			mpvTarget = fmt.Sprintf("ytdl://ytsearch1:%s", cleanPayload)

@@ -322,3 +322,46 @@ func TestSanitizeDeepContent(t *testing.T) {
 		t.Errorf("expected RFC table placeholder to be purged for climate article, got:\n%s", sanitized)
 	}
 }
+
+func TestFactCheckerFallbackDoesNotRejectValidArticle(t *testing.T) {
+	searcher := &mockFactSearcher{}
+	localFallback := &scriptedFactLLM{
+		onGenerate: func(messages []llm.Message) string {
+			last := messages[len(messages)-1].Content
+			switch {
+			case strings.Contains(last, "AFFIRMATIONS FACTUELLES"):
+				return `[
+					{
+						"claim": "Le protocole BGP gère le routage inter-domaines sur Internet",
+						"excerpt": "Le protocole BGP gère le routage inter-domaines sur Internet.",
+						"kind": "technique",
+						"query": "bgp routing",
+						"central": true
+					}
+				]`
+			case strings.Contains(last, "AFFIRMATION À VÉRIFIER"):
+				return `{
+					"verdict": "confirmé",
+					"evidence": "RFC 4271 confirme le rôle de BGP.",
+					"source_url": "https://datatracker.ietf.org/doc/html/rfc4271",
+					"correction": ""
+				}`
+			default:
+				return "{}"
+			}
+		},
+	}
+
+	fc := NewFactCheckerAgent(localFallback, searcher)
+	fc.concurrency = 1
+	fc.forceLocal = false
+
+	rawHTML := `<article class="blog-article"><p>Le protocole BGP gère le routage inter-domaines sur Internet.</p></article>`
+	report, _, err := fc.Check(context.Background(), "Réseau et BGP", rawHTML, nil)
+	if err != nil {
+		t.Fatalf("Check failed: %v", err)
+	}
+	if report.Verdict == scheduler.FactCheckRejected {
+		t.Fatalf("expected valid article NOT to be rejected when falling back to local model, got summary: %s", report.Summary)
+	}
+}

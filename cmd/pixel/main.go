@@ -133,26 +133,45 @@ func main() {
 	sysadminAgent := agent.NewSysadminAgent(igpuProvider)
 
 	draftManager := scheduler.NewDraftManager("drafts")
-	reviewerAgent := agent.NewReviewerAgent(igpuProvider)
-	// Agent Vérificateur indépendant : isolé sur l'iGPU (ou Cloud si mode cloud) pour ne jamais bloquer le chat principal
-	factCheckerAgent := agent.NewFactCheckerAgent(igpuProvider, webAgent)
+
+	// Dedicated Task Providers (Publications, Independent Validation/Review, and Code/Skills)
+	// Supports 1min.AI multi-LLMs with automatic local fallback to iGPU/dGPU
+	publishProvider := llm.NewTaskAdaptiveProvider(
+		llmSettings.PublishBaseURL,
+		llmSettings.PublishModel,
+		llmSettings.ResolveAPIKeyForURL(llmSettings.PublishBaseURL),
+		igpuBaseURL,
+		igpuModel,
+	)
+	reviewProvider := llm.NewTaskAdaptiveProvider(
+		llmSettings.ReviewBaseURL,
+		llmSettings.ReviewModel,
+		llmSettings.ResolveAPIKeyForURL(llmSettings.ReviewBaseURL),
+		igpuBaseURL,
+		igpuModel,
+	)
+
+	reviewerAgent := agent.NewReviewerAgent(reviewProvider)
+	// Agent Vérificateur indépendant : utilise 1min.AI / Cloud (ou iGPU en repli) pour valider les publications
+	factCheckerAgent := agent.NewFactCheckerAgent(reviewProvider, webAgent)
 	// Agent de Police Bibliographique : traque les chimères statistiques, co-auteurs fictifs et affiliations erronées
-	biblioAuditorAgent := agent.NewBibliographicAuditorAgent(igpuProvider, webAgent)
+	biblioAuditorAgent := agent.NewBibliographicAuditorAgent(reviewProvider, webAgent)
 
 	// Register scheduler handlers
 	taskScheduler.RegisterHandler("play_music", scheduler.NewPlayMusicHandler(webAgent, taskScheduler))
 	taskScheduler.RegisterHandler("agent_task", scheduler.NewAgentTaskHandler(igpuProvider, webAgent, eventHub, stm))
 	taskScheduler.RegisterHandler("research_task", agent.NewResearchTaskHandler(webResearcher, eventHub, stm, ltm))
 	taskScheduler.RegisterHandler("sysadmin", agent.NewSysadminTaskHandler(sysadminAgent, eventHub, stm))
-	taskScheduler.RegisterHandler("publish_article", scheduler.NewPublishArticleHandlerWithBibliographicAuditor(eventHub, stm, igpuProvider, webAgent, draftManager, reviewerAgent, factCheckerAgent, biblioAuditorAgent))
+	taskScheduler.RegisterHandler("publish_article", scheduler.NewPublishArticleHandlerWithBibliographicAuditor(eventHub, stm, publishProvider, webAgent, draftManager, reviewerAgent, factCheckerAgent, biblioAuditorAgent))
 	taskScheduler.RegisterHandler("depublish_duplicates", scheduler.NewDepublishDuplicatesHandler(eventHub, stm, igpuProvider))
-	taskScheduler.RegisterHandler("audit_and_fix_articles", scheduler.NewAuditAndFixArticlesHandlerWithBibliographicAuditor(eventHub, stm, igpuProvider, draftManager, reviewerAgent, factCheckerAgent, biblioAuditorAgent))
+	taskScheduler.RegisterHandler("audit_and_fix_articles", scheduler.NewAuditAndFixArticlesHandlerWithBibliographicAuditor(eventHub, stm, publishProvider, draftManager, reviewerAgent, factCheckerAgent, biblioAuditorAgent))
 
-	codeProvider := llm.NewOpenAICompatibleProvider(
+	codeProvider := llm.NewTaskAdaptiveProvider(
 		llmSettings.CodeBaseURL,
-		llmSettings.CloudAPIKey, // in case the user decides to use a cloud model for code later
 		llmSettings.CodeModel,
-		"", // no embedding needed for code generation
+		llmSettings.ResolveAPIKeyForURL(llmSettings.CodeBaseURL),
+		llmSettings.LocalBaseURL,
+		llmSettings.LocalModel,
 	)
 
 	skillManager := skills.NewSkillManager(codeProvider, "skills")
@@ -211,5 +230,10 @@ func main() {
 	// 8. Démarrage de l'Interface Web locale
 	fmt.Println("Le Cerveau de Pixel tourne. Lancement de l'interface graphique...")
 	webServer := api.NewServer(superior, coreMem, stm, sleepManager, profiler, projectAgent, projectManager, eventHub, taskScheduler, adaptiveProvider)
-	log.Fatal(webServer.Start("8080"))
+	webServer.SetTaskProviders(publishProvider, reviewProvider, igpuBaseURL, igpuModel)
+	port := strings.TrimSpace(os.Getenv("PIXEL_PORT"))
+	if port == "" {
+		port = "8080"
+	}
+	log.Fatal(webServer.Start(port))
 }

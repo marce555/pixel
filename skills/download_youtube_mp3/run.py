@@ -42,35 +42,39 @@ def main():
             sys.exit(1)
             
         query = sys.argv[1]
-        print(f"Recherche de '{query}' sur YouTube...")
-        
-        # Exécution de la recherche rapide avec yt-dlp
-        search_cmd = ["yt-dlp", "--get-title", "--get-id", f"ytsearch1:{query}"]
-        result = subprocess.run(search_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20)
-        
-        if result.returncode != 0:
-            print(f"Erreur lors de la recherche sur YouTube : {result.stderr.strip()}")
-            sys.exit(1)
-            
-        lines = [line.strip() for line in result.stdout.strip().split("\n") if line.strip()]
-        if len(lines) < 2:
-            print("Erreur : Aucun résultat trouvé sur YouTube.")
-            sys.exit(1)
-            
-        video_title = lines[0]
-        video_id = lines[1]
-        video_url = f"https://www.youtube.com/watch?v={video_id}"
-        
-        print(f"Meilleur résultat trouvé : '{video_title}'")
-        
-        # Validation de la correspondance
-        if not is_exact_match(query, video_title):
-            print(f"Le titre trouvé ('{video_title}') ne correspond pas suffisamment à la recherche ('{query}'). Annulation par sécurité.")
-            sys.exit(0)
-            
-        # Création du répertoire de destination dans Musique/Pixel
-        dest_dir = "/home/marceloc/Musique/Pixel"
+        dest_dir = sys.argv[2] if len(sys.argv) >= 3 else "/home/marceloc/Musique/Pixel"
         os.makedirs(dest_dir, exist_ok=True)
+
+        if query.startswith("http://") or query.startswith("https://") or "youtu.be/" in query or "youtube.com/" in query:
+            video_url = query
+            title_res = subprocess.run(["yt-dlp", "--no-playlist", "--get-title", video_url], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20)
+            video_title = title_res.stdout.strip().splitlines()[0] if title_res.returncode == 0 and title_res.stdout.strip() else video_url
+        else:
+            print(f"Recherche de '{query}' sur YouTube...")
+            
+            # Exécution de la recherche rapide avec yt-dlp
+            search_cmd = ["yt-dlp", "--get-title", "--get-id", f"ytsearch1:{query}"]
+            result = subprocess.run(search_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20)
+            
+            if result.returncode != 0:
+                print(f"Erreur lors de la recherche sur YouTube : {result.stderr.strip()}")
+                sys.exit(1)
+                
+            lines = [line.strip() for line in result.stdout.strip().split("\n") if line.strip()]
+            if len(lines) < 2:
+                print("Erreur : Aucun résultat trouvé sur YouTube.")
+                sys.exit(1)
+                
+            video_title = lines[0]
+            video_id = lines[1]
+            video_url = f"https://www.youtube.com/watch?v={video_id}"
+            
+            print(f"Meilleur résultat trouvé : '{video_title}'")
+            
+            # Validation de la correspondance
+            if not is_exact_match(query, video_title):
+                print(f"Le titre trouvé ('{video_title}') ne correspond pas suffisamment à la recherche ('{query}'). Annulation par sécurité.")
+                sys.exit(0)
         
         print("Match validé. Lancement du téléchargement en MP3 haute qualité (320kbps)...")
         

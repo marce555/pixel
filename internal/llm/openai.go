@@ -59,11 +59,113 @@ type apiChatMessage struct {
 }
 
 type chatRequest struct {
-	Model       string           `json:"model"`
-	Messages    []apiChatMessage `json:"messages"`
-	Stream      bool             `json:"stream,omitempty"`
-	MaxTokens   int              `json:"max_tokens,omitempty"`
-	Temperature *float64         `json:"temperature,omitempty"`
+	Model               string           `json:"model"`
+	Messages            []apiChatMessage `json:"messages"`
+	Stream              bool             `json:"stream,omitempty"`
+	MaxTokens           int              `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int              `json:"max_completion_tokens,omitempty"`
+	Temperature         *float64         `json:"temperature,omitempty"`
+}
+
+func DefaultOneMinModels() []string {
+	return []string{
+		"gpt-4.1-mini",
+		"gpt-4.1",
+		"gpt-4o",
+		"gpt-4o-mini",
+		"gpt-5",
+		"gpt-5-mini",
+		"gpt-5-nano",
+		"gpt-5.1",
+		"gpt-5.2",
+		"gpt-5.4",
+		"gpt-5.4-mini",
+		"gpt-5.4-nano",
+		"gpt-5.5",
+		"gpt-5.6-luna",
+		"gpt-5.6-sol",
+		"gpt-5.6-terra",
+		"gpt-6-astra",
+		"gpt-6-luna",
+		"gpt-6-sol",
+		"o3",
+		"deepseek-v4-pro",
+		"deepseek-flash",
+		"moonshotai/kimi-k2.7-code",
+		"moonshotai/kimi-k2.6",
+		"qwen3.7-max",
+		"qwen3.7-plus",
+		"qwen3.7-flash",
+		"qwen3.6-plus",
+		"qwen3.6-flash",
+		"qwen-max",
+		"qwen-plus",
+		"qwen-flash",
+		"mistral-large-latest",
+		"mistral-large-2512",
+		"mistral-medium-3-5",
+		"mistral-medium-latest",
+		"mistral-small-2603",
+		"mistral-small-latest",
+		"open-mistral-nemo",
+		"ministral-14b-latest",
+		"magistral-medium-latest",
+		"magistral-small-latest",
+		"meta/muse-spark-1.3",
+		"meta/muse-spark-1.2",
+		"meta/muse-spark-1.1",
+		"glm-5.3",
+		"glm-5.2",
+		"glm-5.1",
+		"glm-5",
+	}
+}
+
+func FetchRemoteModels(ctx context.Context, baseURL, apiKey string) ([]string, error) {
+	baseURL = strings.TrimSuffix(strings.TrimSpace(baseURL), "/")
+	if baseURL == "" {
+		baseURL = "https://api.1min.ai/openai/v1"
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, "GET", baseURL+"/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(apiKey) != "" {
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(apiKey))
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, parseAPIError(resp.StatusCode, body)
+	}
+
+	var listResp struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
+		return nil, err
+	}
+	var models []string
+	seen := make(map[string]bool)
+	for _, m := range listResp.Data {
+		id := strings.TrimSpace(m.ID)
+		if id != "" && !seen[id] {
+			seen[id] = true
+			models = append(models, id)
+		}
+	}
+	return models, nil
 }
 
 func toAPIMessages(messages []Message) []apiChatMessage {
@@ -146,11 +248,26 @@ func (p *OpenAICompatibleProvider) GenerateDetailed(ctx context.Context, message
 	if maxTokens <= 0 {
 		maxTokens = 4096
 	}
+	isOneMin := strings.Contains(strings.ToLower(p.BaseURL), "1min.ai")
+	modelLower := strings.ToLower(strings.TrimSpace(p.ChatModel))
+	useMaxCompletion := isOneMin || strings.HasPrefix(modelLower, "gpt-4.1") || strings.HasPrefix(modelLower, "gpt-5") || strings.HasPrefix(modelLower, "o1") || strings.HasPrefix(modelLower, "o3") || strings.HasPrefix(modelLower, "o4")
+
 	reqBody := chatRequest{
 		Model:       p.ChatModel,
 		Messages:    toAPIMessages(messages),
-		MaxTokens:   maxTokens,
 		Temperature: p.Temperature,
+	}
+	if useMaxCompletion {
+		effectiveTokens := maxTokens
+		if isOneMin && effectiveTokens > 4096 {
+			effectiveTokens = 4096
+		}
+		reqBody.MaxCompletionTokens = effectiveTokens
+		if strings.HasPrefix(modelLower, "o1") || strings.HasPrefix(modelLower, "o3") || strings.HasPrefix(modelLower, "o4") {
+			reqBody.Temperature = nil
+		}
+	} else {
+		reqBody.MaxTokens = maxTokens
 	}
 
 	jsonData, err := json.Marshal(reqBody)
@@ -158,21 +275,42 @@ func (p *OpenAICompatibleProvider) GenerateDetailed(ctx context.Context, message
 		return GenerationResult{}, err
 	}
 
+	maxAttempts := 8
+	if isOneMin {
+		// Respect 1min.AI max_retries=0 recommendation (plus 1 fallback attempt if FallbackBaseURL is configured)
+		if p.FallbackBaseURL != "" {
+			maxAttempts = 2
+		} else {
+			maxAttempts = 1
+		}
+	}
+
 	var resp *http.Response
-	for attempt := 1; attempt <= 8; attempt++ {
+	usedFallback := false
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return GenerationResult{}, ctxErr
 		}
 		baseURL := strings.TrimSuffix(p.BaseURL, "/")
 		payload := jsonData
+		apiKey := p.APIKey
 		if attempt > 1 && p.FallbackBaseURL != "" {
+			usedFallback = true
 			baseURL = strings.TrimSuffix(p.FallbackBaseURL, "/")
-			if p.FallbackModel != "" && p.FallbackModel != p.ChatModel {
-				fbReq := reqBody
+			if strings.Contains(baseURL, "127.0.0.1") || strings.Contains(baseURL, "localhost") {
+				apiKey = ""
+			}
+			fbReq := chatRequest{
+				Model:       p.ChatModel,
+				Messages:    toAPIMessages(messages),
+				MaxTokens:   maxTokens,
+				Temperature: p.Temperature,
+			}
+			if p.FallbackModel != "" {
 				fbReq.Model = p.FallbackModel
-				if fbData, errM := json.Marshal(fbReq); errM == nil {
-					payload = fbData
-				}
+			}
+			if fbData, errM := json.Marshal(fbReq); errM == nil {
+				payload = fbData
 			}
 		}
 		req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/chat/completions", bytes.NewBuffer(payload))
@@ -181,8 +319,8 @@ func (p *OpenAICompatibleProvider) GenerateDetailed(ctx context.Context, message
 		}
 
 		req.Header.Set("Content-Type", "application/json")
-		if p.APIKey != "" {
-			req.Header.Set("Authorization", "Bearer "+p.APIKey)
+		if apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
 		}
 
 		resp, err = p.Client.Do(req)
@@ -190,16 +328,16 @@ func (p *OpenAICompatibleProvider) GenerateDetailed(ctx context.Context, message
 			break
 		}
 
-		if attempt == 8 {
-			return GenerationResult{}, fmt.Errorf("after 8 attempts, failed to contact LLM: %w", err)
+		if attempt == maxAttempts {
+			return GenerationResult{}, fmt.Errorf("failed to contact LLM (%s): %w", baseURL, err)
 		}
 
 		if attempt == 1 && p.FallbackBaseURL != "" {
-			fmt.Printf("[LLM Fallback] Accélérateur secondaire (%s) indisponible (%v), basculement immédiat sur %s...\n", p.BaseURL, err, p.FallbackBaseURL)
+			fmt.Printf("[LLM Fallback] Fournisseur (%s) indisponible (%v), basculement immédiat sur %s...\n", p.BaseURL, err, p.FallbackBaseURL)
 			continue
 		}
 
-		fmt.Printf("[LLM Warning] Connection error (attempt %d/8): %v. Retrying in 1.5s...\n", attempt, err)
+		fmt.Printf("[LLM Warning] Connection error (attempt %d/%d): %v. Retrying in 1.5s...\n", attempt, maxAttempts, err)
 		select {
 		case <-ctx.Done():
 			return GenerationResult{}, ctx.Err()
@@ -210,6 +348,52 @@ func (p *OpenAICompatibleProvider) GenerateDetailed(ctx context.Context, message
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
+		errBodyStr := strings.ToLower(string(bodyBytes))
+		// Compatibilité automatique max_completion_tokens <-> max_tokens si un modèle spécifique sur 1min.AI ou OpenAI exige l'autre champ
+		if resp.StatusCode == http.StatusBadRequest && !usedFallback && (strings.Contains(errBodyStr, "max_tokens") || strings.Contains(errBodyStr, "max_completion_tokens") || strings.Contains(errBodyStr, "temperature")) {
+			altReq := chatRequest{
+				Model:    p.ChatModel,
+				Messages: toAPIMessages(messages),
+			}
+			if reqBody.MaxCompletionTokens > 0 {
+				altReq.MaxTokens = maxTokens
+			} else {
+				altReq.MaxCompletionTokens = maxTokens
+			}
+			if altData, errM := json.Marshal(altReq); errM == nil {
+				baseURL := strings.TrimSuffix(p.BaseURL, "/")
+				if req2, errR := http.NewRequestWithContext(ctx, "POST", baseURL+"/chat/completions", bytes.NewBuffer(altData)); errR == nil {
+					req2.Header.Set("Content-Type", "application/json")
+					if p.APIKey != "" {
+						req2.Header.Set("Authorization", "Bearer "+p.APIKey)
+					}
+					if resp2, errDo := p.Client.Do(req2); errDo == nil {
+						defer resp2.Body.Close()
+						if resp2.StatusCode == http.StatusOK {
+							bodyBytes2, _ := io.ReadAll(resp2.Body)
+							var chatResp2 chatResponse
+							if json.Unmarshal(bodyBytes2, &chatResp2) == nil && len(chatResp2.Choices) > 0 {
+								return GenerationResult{
+									Content:      chatResp2.Choices[0].Message.Content,
+									FinishReason: chatResp2.Choices[0].FinishReason,
+								}, nil
+							}
+						}
+					}
+				}
+			}
+		}
+		// Si un serveur de repli local est configuré et que l'API Cloud a renvoyé une erreur HTTP (quota, clé, 5xx), basculer sur le modèle local
+		if !usedFallback && p.FallbackBaseURL != "" {
+			fbURL := strings.TrimSuffix(p.FallbackBaseURL, "/")
+			fbModel := p.FallbackModel
+			if fbModel == "" {
+				fbModel = "qwen3.5:9b"
+			}
+			fmt.Printf("[LLM Fallback] API (%s / %s) a renvoyé HTTP %d, repli transparent sur %s (%s)...\n", p.BaseURL, p.ChatModel, resp.StatusCode, fbURL, fbModel)
+			fbProvider := NewOpenAICompatibleProvider(fbURL, "", fbModel, "")
+			return fbProvider.GenerateDetailed(ctx, messages, maxTokens)
+		}
 		return GenerationResult{}, parseAPIError(resp.StatusCode, bodyBytes)
 	}
 
@@ -241,12 +425,23 @@ func (p *OpenAICompatibleProvider) GenerateStream(ctx context.Context, messages 
 		defer close(out)
 		defer close(errs)
 
+		isOneMin := strings.Contains(strings.ToLower(p.BaseURL), "1min.ai")
+		modelLower := strings.ToLower(strings.TrimSpace(p.ChatModel))
+		useMaxCompletion := isOneMin || strings.HasPrefix(modelLower, "gpt-4.1") || strings.HasPrefix(modelLower, "gpt-5") || strings.HasPrefix(modelLower, "o1") || strings.HasPrefix(modelLower, "o3") || strings.HasPrefix(modelLower, "o4")
+
 		reqBody := chatRequest{
 			Model:       p.ChatModel,
 			Messages:    toAPIMessages(messages),
 			Stream:      true,
-			MaxTokens:   4096,
 			Temperature: p.Temperature,
+		}
+		if useMaxCompletion {
+			reqBody.MaxCompletionTokens = 4096
+			if strings.HasPrefix(modelLower, "o1") || strings.HasPrefix(modelLower, "o3") || strings.HasPrefix(modelLower, "o4") {
+				reqBody.Temperature = nil
+			}
+		} else {
+			reqBody.MaxTokens = 4096
 		}
 
 		jsonData, err := json.Marshal(reqBody)

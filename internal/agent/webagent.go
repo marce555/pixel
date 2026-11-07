@@ -394,11 +394,13 @@ func (w *WebAgent) ResolveMusicURL(songQuery string) (string, string, bool, erro
 	targetURL := ""
 	videoTitle := ""
 
-	// Build query prioritizing "lyrics" if not already specified
+	// Build query prioritizing "lyrics" if not already specified (never append lyrics for remix/extended queries)
 	queryLower := strings.ToLower(query)
 	lyricsQuery := query
 	if !strings.Contains(queryLower, "lyrics") && !strings.Contains(queryLower, "paroles") &&
 		!strings.Contains(queryLower, "live") && !strings.Contains(queryLower, "remix") &&
+		!strings.Contains(queryLower, "rmx") && !strings.Contains(queryLower, "extended") &&
+		!strings.Contains(queryLower, "rework") && !strings.Contains(queryLower, "mix") &&
 		!strings.Contains(queryLower, "playlist") {
 		lyricsQuery = query + " lyrics"
 	}
@@ -518,7 +520,7 @@ func (w *WebAgent) PlayMusic(songQuery string) (string, error) {
 	if !isDirect && strings.Contains(targetURL, "youtube.com/results?search_query=") {
 		cleanQuery := songQuery
 		qLower := strings.ToLower(cleanQuery)
-		if !strings.Contains(qLower, "lyrics") && !strings.Contains(qLower, "paroles") && !strings.Contains(qLower, "live") && !strings.Contains(qLower, "playlist") {
+		if !strings.Contains(qLower, "lyrics") && !strings.Contains(qLower, "paroles") && !strings.Contains(qLower, "live") && !strings.Contains(qLower, "remix") && !strings.Contains(qLower, "extended") && !strings.Contains(qLower, "mix") && !strings.Contains(qLower, "playlist") {
 			cleanQuery += " lyrics"
 		}
 		mpvTarget = fmt.Sprintf("ytdl://ytsearch1:%s", cleanQuery)
@@ -818,7 +820,13 @@ func (w *WebAgent) ScrapeYouTubeDirect(songQuery string) (string, string) {
 		}
 	}
 
-	// 2. Extract Video ID and Title with priority on Lyrics / Audio versions
+	// 2. Extract Video ID and Title with priority on Lyrics / Audio versions (or Remix versions when requested)
+	isRemixQuery := strings.Contains(queryLower, "remix") || strings.Contains(queryLower, "rmx") ||
+		strings.Contains(queryLower, "extended") || strings.Contains(queryLower, "rework") ||
+		strings.Contains(queryLower, "club mix") || strings.Contains(queryLower, "dance mix") ||
+		strings.Contains(queryLower, "12\"") || strings.Contains(queryLower, "12 inch") ||
+		strings.Contains(queryLower, "mix)")
+
 	type videoCandidate struct {
 		score int
 		id    string
@@ -826,6 +834,9 @@ func (w *WebAgent) ScrapeYouTubeDirect(songQuery string) (string, string) {
 	}
 	var candidates []videoCandidate
 	seen := make(map[string]bool)
+
+	reTitleSpecific := regexp.MustCompile(`"title":\{"runs":\[\{"text":"([^"]+)"`)
+	reTitleFallback := regexp.MustCompile(`"text":"([^"]+)"`)
 
 	// Attempt A: Scan matches inside JSON block
 	reVideoJSON := regexp.MustCompile(`"videoId":"([a-zA-Z0-9_-]{11})"`)
@@ -838,33 +849,72 @@ func (w *WebAgent) ScrapeYouTubeDirect(songQuery string) (string, string) {
 		if seen[vid] {
 			continue
 		}
-		seen[vid] = true
 
 		// Find title following this video ID
 		searchArea := body[m[1]:]
-		if len(searchArea) > 1500 {
-			searchArea = searchArea[:1500]
+		if len(searchArea) > 3000 {
+			searchArea = searchArea[:3000]
 		}
-		reTitle := regexp.MustCompile(`"text":"([^"]+)"`)
-		titleMatch := reTitle.FindStringSubmatch(searchArea)
+		titleMatch := reTitleSpecific.FindStringSubmatch(searchArea)
+		if len(titleMatch) < 2 {
+			if len(searchArea) > 1500 {
+				titleMatch = reTitleFallback.FindStringSubmatch(searchArea[:1500])
+			} else {
+				titleMatch = reTitleFallback.FindStringSubmatch(searchArea)
+			}
+		}
 		vTitle := ""
 		if len(titleMatch) >= 2 {
 			vTitle = html.UnescapeString(titleMatch[1])
 		}
+		if vTitle == "" || vTitle == "Partager" || vTitle == "En cours de lecture" {
+			continue
+		}
+		seen[vid] = true
 
 		vLower := strings.ToLower(vTitle)
 		score := 0
-		if strings.Contains(vLower, "lyrics") || strings.Contains(vLower, "lyric") || strings.Contains(vLower, "paroles") {
-			score += 100
-		} else if strings.Contains(vLower, "official audio") || strings.Contains(vLower, "audio officiel") || strings.Contains(vLower, "audio") {
-			score += 60
-		}
-		if strings.Contains(vLower, "official music video") || strings.Contains(vLower, "official video") || strings.Contains(vLower, "clip officiel") || strings.Contains(vLower, "music video") {
-			score -= 30
+		if isRemixQuery {
+			if strings.Contains(vLower, "megamix") || strings.Contains(vLower, "nonstop") ||
+				strings.Contains(vLower, "non-stop") || strings.Contains(vLower, "marathon") ||
+				strings.Contains(vLower, "full album") || strings.Contains(vLower, "1 hour") ||
+				strings.Contains(vLower, "2 hours") || strings.Contains(vLower, "3 hours") {
+				score -= 250
+			}
+			if strings.Contains(vLower, "remix") || strings.Contains(vLower, "rmx") {
+				score += 200
+			} else if strings.Contains(vLower, "extended") || strings.Contains(vLower, "rework") ||
+				strings.Contains(vLower, "club mix") || strings.Contains(vLower, "dance mix") ||
+				strings.Contains(vLower, "dub") || strings.Contains(vLower, "12\"") ||
+				strings.Contains(vLower, "12 inch") || strings.Contains(vLower, "mix") {
+				score += 140
+			} else {
+				score -= 150
+			}
+			// Bonus for matching specific remixer or artist tokens from the query
+			qWords := strings.FieldsFunc(queryLower, func(r rune) bool {
+				return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'))
+			})
+			for _, qw := range qWords {
+				if len(qw) >= 4 && qw != "remix" && qw != "extended" && qw != "official" {
+					if strings.Contains(vLower, qw) {
+						score += 25
+					}
+				}
+			}
+		} else {
+			if strings.Contains(vLower, "lyrics") || strings.Contains(vLower, "lyric") || strings.Contains(vLower, "paroles") {
+				score += 100
+			} else if strings.Contains(vLower, "official audio") || strings.Contains(vLower, "audio officiel") || strings.Contains(vLower, "audio") {
+				score += 60
+			}
+			if strings.Contains(vLower, "official music video") || strings.Contains(vLower, "official video") || strings.Contains(vLower, "clip officiel") || strings.Contains(vLower, "music video") {
+				score -= 30
+			}
 		}
 
 		candidates = append(candidates, videoCandidate{score: score, id: vid, title: vTitle})
-		if len(candidates) >= 8 {
+		if len(candidates) >= 10 {
 			break
 		}
 	}

@@ -37,6 +37,9 @@ type SuperiorAgent struct {
 	draftManager   *scheduler.DraftManager
 	selfAwareness  *SelfAwarenessAgent
 	reconciler     *DynamicReconciler
+
+	activeClientMu sync.RWMutex
+	activeClient   string // "pc" (default) or "android" / "mobile"
 }
 
 // SetFastProvider configures a dedicated co-processor LLM (e.g., iGPU Vulkan) for parallel routing/pre-processing.
@@ -72,6 +75,43 @@ func (a *SuperiorAgent) SetSelfAwareness(sa *SelfAwarenessAgent) {
 
 func (a *SuperiorAgent) GetSelfAwareness() *SelfAwarenessAgent {
 	return a.selfAwareness
+}
+
+func (a *SuperiorAgent) SetActiveClient(client string) {
+	a.activeClientMu.Lock()
+	defer a.activeClientMu.Unlock()
+	clean := strings.ToLower(strings.TrimSpace(client))
+	if clean == "android" || clean == "mobile" || clean == "phone" {
+		a.activeClient = "android"
+	} else {
+		a.activeClient = "pc"
+	}
+}
+
+func (a *SuperiorAgent) GetActiveClient() string {
+	a.activeClientMu.RLock()
+	defer a.activeClientMu.RUnlock()
+	if a.activeClient == "" {
+		return "pc"
+	}
+	return a.activeClient
+}
+
+// resolveTargetDevice determines whether playback should happen on "pc" or "android"
+func (a *SuperiorAgent) resolveTargetDevice(input string) string {
+	lower := strings.ToLower(input)
+	if strings.Contains(lower, "sur mon pc") || strings.Contains(lower, "sur le pc") ||
+		strings.Contains(lower, "sur l'ordi") || strings.Contains(lower, "sur les enceintes") ||
+		strings.Contains(lower, "sur la télé") || strings.Contains(lower, "sur la tv") {
+		return "pc"
+	}
+	if strings.Contains(lower, "sur mon tel") || strings.Contains(lower, "sur mon tél") ||
+		strings.Contains(lower, "sur mon téléphone") || strings.Contains(lower, "sur mon telephone") ||
+		strings.Contains(lower, "sur mon mobile") || strings.Contains(lower, "sur le tel") ||
+		strings.Contains(lower, "sur le portable") {
+		return "android"
+	}
+	return a.GetActiveClient()
 }
 
 func (a *SuperiorAgent) SetDraftManager(dm *scheduler.DraftManager) {
@@ -183,13 +223,28 @@ func (a *SuperiorAgent) HandleAutoQueue(parentCtx context.Context, lastTitle str
 		recentHistory := a.scheduler.GetRecentMusicHistory(10)
 		historyStr := strings.Join(recentHistory, ", ")
 
-		prompt := fmt.Sprintf(`Tu es un DJ radio automatique (Autoplay). La dernière chanson diffusée était : "%s".
+		isRemixMode := strings.Contains(strings.ToLower(lastTitle), "remix") ||
+			strings.Contains(strings.ToLower(lastTitle), "extended mix") ||
+			strings.Contains(strings.ToLower(lastTitle), "club mix")
+
+		var prompt string
+		if isRemixMode {
+			prompt = fmt.Sprintf(`Tu es un DJ radio automatique (Autoplay) en mode DJ REMIX (versions revisitées). La dernière chanson diffusée était : "%s".
+Propose TROIS versions "Remix" (versions revisitées officielles ou club/extended remix) de chansons différentes d'artistes différents qui s'enchaînent avec harmonie dans ce style musical.
+RÈGLES STRICTES ANTI-BOUCLE :
+1. NE JAMAIS proposer "%s".
+2. NE JAMAIS proposer un des morceaux déjà diffusés récemment : %s.
+3. Propose 3 morceaux avec 3 artistes DIFFÉRENTS les uns des autres.
+4. Réponds UNIQUEMENT par 3 lignes au format strict "Titre (Nom du Remix) - Artiste" (exemple : "She Drives Me Crazy (The Justin Strauss Remix) - Fine Young Cannibals"), sans guillemets, sans tirets de liste, sans numérotation, sans texte additionnel.`, lastTitle, lastTitle, historyStr)
+		} else {
+			prompt = fmt.Sprintf(`Tu es un DJ radio automatique (Autoplay). La dernière chanson diffusée était : "%s".
 Propose TROIS chansons différentes d'artistes différents qui s'enchaînent avec harmonie dans ce style musical.
 RÈGLES STRICTES ANTI-BOUCLE :
 1. NE JAMAIS proposer "%s".
 2. NE JAMAIS proposer un des morceaux déjà diffusés récemment : %s.
 3. Propose 3 morceaux avec 3 artistes DIFFÉRENTS les uns des autres.
 4. Réponds UNIQUEMENT par 3 lignes au format strict "Artiste - Titre", sans guillemets, sans tirets de liste, sans numérotation, sans texte additionnel.`, lastTitle, lastTitle, historyStr)
+		}
 
 		messages := []llm.Message{
 			{Role: llm.RoleSystem, Content: prompt},
@@ -409,7 +464,7 @@ func isConversationalFastPath(cleanInput string) bool {
 	if len(clean) > 80 {
 		return false
 	}
-	actionKeywords := []string{"musique", "chanson", "mail", "gmail", "cherche", "recherche", "ouvre", "lance", "joue", "météo", "meteo", "heure", "date", "film", "youtube", "rappelle", "souviens"}
+	actionKeywords := []string{"musique", "chanson", "remix", "mail", "gmail", "cherche", "recherche", "ouvre", "lance", "joue", "météo", "meteo", "heure", "date", "film", "youtube", "rappelle", "souviens"}
 	for _, kw := range actionKeywords {
 		if strings.Contains(clean, kw) {
 			return false
@@ -600,6 +655,14 @@ func (a *SuperiorAgent) analyzeQuery(ctx context.Context, input string, history 
 		return RouterResponse{
 			Action: "skill_billboard_radio",
 			Query:  cleanInput,
+		}
+	}
+
+	// Fast-path for DJ Remix mode ("lance moi un remix", versions revisitées sur YouTube)
+	if detectDJRemixIntent(cleanInput) {
+		return RouterResponse{
+			Action: "skill_dj_remix",
+			Query:  input,
 		}
 	}
 
@@ -1576,9 +1639,18 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 			resourceagent.AddLiveLog("Skill:Vision", "Activation de la caméra et reconnaissance faciale... 📸")
 		} else if skillName == "billboard_radio" {
 			resourceagent.AddLiveLog("Skill:Billboard", fmt.Sprintf("Récupération des 100 titres Billboard et lancement de la radio (%s)... 📻", routerResp.Query))
+		} else if skillName == "dj_remix" {
+			resourceagent.AddLiveLog("Skill:DJRemix", fmt.Sprintf("Recherche sur YouTube des versions Remix revisitées et lancement en mode DJ (%s)... 🎧", routerResp.Query))
 		} else {
 			resourceagent.AddLiveLog(fmt.Sprintf("Skill:%s", skillName), fmt.Sprintf("Exécution de la brique '%s'...", skillName))
 		}
+		if skillName == "dj_remix" && a.scheduler != nil {
+			reply := a.handleDJRemixDirect(ctx, routerResp.Query)
+			if reply == "" {
+				return nil, nil
+			}
+			additionalContext += fmt.Sprintf("\n\n--- RÉSULTAT DE LA BRIQUE 'dj_remix' ---\n%s\n---------------------------------", reply)
+		} else {
 		skillQuery := routerResp.Query
 		if len(skillQuery) > 500 {
 			skillQuery = skillQuery[:500]
@@ -1694,6 +1766,7 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 			} else {
 				additionalContext += fmt.Sprintf("\n\n--- RÉSULTAT DE LA BRIQUE '%s' ---\n%s\n---------------------------------", skillName, result)
 			}
+		}
 		}
 	}
 
@@ -2107,6 +2180,10 @@ func (a *SuperiorAgent) ProcessInput(ctx context.Context, input string, history 
 		return a.handleBillboardRadioDirect(ctx, input), nil
 	}
 
+	if detectDJRemixIntent(input) && a.skillManager != nil && a.scheduler != nil {
+		return a.handleDJRemixDirect(ctx, input), nil
+	}
+
 	// 1. Vérification de confirmation d'une proposition précédente de rédaction d'article
 	if a.scheduler != nil && len(history) >= 2 && history[len(history)-2].Role == llm.RoleAssistant {
 		prevAssistantMsg := history[len(history)-2].Content
@@ -2392,8 +2469,8 @@ func (a *SuperiorAgent) ProcessInputStream(ctx context.Context, input string, hi
 			targetDraft, _ = dm.GetDraft(draftID)
 		}
 		if targetDraft == nil {
-			// Find most recent failed or validated draft
-			failedDrafts, _ := dm.ListDrafts(scheduler.DraftStatusFailed)
+			// Find most recent failed, rejected_factcheck or validated draft
+			failedDrafts, _ := dm.ListDrafts(scheduler.DraftStatusFailed, scheduler.DraftStatusRejectedFactCheck)
 			if len(failedDrafts) > 0 {
 				targetDraft = failedDrafts[0]
 			} else {
@@ -2427,6 +2504,20 @@ func (a *SuperiorAgent) ProcessInputStream(ctx context.Context, input string, hi
 			defer close(out)
 			defer close(errs)
 			reply := a.handleBillboardRadioDirect(ctx, input)
+			if reply != "" {
+				out <- reply
+			}
+		}()
+		return out, errs
+	}
+
+	if detectDJRemixIntent(input) && a.skillManager != nil && a.scheduler != nil {
+		out := make(chan string, 1)
+		errs := make(chan error, 1)
+		go func() {
+			defer close(out)
+			defer close(errs)
+			reply := a.handleDJRemixDirect(ctx, input)
 			if reply != "" {
 				out <- reply
 			}
@@ -2974,6 +3065,22 @@ func parseDelay(input string) (time.Duration, string) {
 	return 0, ""
 }
 
+// StopAllMedia halts all active and pending music playback across all devices (PC & mobile).
+func (a *SuperiorAgent) StopAllMedia() {
+	if a.scheduler != nil {
+		a.scheduler.CancelAutoplay()
+		a.scheduler.NotifyStreamDone("")
+		for _, t := range a.scheduler.GetTasks() {
+			if t.Type == "play_music" && (t.Status == scheduler.StatusRunning || t.Status == scheduler.StatusPending) {
+				_ = a.scheduler.Cancel(t.ID)
+			}
+		}
+	}
+	if a.webAgent != nil {
+		_, _ = a.webAgent.ControlMedia("stop")
+	}
+}
+
 func (a *SuperiorAgent) handleMediaAction(ctx context.Context, input string, routerResp RouterResponse) (string, error) {
 	cmd := strings.ToLower(strings.TrimSpace(routerResp.Query))
 	isControlCmd := false
@@ -3065,6 +3172,12 @@ func (a *SuperiorAgent) handleMediaAction(ctx context.Context, input string, rou
 		return res, nil
 	}
 
+	// Si la requête concerne le mode DJ Remix ("lance moi un remix"), déléguer à handleDJRemixDirect
+	if (detectDJRemixIntent(input) || detectDJRemixIntent(routerResp.Query)) && a.skillManager != nil {
+		res := a.handleDJRemixDirect(ctx, input)
+		return res, nil
+	}
+
 	// This is a music playback request. Analyze if there is a scheduling/delay intent.
 	delay, delayDesc := parseDelay(input)
 
@@ -3081,11 +3194,14 @@ func (a *SuperiorAgent) handleMediaAction(ctx context.Context, input string, rou
 		return "", fmt.Errorf("aucune musique à jouer trouvée dans la requête")
 	}
 
+	// Check target device (PC vs Android)
+	targetDevice := a.resolveTargetDevice(input)
+
 	if len(parts) > 1 {
 		// Enqueue all parts!
 		var tasks []*scheduler.Task
 		for _, part := range parts {
-			task := a.scheduler.Enqueue("play_music", fmt.Sprintf("Lecture de : %s", part), part, delay)
+			task := a.scheduler.EnqueueWithDevice("play_music", fmt.Sprintf("Lecture de : %s", part), part, delay, targetDevice)
 			tasks = append(tasks, task)
 		}
 
@@ -3109,7 +3225,7 @@ func (a *SuperiorAgent) handleMediaAction(ctx context.Context, input string, rou
 	}
 
 	if delay > 0 {
-		task := a.scheduler.Enqueue("play_music", fmt.Sprintf("Lecture planifiée de : %s", routerResp.Query), routerResp.Query, delay)
+		task := a.scheduler.EnqueueWithDevice("play_music", fmt.Sprintf("Lecture planifiée de : %s", routerResp.Query), routerResp.Query, delay, targetDevice)
 		return fmt.Sprintf("J'ai planifié la lecture de la musique **'%s'** %s en arrière-plan via mon gestionnaire de tâches asynchrones ! 🎶\n*(ID de tâche : `%s`)*", routerResp.Query, delayDesc, task.ID), nil
 	}
 
@@ -3126,7 +3242,7 @@ func (a *SuperiorAgent) handleMediaAction(ctx context.Context, input string, rou
 	}
 
 	// Otherwise, enqueue immediately in the asynchronous queue
-	task := a.scheduler.Enqueue("play_music", fmt.Sprintf("Lecture de : %s", routerResp.Query), routerResp.Query, 0)
+	task := a.scheduler.EnqueueWithDevice("play_music", fmt.Sprintf("Lecture de : %s", routerResp.Query), routerResp.Query, 0, targetDevice)
 
 	// Trigger dispatch immediately to start executing the task without waiting for the 1s scheduler ticker
 	a.scheduler.TriggerDispatch()
@@ -3637,6 +3753,8 @@ func (a *SuperiorAgent) handleBillboardRadioDirect(ctx context.Context, input st
 	isFromRank := strings.Contains(lowerInput, "à partir") || strings.Contains(lowerInput, "a partir") ||
 		strings.Contains(lowerInput, "depuis") || strings.Contains(lowerInput, "en partant")
 
+	targetDevice := a.resolveTargetDevice(input)
+
 	// Si un rang spécifique est demandé (ex: "la 10e place", "le numéro 5", "la 20ème", etc.)
 	if targetRank > 0 {
 		var targetIndex int = -1
@@ -3656,7 +3774,7 @@ func (a *SuperiorAgent) handleBillboardRadioDirect(ctx context.Context, input st
 
 		targetTrack := bbData.Tracks[targetIndex]
 		taskLabel := fmt.Sprintf("📻 %s #%d : %s", bbData.Label, targetTrack.Rank, targetTrack.Query)
-		t := a.scheduler.Enqueue("play_music", taskLabel, targetTrack.Query, 0)
+		t := a.scheduler.EnqueueWithDevice("play_music", taskLabel, targetTrack.Query, 0, targetDevice)
 		if t != nil {
 			t.SetAnnouncement(formatBillboardAnnouncement(targetTrack.Rank, targetTrack.Title, targetTrack.Artist, bbData.Label))
 		}
@@ -3669,7 +3787,7 @@ func (a *SuperiorAgent) handleBillboardRadioDirect(ctx context.Context, input st
 			for i := range remaining {
 				tr := remaining[i]
 				tl := fmt.Sprintf("📻 %s #%d : %s", bbData.Label, tr.Rank, tr.Query)
-				subT := a.scheduler.Enqueue("play_music", tl, tr.Query, 0)
+				subT := a.scheduler.EnqueueWithDevice("play_music", tl, tr.Query, 0, targetDevice)
 				if subT != nil {
 					subT.SetAnnouncement(formatBillboardAnnouncement(tr.Rank, tr.Title, tr.Artist, bbData.Label))
 				}
@@ -3687,7 +3805,7 @@ func (a *SuperiorAgent) handleBillboardRadioDirect(ctx context.Context, input st
 	}
 	for _, tr := range tracksToQueue {
 		taskLabel := fmt.Sprintf("📻 %s #%d : %s", bbData.Label, tr.Rank, tr.Query)
-		t := a.scheduler.Enqueue("play_music", taskLabel, tr.Query, 0)
+		t := a.scheduler.EnqueueWithDevice("play_music", taskLabel, tr.Query, 0, targetDevice)
 		if t != nil {
 			t.SetAnnouncement(formatBillboardAnnouncement(tr.Rank, tr.Title, tr.Artist, bbData.Label))
 		}
@@ -3734,6 +3852,169 @@ func formatBillboardAnnouncement(rank int, title, artist, label string) string {
 	default:
 		return fmt.Sprintf(templates[idx], rank, cleanTitle, cleanArtist)
 	}
+}
+
+// detectDJRemixIntent detects when the user wants to launch revisited "Remix" tracks on YouTube in DJ mode
+// (e.g. "lance moi un remix", "lance-moi un remix", "mets un remix", "lance moi un remix de Fine Young Cannibals").
+func detectDJRemixIntent(input string) bool {
+	clean := normalizeFrench(input)
+	if clean == "" {
+		return false
+	}
+
+	// Exclude local folder playback (e.g. ~/Musique/MIX-EXTENDED) and downloads
+	if strings.Contains(clean, "mix extended") || strings.Contains(clean, "mix_extended") ||
+		strings.Contains(clean, "repertoire") || strings.Contains(clean, "dossier") ||
+		strings.Contains(clean, "local") || strings.Contains(clean, "telecharge") {
+		return false
+	}
+
+	// Exclude media stop/pause/next commands
+	if _, isCtrl := detectMediaControlIntent(input); isCtrl {
+		return false
+	}
+
+	// Exclude informative questions unless they start with an explicit play command
+	infoPrefixes := []string{
+		"est ce", "existe", "qui a", "qui est", "qui sont", "quel est", "quelle est",
+		"quels sont", "quelles sont", "combien", "pourquoi", "comment", "c est quoi",
+		"qu est ce", "parle moi", "dis moi", "explique", "raconte",
+	}
+	playPrefixes := []string{
+		"lance", "lances", "joue", "joues", "mets", "met", "ecoute", "fais moi ecouter",
+		"fais ecouter", "balance", "diffuse", "play", "pixel lance", "pixel joue", "pixel mets",
+	}
+	startsWithPlay := false
+	for _, pp := range playPrefixes {
+		if strings.HasPrefix(clean, pp+" ") || clean == pp {
+			startsWithPlay = true
+			break
+		}
+	}
+	if !startsWithPlay {
+		for _, ip := range infoPrefixes {
+			if strings.Contains(clean, ip) {
+				return false
+			}
+		}
+	}
+
+	hasRemixKeyword := strings.Contains(clean, "remix") ||
+		strings.Contains(clean, "re mix") ||
+		strings.Contains(clean, "version revisite") ||
+		strings.Contains(clean, "versions revisite") ||
+		strings.Contains(clean, "mode dj")
+	if !hasRemixKeyword {
+		return false
+	}
+
+	playKeywords := []string{
+		"lance", "lances", "joue", "joues", "mets", "met", "ecoute", "ecouter",
+		"play", "diffuse", "balance", "fais ecouter", "fais moi ecouter", "mode dj",
+	}
+	for _, pk := range playKeywords {
+		if strings.Contains(clean, pk) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (a *SuperiorAgent) handleDJRemixDirect(ctx context.Context, input string) string {
+	if a.skillManager == nil || a.scheduler == nil {
+		return "Le gestionnaire de tâches ou de briques n'est pas initialisé."
+	}
+	result, err := a.skillManager.ExecuteSkill(ctx, "dj_remix", "--json "+input)
+	if err != nil {
+		return fmt.Sprintf("Désolé, je n'ai pas pu préparer la sélection DJ Remix : %v", err)
+	}
+	var remixData struct {
+		Label  string `json:"label"`
+		Count  int    `json:"count"`
+		Tracks []struct {
+			Rank      int    `json:"rank"`
+			Title     string `json:"title"`
+			BaseTitle string `json:"base_title"`
+			Artist    string `json:"artist"`
+			Remix     string `json:"remix"`
+			Query     string `json:"query"`
+			URL       string `json:"url"`
+		} `json:"tracks"`
+	}
+	if errJSON := json.Unmarshal([]byte(strings.TrimSpace(result)), &remixData); errJSON != nil || len(remixData.Tracks) == 0 {
+		return "Désolé, je n'ai pas pu lire la sélection de morceaux DJ Remix."
+	}
+
+	a.scheduler.CancelAutoplay()
+	if a.webAgent != nil {
+		_, _ = a.webAgent.ControlMedia("stop")
+	}
+	for _, t := range a.scheduler.GetTasks() {
+		if t.Type == "play_music" && (t.Status == scheduler.StatusRunning || t.Status == scheduler.StatusPending) {
+			a.scheduler.Cancel(t.ID)
+		}
+	}
+
+	targetDevice := a.resolveTargetDevice(input)
+
+	for i, tr := range remixData.Tracks {
+		rank := tr.Rank
+		if rank <= 0 {
+			rank = i + 1
+		}
+		taskLabel := fmt.Sprintf("🎧 %s #%d : %s", remixData.Label, rank, tr.Query)
+		t := a.scheduler.EnqueueWithDevice("play_music", taskLabel, tr.Query, 0, targetDevice)
+		if t != nil {
+			if tr.URL != "" {
+				t.ResolvedURL = tr.URL
+				t.ResolvedTitle = tr.Query
+				t.IsDirect = true
+			}
+			baseTitle := tr.BaseTitle
+			if baseTitle == "" {
+				baseTitle = tr.Title
+			}
+			t.SetAnnouncement(formatDJRemixAnnouncement(rank, baseTitle, tr.Artist, tr.Remix))
+		}
+	}
+	a.scheduler.TriggerDispatch()
+	return ""
+}
+
+func formatDJRemixAnnouncement(rank int, baseTitle, artist, remix string) string {
+	cleanTitle := cleanSongForSpeech(baseTitle)
+	cleanArtist := cleanSongForSpeech(artist)
+	cleanRemix := strings.TrimSpace(remix)
+
+	if rank == 1 {
+		if cleanArtist != "" && cleanRemix != "" && !strings.EqualFold(cleanRemix, "Remix") {
+			return fmt.Sprintf("Mode DJ Remix activé ! On ouvre le bal avec %s, de %s, dans sa version revisitée : %s !", cleanTitle, cleanArtist, cleanRemix)
+		}
+		if cleanArtist != "" {
+			return fmt.Sprintf("Mode DJ Remix activé ! On ouvre le bal avec la version revisitée de %s, par %s !", cleanTitle, cleanArtist)
+		}
+		return fmt.Sprintf("Mode DJ Remix activé ! Voici %s !", cleanTitle)
+	}
+
+	if cleanArtist != "" && cleanRemix != "" && !strings.EqualFold(cleanRemix, "Remix") {
+		templates := []string{
+			"On enchaîne dans le mix DJ avec %s, par %s, en version %s.",
+			"Le set DJ continue avec la version revisitée de %s, de %s : %s.",
+			"Toujours en mode DJ Remix, voici %s, par %s, dans son mix %s.",
+			"On garde le rythme sur les platines avec %s, de %s, version %s.",
+		}
+		idx := (rank - 2) % len(templates)
+		if idx < 0 {
+			idx = 0
+		}
+		return fmt.Sprintf(templates[idx], cleanTitle, cleanArtist, cleanRemix)
+	}
+
+	if cleanArtist != "" {
+		return fmt.Sprintf("On poursuit le set DJ Remix avec la version revisitée de %s, par %s.", cleanTitle, cleanArtist)
+	}
+	return fmt.Sprintf("On poursuit le set DJ Remix avec %s.", cleanTitle)
 }
 
 func (a *SuperiorAgent) buildSchedulerContext() string {

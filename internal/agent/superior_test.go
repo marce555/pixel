@@ -566,4 +566,62 @@ func TestSocialGreetingAndHumanInteraction(t *testing.T) {
 	}
 }
 
+func TestDJRemixIntentAndRouting(t *testing.T) {
+	ctx := context.Background()
+	agent := &SuperiorAgent{}
+
+	positiveCases := []string{
+		"lance moi un remix",
+		"lance-moi un remix",
+		"Pixel, lance moi un remix",
+		"lance un remix",
+		"mets moi un remix",
+		"joue moi un remix",
+		"lance moi un remix de Fine Young Cannibals",
+		"lance moi un remix de She Drives Me Crazy",
+		"lance moi un remix She Drives Me Crazy (The Justin Strauss Remix) - Fine Young Cannibals",
+		"lance moi un remix des années 80",
+		"fais-moi écouter un remix",
+		"lance une version revisitée",
+		"passe en mode dj remix",
+	}
+
+	for _, tc := range positiveCases {
+		if !detectDJRemixIntent(tc) {
+			t.Errorf("detectDJRemixIntent(%q) = false, want true", tc)
+		}
+		resp := agent.analyzeQuery(ctx, tc, nil)
+		if resp.Action != "skill_dj_remix" {
+			t.Errorf("analyzeQuery(%q).Action = %q, want \"skill_dj_remix\"", tc, resp.Action)
+		}
+	}
+
+	negativeCases := []string{
+		"lance la musique du répertoire mix-extended",
+		"joue un morceau du dossier local",
+		"c'est quoi un remix ?",
+		"qui a fait le remix de She Drives Me Crazy ?",
+		"télécharge un remix des années 80",
+		"arrête la musique",
+		"passe au suivant",
+	}
+
+	for _, tc := range negativeCases {
+		if detectDJRemixIntent(tc) {
+			t.Errorf("detectDJRemixIntent(%q) = true, want false", tc)
+		}
+	}
+
+	ann1 := formatDJRemixAnnouncement(1, "She Drives Me Crazy", "Fine Young Cannibals", "The Justin Strauss Remix")
+	if !strings.Contains(ann1, "Mode DJ Remix") || !strings.Contains(ann1, "She Drives Me Crazy") || !strings.Contains(ann1, "Fine Young Cannibals") || !strings.Contains(ann1, "The Justin Strauss Remix") {
+		t.Errorf("unexpected rank 1 announcement: %q", ann1)
+	}
+
+	cleanTrack := formatCleanTrackName("🎧 DJ Remix (Versions Revisitées) #1 : She Drives Me Crazy (The Justin Strauss Remix) - Fine Young Cannibals")
+	if cleanTrack != "She Drives Me Crazy (The Justin Strauss Remix) - Fine Young Cannibals" {
+		t.Errorf("formatCleanTrackName got %q", cleanTrack)
+	}
+}
+
+
 

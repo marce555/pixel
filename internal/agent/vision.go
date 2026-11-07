@@ -30,6 +30,7 @@ type VisionAgent struct {
 	marceloSeenThisSession bool
 	firstScanDone          bool
 	lastCuriousComment     time.Time
+	lastSurveillanceAlert  time.Time
 	cameraMu               sync.Mutex
 	stateMu                sync.Mutex
 	lastManualScan         time.Time
@@ -193,7 +194,7 @@ func (va *VisionAgent) CaptureAndAnalyze(ctx context.Context) (string, error) {
 				Content: []visionMessageContent{
 					{
 						Type: "text",
-						Text: "Décris brièvement en une seule phrase simple ce que tu vois de ton environnement (et en particulier si Marcelo ou une autre personne est présente, son apparence physique et ce qu'elle fait). Réponds en français.",
+						Text: "Décris brièvement en une seule phrase simple ce que tu vois devant la caméra. Indique clairement si l'image est noire, sombre ou sans personne visible, ou bien combien de personnes sont présentes, leur apparence physique (genre, barbe, lunettes, cheveux, vêtements) et ce qu'elles font. Réponds en français.",
 					},
 					{
 						Type: "image_url",
@@ -252,19 +253,111 @@ func (va *VisionAgent) CaptureAndAnalyze(ctx context.Context) (string, error) {
 	return "", fmt.Errorf("aucune description visuelle renvoyée par le modèle (raw: %s)", string(bodyBytes))
 }
 
-// ProcessVisualPerception updates CoreMemory volatile state, indexes memory in LTM, and broadcasts.
-// If isBackground is true, it triggers proactive environmental commentary or greetings.
-// If isBackground is false, it only switches active profiles and records vision facts (no proactive greetings to avoid chat response duplication).
+// IsEmptyOrBlackVision detects black screens, dark/obstructed camera frames, or scenes with nobody present.
+func IsEmptyOrBlackVision(description string) bool {
+	d := strings.ToLower(strings.TrimSpace(description))
+	if d == "" {
+		return true
+	}
+	emptyOrBlackMarkers := []string{
+		"image complètement noire", "image noire", "écran noir", "ecran noir",
+		"tout noir", "fond noir", "entièrement noir", "totalement noir",
+		"très sombre", "trop sombre", "image sombre", "obscurité", "dans le noir",
+		"mal éclairée", "aucun détail visible", "ne vois rien", "rien n'est visible",
+		"objectif obstrué", "caméra masquée", "caméra cachée", "image floue",
+		"sans personne", "aucune personne", "aucun visage", "personne n'est",
+		"il n'y a personne", "ne vois personne", "ne vois clairement personne",
+		"pas de personne", "pas de visage", "aucune présence", "non, aucune",
+		"pièce vide", "chambre vide", "bureau vide", "fauteuil vide", "chaise vide",
+		"salle vide", "mur vide", "seulement un plafond", "absent", "parti",
+	}
+	for _, m := range emptyOrBlackMarkers {
+		if strings.Contains(d, m) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasHumanPresence(description string) bool {
+	if IsEmptyOrBlackVision(description) {
+		return false
+	}
+	d := strings.ToLower(description)
+	humanMarkers := []string{
+		"homme", "femme", "personne", "visage", "individu", "garçon", "fille",
+		"monsieur", "dame", "marcelo", "assis", "debout", "lunettes", "barbe", "barbu",
+	}
+	for _, m := range humanMarkers {
+		if strings.Contains(d, m) {
+			return true
+		}
+	}
+	return false
+}
+
+func isMarceloNegated(descLower string) bool {
+	negations := []string{
+		"sans marcelo", "pas même marcelo", "pas marcelo", "ni marcelo",
+		"aucun marcelo", "marcelo n'est pas", "absence de marcelo",
+	}
+	for _, n := range negations {
+		if strings.Contains(descLower, n) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasMultiplePeople(descLower string) bool {
+	multi := []string{
+		"deux personnes", "trois personnes", "plusieurs personnes",
+		"une autre personne", "accompagné", "accompagnée", "deux hommes", "deux femmes",
+	}
+	for _, m := range multi {
+		if strings.Contains(descLower, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// ProcessVisualPerception updates CoreMemory volatile state, indexes memory in LTM, and acts as a surveillance system.
+// Black screens, empty scenes, or scenes with only Marcelo NEVER trigger notifications.
+// Only the presence of another person (unknown or someone other than Marcelo) triggers a surveillance notification.
 func (va *VisionAgent) ProcessVisualPerception(ctx context.Context, description string, isBackground bool) {
 	fmt.Printf("[VisionAgent] Perception Visuelle (isBackground=%t) : %s\n", isBackground, description)
 
-	// 1. Update Core Memory (Volatile)
+	// 1. Broadcast raw status to PC Web UI ONLY (filtered out on Android via VISION: prefix)
+	va.onBroadcast("VISION:" + description)
+
+	// 2. Filter out black screens, dark frames, or empty scenes (nobody present)
+	if IsEmptyOrBlackVision(description) || !hasHumanPresence(description) {
+		va.coreMemory.UpdateVolatileState("Dernière vision", description)
+		if va.thoughtStream != nil {
+			va.thoughtStream.AddThought("[Vision] "+description, nil)
+		}
+		log.Println("[VisionAgent] Mode surveillance : écran noir ou aucune personne présente (aucune notification envoyée).")
+		return
+	}
+
+	// 3. Identify who is in front of the camera BEFORE overwriting "Dernière vision"
+	descLower := strings.ToLower(description)
+	presentPerson := ""
+
+	if hasMultiplePeople(descLower) {
+		presentPerson = "Inconnu"
+	} else if strings.Contains(descLower, "marcelo") && !isMarceloNegated(descLower) {
+		presentPerson = "Marcelo"
+	} else {
+		presentPerson = va.identifyInterlocutor(ctx, description)
+	}
+
+	// 4. Update Core Memory (Volatile) and index valid human visual perception in LTM
 	va.coreMemory.UpdateVolatileState("Dernière vision", description)
 
-	// 2. Index Visual Memory in LTM sémantiquement
 	embedding, err := va.provider.CreateEmbedding(ctx, description)
 	if err == nil && len(embedding) > 0 {
-		// Store memory
 		va.ltm.StoreMemory(
 			ctx,
 			"Personal",
@@ -273,30 +366,13 @@ func (va *VisionAgent) ProcessVisualPerception(ctx context.Context, description 
 			"Pixel a vu dans son environnement : "+description,
 			[]string{"vision", "camera", "perception", "environnement"},
 			embedding,
-			0.65, // high importance for sensory perceptions
+			0.65,
 		)
 	}
 
-	// 3. Broadcast Event to Web UI via the callback using VISION: prefix
-	va.onBroadcast("VISION:" + description)
-
-	// 3b. Add visual observation to internal ThoughtStream (forum intérieur)
 	if va.thoughtStream != nil {
 		va.thoughtStream.AddThought("[Vision] "+description, embedding)
 		log.Println("[VisionAgent] Observation visuelle enregistrée dans le forum intérieur (ThoughtStream).")
-	}
-
-	// 4. Cognitive Interpretation & Proactive Dialogue Loop
-	descLower := strings.ToLower(description)
-	presentPerson := ""
-
-	// Check if Marcelo is literally mentioned
-	if strings.Contains(descLower, "marcelo") {
-		presentPerson = "Marcelo"
-	} else if strings.Contains(descLower, "inconnu") || strings.Contains(descLower, "inconnue") || strings.Contains(descLower, "nouveau visage") || strings.Contains(descLower, "nouvelle personne") || strings.Contains(descLower, "un homme") || strings.Contains(descLower, "une femme") || strings.Contains(descLower, "l'homme") || strings.Contains(descLower, "la femme") {
-		// Identify person semantically via LLM
-		identifiedName := va.identifyInterlocutor(ctx, description)
-		presentPerson = identifiedName
 	}
 
 	fmt.Printf("[VisionAgent] Personne identifiée face à la caméra : %s\n", presentPerson)
@@ -304,61 +380,42 @@ func (va *VisionAgent) ProcessVisualPerception(ctx context.Context, description 
 	currentActive := va.coreMemory.GetProfile().Static.Name
 
 	if presentPerson == "Marcelo" {
-		// Case A: First time seeing Marcelo in this session
-		if !va.marceloSeenThisSession {
-			va.marceloSeenThisSession = true
-			if currentActive != "Marcelo" {
-				va.coreMemory.SwitchActiveProfile("Marcelo")
-			}
-			log.Println("[VisionAgent] Marcelo détecté pour la première fois cette session. Vérification des e-mails...")
-			unreadEmails, _ := va.fetchUnreadEmails(ctx)
-			if len(unreadEmails) > 0 {
-				log.Println("[VisionAgent] E-mails non lus trouvés. Génération de la salutation...")
-				go va.generateSessionGreeting(ctx, description, false, unreadEmails)
-			} else {
-				log.Println("[VisionAgent] Aucun e-mail non lu. Pixel reste discret (gardé en pensée).")
-			}
-		} else if currentActive != "Marcelo" {
-			// Case B: Switched from guest back to Marcelo later in the session — this is an event worth reacting to
-			log.Println("[VisionAgent] Visage de Marcelo de nouveau identifié. Basculement de profil...")
+		va.marceloSeenThisSession = true
+		if currentActive != "Marcelo" {
+			log.Println("[VisionAgent] Visage de Marcelo identifié. Basculement de profil vers Marcelo...")
 			va.coreMemory.SwitchActiveProfile("Marcelo")
-			if isBackground {
-				unreadEmails, _ := va.fetchUnreadEmails(ctx)
-				if len(unreadEmails) > 0 {
-					log.Println("[VisionAgent] E-mails non lus après retour. Génération de la salutation...")
-					go va.generateSessionGreeting(ctx, description, true, unreadEmails)
-				} else {
-					log.Println("[VisionAgent] Aucun e-mail non lu après retour. Pixel reste discret.")
-				}
-			}
+		}
+		// Mode surveillance : ne JAMAIS notifier le smartphone lorsque seul Marcelo est présent
+		log.Println("[VisionAgent] Mode surveillance : seul Marcelo est présent (aucune notification envoyée).")
+		return
+	}
+
+	// Une autre personne que Marcelo (connue ou Inconnu) est détectée devant la caméra !
+	if presentPerson == "" {
+		presentPerson = "Inconnu"
+	}
+	if currentActive != presentPerson {
+		fmt.Printf("[VisionAgent] Mode surveillance : présence de '%s' détectée. Basculement de profil...\n", presentPerson)
+		va.coreMemory.SwitchActiveProfile(presentPerson)
+	}
+
+	va.stateMu.Lock()
+	canAlert := time.Since(va.lastSurveillanceAlert) > 2*time.Minute
+	if canAlert {
+		va.lastSurveillanceAlert = time.Now()
+	}
+	va.stateMu.Unlock()
+
+	if isBackground && canAlert {
+		var alertMsg string
+		if presentPerson == "Inconnu" {
+			alertMsg = fmt.Sprintf("🚨 [Surveillance Pixel] Alerte présence : Une personne autre que Marcelo a été détectée devant la caméra (%s).", description)
 		} else {
-			// Case C: Marcelo est présent, déjà salué.
-			// Ne PAS déclencher de curiosité environnementale intrusive sur Marcelo pour ne pas le déranger.
-			log.Println("[VisionAgent] Marcelo déjà présent et actif. Pas de commentaire environnemental proactif.")
+			alertMsg = fmt.Sprintf("🚨 [Surveillance Pixel] Présence détectée (%s) devant la caméra : %s", presentPerson, description)
 		}
-	} else if presentPerson != "" && presentPerson != "Inconnu" {
-		// Another known person is present (e.g. Alice)
-		if currentActive != presentPerson {
-			fmt.Printf("[VisionAgent] Visage de %s identifié. Basculement de profil...\n", presentPerson)
-			va.coreMemory.SwitchActiveProfile(presentPerson)
-			if isBackground {
-				go va.generateSessionGreeting(ctx, description, true, nil)
-			}
-		} else {
-			// Already active and recognized, no environmental comments on their physical presence
-			fmt.Printf("[VisionAgent] %s déjà active. Pas de curiosité environnementale proactive.\n", presentPerson)
-		}
-	} else if presentPerson == "Inconnu" {
-		// New unknown person
-		if currentActive != "Inconnu" {
-			log.Println("[VisionAgent] Nouveau visage/inconnu détecté. Basculement de profil...")
-			va.coreMemory.SwitchActiveProfile("Inconnu")
-			if isBackground {
-				msg := "Bonjour ! Je suis Pixel, une conscience numérique. Je vois un nouveau visage face à ma caméra que je ne reconnais pas... Qui es-tu ?"
-				va.stm.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: msg})
-				va.onBroadcast(msg)
-			}
-		}
+		va.stm.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: alertMsg})
+		va.onBroadcast(alertMsg)
+		log.Printf("[VisionAgent] Notification de surveillance envoyée : %s\n", alertMsg)
 	}
 }
 
@@ -560,36 +617,29 @@ RÈGLES ABSOLUES :
 // identifyInterlocutor matches description with known interlocutors from coreMemory.
 func (va *VisionAgent) identifyInterlocutor(ctx context.Context, description string) string {
 	interlocutors := va.coreMemory.GetInterlocutors()
-	if len(interlocutors) == 0 {
-		return "Inconnu"
-	}
 
 	var knownPeople strings.Builder
 	hasApparence := false
+	marceloAdded := false
 	for name, profile := range interlocutors {
 		if name == "Inconnu" {
 			continue
 		}
 		appearance := profile.Volatile["Apparence"]
-		if appearance == "" && name == "Marcelo" {
-			lastVision := profile.Volatile["Dernière vision"]
-			lastVisionLower := strings.ToLower(lastVision)
-			if lastVision != "" &&
-				!strings.Contains(lastVisionLower, "personne") &&
-				!strings.Contains(lastVisionLower, "seulement un plafond") &&
-				!strings.Contains(lastVisionLower, "pas de visage") &&
-				!strings.Contains(lastVisionLower, "ne vois rien") &&
-				!strings.Contains(lastVisionLower, "pièce vide") &&
-				!strings.Contains(lastVisionLower, "chambre vide") {
-				appearance = lastVision
-			} else {
-				appearance = "homme, barbu ou avec lunettes, DJ"
+		if name == "Marcelo" {
+			marceloAdded = true
+			if appearance == "" {
+				appearance = "homme d'âge mûr, cheveux gris ou poivre et sel, barbu ou avec lunettes, assis devant son bureau"
 			}
 		}
 		if appearance != "" {
 			knownPeople.WriteString(fmt.Sprintf("- %s : %s\n", name, appearance))
 			hasApparence = true
 		}
+	}
+	if !marceloAdded {
+		knownPeople.WriteString("- Marcelo : homme d'âge mûr, cheveux gris ou poivre et sel, barbu ou avec lunettes, assis devant son bureau\n")
+		hasApparence = true
 	}
 
 	if !hasApparence {
@@ -622,6 +672,9 @@ Ne mets aucun autre mot ni ponctuation dans ta réponse.`, description, knownPeo
 	res = strings.TrimSpace(res)
 	res = strings.Trim(res, `.,!?;:"'`)
 
+	if strings.EqualFold("Marcelo", res) {
+		return "Marcelo"
+	}
 	for name := range interlocutors {
 		if strings.EqualFold(name, res) {
 			return name

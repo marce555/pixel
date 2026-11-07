@@ -363,3 +363,47 @@ func TestDetectFaceDiscoveryIntent(t *testing.T) {
 		}
 	}
 }
+
+func TestVisionAgentSurveillanceMode(t *testing.T) {
+	ctx := context.Background()
+	coreMem := memory.NewCoreMemory("pixel_core_memory_surv_test.json")
+	defer os.Remove("pixel_core_memory_surv_test.json")
+
+	var notifications []string
+	onBroadcast := func(msg string) {
+		if !strings.HasPrefix(msg, "VISION:") {
+			notifications = append(notifications, msg)
+		}
+	}
+
+	provider := &mockIntroduceProvider{generateResp: "Marcelo"}
+	va := NewVisionAgent(provider, coreMem, memory.NewLTM(), memory.NewSTM(8), nil, onBroadcast)
+
+	// 1. Écran noir / personne absente (y compris "sans Marcelo") -> AUCUNE notification
+	va.ProcessVisualPerception(ctx, "Je vois une image complètement noire, sans personne, sans Marcelo, ni aucun détail visible.", true)
+	if len(notifications) != 0 {
+		t.Fatalf("expected 0 notifications for black screen, got: %v", notifications)
+	}
+
+	// 2. Pièce vide -> AUCUNE notification
+	va.ProcessVisualPerception(ctx, "Je ne vois personne dans l'environnement, seulement un plafond blanc.", true)
+	if len(notifications) != 0 {
+		t.Fatalf("expected 0 notifications for empty room, got: %v", notifications)
+	}
+
+	// 3. Seul Marcelo présent -> AUCUNE notification
+	va.ProcessVisualPerception(ctx, "Un homme d'âge mûr aux cheveux gris est assis devant son bureau.", true)
+	if len(notifications) != 0 {
+		t.Fatalf("expected 0 notifications when only Marcelo is present, got: %v", notifications)
+	}
+
+	// 4. Autre personne (Inconnu) présente -> Notification de surveillance envoyée !
+	provider.generateResp = "Inconnu"
+	va.ProcessVisualPerception(ctx, "Un jeune homme portant une casquette rouge regarde la caméra.", true)
+	if len(notifications) != 1 {
+		t.Fatalf("expected 1 surveillance notification for unknown person, got %d: %v", len(notifications), notifications)
+	}
+	if !strings.Contains(notifications[0], "[Surveillance Pixel]") {
+		t.Errorf("expected surveillance alert tag, got: %s", notifications[0])
+	}
+}

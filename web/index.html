@@ -240,20 +240,31 @@
 
                         <!-- Tab: LLM Settings -->
                         <div id="tab-llm" class="tab-pane">
-                            <div class="llm-settings-card" style="display: flex; flex-direction: column; gap: 14px; font-size: 0.9em;">
-                                <h3 style="color: #60a5fa; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 1px; margin: 0 0 2px 0;">🧠 Modèle LLM</h3>
+                            <div class="llm-settings-card" style="display: flex; flex-direction: column; gap: 12px; font-size: 0.9em; max-height: 70vh; overflow-y: auto; padding-right: 4px;">
+                                <h3 style="color: #60a5fa; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 1px; margin: 0 0 2px 0;">🧠 Configuration Multi-LLM & 1min.AI</h3>
 
-                                <!-- ── SECTION 1 : CERVEAU PRINCIPAL ── -->
+                                <!-- ── CLÉ API 1MIN.AI ── -->
+                                <div id="onemin-key-section" style="background:rgba(16,185,129,0.06); border:1px solid rgba(16,185,129,0.25); border-radius:10px; padding:12px;">
+                                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                                        <label for="llm-onemin-key" style="color:#34d399; font-size:0.78em; text-transform:uppercase; letter-spacing:0.5px; font-weight:600;">🚀 Clé API 1min.AI (ONEMIN_API_KEY)</label>
+                                        <button type="button" id="refresh-onemin-models-btn" onclick="pixelLLM.refreshOneMinModels()" style="background:rgba(16,185,129,0.18); border:1px solid rgba(16,185,129,0.35); color:#6ee7b7; padding:3px 8px; border-radius:5px; font-size:0.75em; cursor:pointer;">🔄 Charger les modèles</button>
+                                    </div>
+                                    <input type="password" id="llm-onemin-key" placeholder="Coller votre clé ONEMIN_API_KEY (https://api.1min.ai/openai/v1)…" style="width:100%; background:rgba(0,0,0,0.4); border:1px solid rgba(16,185,129,0.3); padding:8px 10px; border-radius:7px; color:var(--text-main); font-family:inherit; font-size:0.9em; outline:none;">
+                                </div>
+
+                                <!-- ── SECTION 1 : CERVEAU PRINCIPAL (CHAT) ── -->
                                 <div style="background: rgba(96,165,250,0.05); border: 1px solid rgba(96,165,250,0.15); border-radius: 10px; padding: 12px;">
                                     <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">
                                         <span style="font-size:1.1em;">💬</span>
-                                        <span style="color:#93c5fd; font-size:0.8em; text-transform:uppercase; letter-spacing:0.5px; font-weight:600;">Cerveau Principal (Chat)</span>
+                                        <span style="color:#93c5fd; font-size:0.8em; text-transform:uppercase; letter-spacing:0.5px; font-weight:600;">Cerveau Principal (Chat & Vision)</span>
                                     </div>
                                     <div style="display:flex; flex-direction:column; gap:8px;">
                                         <div>
                                             <label style="color:var(--text-muted); font-size:0.78em; display:block; margin-bottom:4px;">Fournisseur</label>
                                             <select id="main-provider" onchange="pixelLLM.onProviderChange('main', this.value)" style="width:100%; background:rgba(0,0,0,0.5); border:1px solid var(--glass-border); padding:7px 10px; border-radius:7px; color:var(--text-main); font-family:inherit; font-size:0.9em; cursor:pointer;">
-                                                <option value="local-pixel">🖥️ Pixel Interne (llama-server)</option>
+                                                <option value="local-pixel">🖥️ Pixel dGPU (RTX 5060 :52625)</option>
+                                                <option value="local-igpu">🖥️ Pixel iGPU (Radeon 890M :18081)</option>
+                                                <option value="onemin">🚀 1min.AI (Multi-LLM : GPT-4.1, Claude, DeepSeek...)</option>
                                                 <option value="local-ollama">🖥️ Ollama (port 11434)</option>
                                                 <option value="local-lm">🖥️ LM Studio (port 1234)</option>
                                                 <option value="gemini">☁️ Google Gemini</option>
@@ -268,9 +279,8 @@
                                                 <option value="">— chargement… —</option>
                                             </select>
                                         </div>
-                                        <!-- URL (grisée, auto-remplie) -->
                                         <input type="hidden" id="llm-local-url" value="http://127.0.0.1:52625/v1">
-                                        <input type="hidden" id="llm-cloud-url" value="https://generativelanguage.googleapis.com/v1beta/openai">
+                                        <input type="hidden" id="llm-cloud-url" value="https://api.1min.ai/openai/v1">
                                         <input type="hidden" id="llm-local-model" value="">
                                         <input type="hidden" id="llm-cloud-model" value="">
                                         <input type="hidden" id="llm-mode-select" value="local">
@@ -278,17 +288,79 @@
                                     </div>
                                 </div>
 
-                                <!-- ── SECTION 2 : CERVEAU CODE ── -->
+                                <!-- ── SECTION 2 : CERVEAU PUBLICATIONS (RÉDACTION D'ARTICLES) ── -->
+                                <div style="background: rgba(245,158,11,0.05); border: 1px solid rgba(245,158,11,0.18); border-radius: 10px; padding: 12px;">
+                                    <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">
+                                        <span style="font-size:1.1em;">📰</span>
+                                        <span style="color:#fcd34d; font-size:0.8em; text-transform:uppercase; letter-spacing:0.5px; font-weight:600;">Cerveau Publications (Rédaction d'Articles)</span>
+                                    </div>
+                                    <div style="display:flex; flex-direction:column; gap:8px;">
+                                        <div>
+                                            <label style="color:var(--text-muted); font-size:0.78em; display:block; margin-bottom:4px;">Fournisseur</label>
+                                            <select id="publish-provider" onchange="pixelLLM.onProviderChange('publish', this.value)" style="width:100%; background:rgba(0,0,0,0.5); border:1px solid var(--glass-border); padding:7px 10px; border-radius:7px; color:var(--text-main); font-family:inherit; font-size:0.9em; cursor:pointer;">
+                                                <option value="onemin">🚀 1min.AI (Multi-LLM : GPT-4.1, Claude, DeepSeek...)</option>
+                                                <option value="local-igpu">🖥️ Pixel iGPU (Radeon 890M :18081)</option>
+                                                <option value="local-pixel">🖥️ Pixel dGPU (RTX 5060 :52625)</option>
+                                                <option value="gemini">☁️ Google Gemini</option>
+                                                <option value="openai">☁️ OpenAI</option>
+                                                <option value="anthropic">☁️ Anthropic</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label style="color:var(--text-muted); font-size:0.78em; display:block; margin-bottom:4px;">Modèle de Rédaction</label>
+                                            <select id="publish-model-select" onchange="document.getElementById('llm-publish-model').value = this.value;" style="width:100%; background:rgba(0,0,0,0.5); border:1px solid var(--glass-border); padding:7px 10px; border-radius:7px; color:var(--text-main); font-family:inherit; font-size:0.9em; cursor:pointer;">
+                                                <option value="">— chargement… —</option>
+                                            </select>
+                                        </div>
+                                        <input type="hidden" id="llm-publish-url" value="https://api.1min.ai/openai/v1">
+                                        <input type="hidden" id="llm-publish-model" value="gpt-4.1-mini">
+                                        <div id="publish-url-display" style="background:rgba(0,0,0,0.3); border:1px dashed rgba(255,255,255,0.08); border-radius:6px; padding:5px 8px; font-size:0.75em; color:var(--text-muted); font-family:monospace;">https://api.1min.ai/openai/v1</div>
+                                    </div>
+                                </div>
+
+                                <!-- ── SECTION 3 : CERVEAU RELECTURE & VALIDATION IA ── -->
+                                <div style="background: rgba(16,185,129,0.05); border: 1px solid rgba(16,185,129,0.18); border-radius: 10px; padding: 12px;">
+                                    <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">
+                                        <span style="font-size:1.1em;">🔍</span>
+                                        <span style="color:#6ee7b7; font-size:0.8em; text-transform:uppercase; letter-spacing:0.5px; font-weight:600;">Cerveau Relecture & Validation IA (Fact-Check)</span>
+                                    </div>
+                                    <div style="display:flex; flex-direction:column; gap:8px;">
+                                        <div>
+                                            <label style="color:var(--text-muted); font-size:0.78em; display:block; margin-bottom:4px;">Fournisseur Indépendant</label>
+                                            <select id="review-provider" onchange="pixelLLM.onProviderChange('review', this.value)" style="width:100%; background:rgba(0,0,0,0.5); border:1px solid var(--glass-border); padding:7px 10px; border-radius:7px; color:var(--text-main); font-family:inherit; font-size:0.9em; cursor:pointer;">
+                                                <option value="onemin">🚀 1min.AI (Multi-LLM : GPT-4.1, Claude, DeepSeek...)</option>
+                                                <option value="gemini">☁️ Google Gemini</option>
+                                                <option value="local-igpu">🖥️ Pixel iGPU (Radeon 890M :18081)</option>
+                                                <option value="local-pixel">🖥️ Pixel dGPU (RTX 5060 :52625)</option>
+                                                <option value="openai">☁️ OpenAI</option>
+                                                <option value="anthropic">☁️ Anthropic</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label style="color:var(--text-muted); font-size:0.78em; display:block; margin-bottom:4px;">Modèle d'Audit & Validation</label>
+                                            <select id="review-model-select" onchange="document.getElementById('llm-review-model').value = this.value;" style="width:100%; background:rgba(0,0,0,0.5); border:1px solid var(--glass-border); padding:7px 10px; border-radius:7px; color:var(--text-main); font-family:inherit; font-size:0.9em; cursor:pointer;">
+                                                <option value="">— chargement… —</option>
+                                            </select>
+                                        </div>
+                                        <input type="hidden" id="llm-review-url" value="https://api.1min.ai/openai/v1">
+                                        <input type="hidden" id="llm-review-model" value="gpt-4.1-mini">
+                                        <div id="review-url-display" style="background:rgba(0,0,0,0.3); border:1px dashed rgba(255,255,255,0.08); border-radius:6px; padding:5px 8px; font-size:0.75em; color:var(--text-muted); font-family:monospace;">https://api.1min.ai/openai/v1</div>
+                                    </div>
+                                </div>
+
+                                <!-- ── SECTION 4 : CERVEAU CODE (SKILLS & BRIQUES) ── -->
                                 <div style="background: rgba(167,139,250,0.05); border: 1px solid rgba(167,139,250,0.15); border-radius: 10px; padding: 12px;">
                                     <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">
                                         <span style="font-size:1.1em;">🛠️</span>
-                                        <span style="color:#c4b5fd; font-size:0.8em; text-transform:uppercase; letter-spacing:0.5px; font-weight:600;">Cerveau Code (Création de Briques)</span>
+                                        <span style="color:#c4b5fd; font-size:0.8em; text-transform:uppercase; letter-spacing:0.5px; font-weight:600;">Cerveau Code (Création de Skills & Briques)</span>
                                     </div>
                                     <div style="display:flex; flex-direction:column; gap:8px;">
                                         <div>
                                             <label style="color:var(--text-muted); font-size:0.78em; display:block; margin-bottom:4px;">Fournisseur</label>
                                             <select id="code-provider" onchange="pixelLLM.onProviderChange('code', this.value)" style="width:100%; background:rgba(0,0,0,0.5); border:1px solid var(--glass-border); padding:7px 10px; border-radius:7px; color:var(--text-main); font-family:inherit; font-size:0.9em; cursor:pointer;">
-                                                <option value="local-pixel">🖥️ Pixel Interne (llama-server)</option>
+                                                <option value="onemin">🚀 1min.AI (Multi-LLM : Claude Sonnet, GPT-4.1, Codestral...)</option>
+                                                <option value="local-pixel">🖥️ Pixel dGPU (RTX 5060 :52625)</option>
+                                                <option value="local-igpu">🖥️ Pixel iGPU (Radeon 890M :18081)</option>
                                                 <option value="local-ollama">🖥️ Ollama (port 11434)</option>
                                                 <option value="local-lm">🖥️ LM Studio (port 1234)</option>
                                                 <option value="gemini">☁️ Google Gemini</option>
@@ -298,7 +370,7 @@
                                             </select>
                                         </div>
                                         <div>
-                                            <label style="color:var(--text-muted); font-size:0.78em; display:block; margin-bottom:4px;">Modèle</label>
+                                            <label style="color:var(--text-muted); font-size:0.78em; display:block; margin-bottom:4px;">Modèle Spécialisé Code</label>
                                             <select id="code-model-select" onchange="document.getElementById('llm-code-model').value = this.value;" style="width:100%; background:rgba(0,0,0,0.5); border:1px solid var(--glass-border); padding:7px 10px; border-radius:7px; color:var(--text-main); font-family:inherit; font-size:0.9em; cursor:pointer;">
                                                 <option value="">— chargement… —</option>
                                             </select>
@@ -309,10 +381,10 @@
                                     </div>
                                 </div>
 
-                                <!-- ── CLÉ API (cloud only) ── -->
+                                <!-- ── CLÉ API CLOUD SECONDAIRE (Gemini / OpenAI / Groq / Anthropic) ── -->
                                 <div id="api-key-section" style="display:none; background:rgba(251,191,36,0.05); border:1px solid rgba(251,191,36,0.2); border-radius:10px; padding:12px;">
-                                    <label for="llm-cloud-key" style="color:#fbbf24; font-size:0.78em; display:block; margin-bottom:6px; text-transform:uppercase; letter-spacing:0.5px;">🔑 Clé API Cloud</label>
-                                    <input type="password" id="llm-cloud-key" placeholder="Coller la clé API ici…" style="width:100%; background:rgba(0,0,0,0.4); border:1px solid rgba(251,191,36,0.3); padding:8px 10px; border-radius:7px; color:var(--text-main); font-family:inherit; font-size:0.9em; outline:none;">
+                                    <label for="llm-cloud-key" style="color:#fbbf24; font-size:0.78em; display:block; margin-bottom:6px; text-transform:uppercase; letter-spacing:0.5px;">🔑 Clé API Cloud (Gemini / OpenAI / Autre)</label>
+                                    <input type="password" id="llm-cloud-key" placeholder="Coller la clé API Cloud ici…" style="width:100%; background:rgba(0,0,0,0.4); border:1px solid rgba(251,191,36,0.3); padding:8px 10px; border-radius:7px; color:var(--text-main); font-family:inherit; font-size:0.9em; outline:none;">
                                 </div>
 
                                 <!-- ── BOUTON SAVE ── -->
@@ -365,6 +437,6 @@
         console.log('[Pixel] Moteur STT activé → Navigateur Web (Google Speech API)');
       })();
     </script>
-    <script src="app.js?v=13"></script>
+    <script src="app.js?v=14"></script>
 </body>
 </html>

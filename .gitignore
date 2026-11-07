@@ -23,9 +23,13 @@ __pycache__/
 !.env.example
 *.key*
 .key_Gemini.txt
+.key_1min.txt
 *.pem
 *.pfx
 *.p12
+*.crt
+*.csr
+certs/
 
 # Memory & State Files (Private user data)
 *.json
@@ -56,3 +60,10 @@ scratch/
 tmp/
 *.log
 *.bak
+
+# Android Application (Private - Never commit to public GitHub)
+android/
+*.apk
+*.aab
+*.keystore
+*.jks

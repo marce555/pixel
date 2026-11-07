@@ -1,0 +1,8 @@
+{
+  "name": "dj_remix",
+  "description": "Recherche et lance sur YouTube des versions 'Remix' et versions revisitées de morceaux (ex: 'She Drives Me Crazy (The Justin Strauss Remix) - Fine Young Cannibals') en mode DJ dans le lecteur musical de Pixel avec annonces vocales DJ, ducking du volume à 20% pendant la voix et enchaînement direct à 100%.",
+  "executable": "python3",
+  "script": "run.py",
+  "test_query": "lance moi un remix",
+  "router_instructions": "Utilise 'skill_dj_remix' dès que l'utilisateur demande de lancer des musiques en mode DJ avec le mot-clé 'lance moi un remix' (ou 'lance-moi un remix', 'lance un remix', 'mets un remix', 'mets-moi un remix', 'joue un remix', 'joue-moi un remix', 'lance des remix', 'fais-moi écouter un remix', 'version revisitée', 'mode DJ remix'), que ce soit pour une session DJ Remix générale ou pour un titre, un artiste ou un style spécifique. Dans 'query', indique la demande complète de l'utilisateur."
+}

@@ -507,8 +507,8 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 		chromeCtx, cancelChrome := chromedp.NewContext(allocCtx)
 		defer cancelChrome()
 
-		// Set timeout for entire operation (15 minutes, since synchronous translation on creation takes time)
-		chromeCtx, cancelTimeout := context.WithTimeout(chromeCtx, 900*time.Second)
+		// Set timeout for entire operation (25 minutes to keep the browser session open through AI enhancement + 4 translations)
+		chromeCtx, cancelTimeout := context.WithTimeout(chromeCtx, 1500*time.Second)
 		defer cancelTimeout()
 
 		// 1. Authenticate
@@ -816,37 +816,36 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 			task.AppendLog(fmt.Sprintf("Avertissement lors de la saisie du contenu : %v", err))
 		}
 
-		// Uncheck draft checkbox if it exists, so that the article is fully published
-		task.AppendLog("Désactivation de l'option brouillon (draft)...")
+		// Keep draft checkbox checked on initial creation so the draft is saved immediately
+		// before running "Améliorer avec l'IA" and the 4 translations on the edit page.
+		task.AppendLog("Création initiale en mode brouillon (avant amélioration IA et traductions)...")
 		err = chromedp.Run(chromeCtx,
 			chromedp.Evaluate(`(function() {
+				if (typeof tinymce !== 'undefined') tinymce.triggerSave();
 				const draftInputs = document.querySelectorAll('input[name="is_draft"], input[id*="draft"]');
 				draftInputs.forEach(cb => {
-					cb.checked = false;
-					cb.removeAttribute('checked');
+					cb.checked = true;
+					cb.value = "true";
 					cb.dispatchEvent(new Event('change', { bubbles: true }));
 				});
-				const selects = document.querySelectorAll('select[name="status"], select[name*="state"]');
-				selects.forEach(select => {
-					const opts = Array.from(select.options);
-					const pub = opts.find(o => o.text.toLowerCase().includes('publi') || o.value.toLowerCase().includes('publi') || o.value.toLowerCase().includes('published'));
-					if (pub) {
-						select.value = pub.value;
-						select.dispatchEvent(new Event('change', { bubbles: true }));
-					}
+				const forceTrans = document.querySelectorAll('input[name="force_translation"]');
+				forceTrans.forEach(cb => {
+					cb.checked = false;
+					cb.dispatchEvent(new Event('change', { bubbles: true }));
 				});
 				return true;
 			})()`, nil),
 		)
 		if err != nil {
-			task.AppendLog(fmt.Sprintf("Avertissement lors du décochage du brouillon : %v", err))
+			task.AppendLog(fmt.Sprintf("Avertissement lors de la configuration initiale du brouillon : %v", err))
 		}
 
-		// Submit article form
-		task.AppendLog("Soumission de l'article...")
+		// Submit article form to create the draft and open /edit
+		task.AppendLog("Soumission initiale de l'article pour accéder à la page d'édition...")
 		var submitted bool
 		err = chromedp.Run(chromeCtx,
 			chromedp.Evaluate(`(function() {
+				if (typeof tinymce !== 'undefined') tinymce.triggerSave();
 				const buttons = Array.from(document.querySelectorAll('button, input[type="submit"]'));
 				for (const b of buttons) {
 					const text = (b.innerText || b.textContent || b.value || '').toLowerCase();
@@ -868,8 +867,8 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 			return recordFailure("Le formulaire d'édition n'a pas pu être soumis sur le serveur", err)
 		}
 
-		// Wait dynamically for redirect (up to 90 seconds, since translations take time)
-		task.AppendLog("Attente de la redirection après soumission...")
+		// Wait dynamically for redirect to /edit
+		task.AppendLog("Attente de la redirection vers la page d'édition...")
 		var redirectSuccess bool
 		for i := 0; i < 90; i++ {
 			err = chromedp.Run(chromeCtx,
@@ -921,109 +920,129 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 			return recordFailure(fmt.Sprintf("Impossible d'accéder à la page d'édition de l'article (URL actuelle : %s)", redirectURL), nil)
 		}
 
-		// 1. Click "Améliorer avec l'IA" (désactivé par défaut quand le vérificateur factuel est actif :
-		// cette réécriture côté site interviendrait APRÈS la vérification et pourrait réintroduire des inexactitudes)
+		// Wait for TinyMCE editors on the edit page to initialize
+		for waitInit := 0; waitInit < 20; waitInit++ {
+			var ready bool
+			_ = chromedp.Run(chromeCtx,
+				chromedp.Evaluate(`(function() {
+					return (typeof tinymce !== 'undefined' && tinymce.get('raw_content') && tinymce.get('raw_content').initialized);
+				})()`, &ready),
+			)
+			if ready {
+				break
+			}
+			chromedp.Run(chromeCtx, chromedp.Sleep(500*time.Millisecond))
+		}
+
+		// 1. Click "Améliorer avec l'IA" (#enhanceBtn) and keep session open until completion
 		if !AppliYouAIEnhanceEnabled() {
-			task.AppendLog("Amélioration IA du site ignorée : le texte vérifié par l'Agent Vérificateur est publié tel quel (PIXEL_APPLIYOU_AI_ENHANCE=on pour la réactiver).")
-			err = fmt.Errorf("amélioration IA désactivée")
+			task.AppendLog("Amélioration IA du site désactivée via PIXEL_APPLIYOU_AI_ENHANCE.")
 		} else {
-			task.AppendLog("Lancement de l'amélioration de l'article avec l'IA du site...")
+			task.AppendLog("Lancement de l'amélioration de l'article avec le bouton « Améliorer avec l'IA » (#enhanceBtn)...")
 			err = chromedp.Run(chromeCtx,
 				chromedp.WaitVisible(`#enhanceBtn`, chromedp.ByID),
-				chromedp.Click(`#enhanceBtn`, chromedp.ByID),
+				chromedp.Evaluate(`(function() {
+					window.confirm = function() { return true; };
+					window.alert = function() { return true; };
+					const btn = document.getElementById('enhanceBtn');
+					if (btn) {
+						btn.scrollIntoView({ behavior: 'instant', block: 'center' });
+						btn.click();
+						return true;
+					}
+					return false;
+				})()`, nil),
 			)
-		}
-		if err != nil {
-			if AppliYouAIEnhanceEnabled() {
+			if err != nil {
 				task.AppendLog(fmt.Sprintf("Avertissement : échec du clic sur le bouton d'amélioration IA : %v", err))
-			}
-		} else {
-			// Wait for the AI enhancement process to start (classList does NOT contain 'hidden')
-			task.AppendLog("Attente du démarrage de l'amélioration par l'IA...")
-			var started bool
-			for i := 0; i < 15; i++ { // check up to 15 seconds for it to start
-				err = chromedp.Run(chromeCtx,
-					chromedp.Evaluate(`(function() {
-						const progress = document.getElementById('aiProgress');
-						return progress ? !progress.classList.contains('hidden') : false;
-					})()`, &started),
-				)
-				if err == nil && started {
-					break
-				}
-				chromedp.Run(chromeCtx, chromedp.Sleep(500*time.Millisecond))
-			}
-
-			// Wait for the AI enhancement process to finish (classList contains 'hidden')
-			task.AppendLog("Attente de la fin de l'amélioration par l'IA...")
-			var finished bool
-			for i := 0; i < 180; i++ { // check up to 3 minutes for it to finish
-				err = chromedp.Run(chromeCtx,
-					chromedp.Evaluate(`(function() {
-						const progress = document.getElementById('aiProgress');
-						return progress ? progress.classList.contains('hidden') : true;
-					})()`, &finished),
-				)
-				if err == nil && finished {
-					break
-				}
-				chromedp.Run(chromeCtx, chromedp.Sleep(1*time.Second))
-			}
-			if !finished {
-				task.AppendLog("Avertissement : l'amélioration IA a expiré ou a échoué.")
 			} else {
-				task.AppendLog("Article amélioré avec succès par l'IA !")
+				// Wait for the AI enhancement process to start (#aiProgress visible or #enhanceBtn.disabled)
+				task.AppendLog("Attente du démarrage de l'amélioration par l'IA...")
+				var started bool
+				for i := 0; i < 20; i++ {
+					err = chromedp.Run(chromeCtx,
+						chromedp.Evaluate(`(function() {
+							const progress = document.getElementById('aiProgress');
+							const btn = document.getElementById('enhanceBtn');
+							return (progress && !progress.classList.contains('hidden')) || (btn && btn.disabled === true);
+						})()`, &started),
+					)
+					if err == nil && started {
+						break
+					}
+					chromedp.Run(chromeCtx, chromedp.Sleep(500*time.Millisecond))
+				}
+
+				// Keep the session open while waiting for AI enhancement to finish (up to 6 minutes)
+				task.AppendLog("Session maintenue ouverte : attente de la fin de « Améliorer avec l'IA » (jusqu'à 6 minutes)...")
+				var finished bool
+				for i := 0; i < 360; i++ {
+					err = chromedp.Run(chromeCtx,
+						chromedp.Evaluate(`(function() {
+							const progress = document.getElementById('aiProgress');
+							const btn = document.getElementById('enhanceBtn');
+							const progressHidden = progress ? progress.classList.contains('hidden') : true;
+							const btnEnabled = btn ? !btn.disabled : true;
+							return progressHidden && btnEnabled;
+						})()`, &finished),
+					)
+					if err == nil && finished {
+						break
+					}
+					chromedp.Run(chromeCtx, chromedp.Sleep(1*time.Second))
+				}
+				if !finished {
+					task.AppendLog("Avertissement : l'amélioration IA a expiré après 6 minutes.")
+				} else {
+					task.AppendLog("Article amélioré avec succès par l'IA ! Synchronisation des champs TinyMCE...")
+					_ = chromedp.Run(chromeCtx,
+						chromedp.Evaluate(`(function() {
+							if (typeof tinymce !== 'undefined') {
+								const cEd = tinymce.get('content');
+								const rEd = tinymce.get('raw_content');
+								if (cEd && rEd) {
+									const enhancedHtml = cEd.getContent();
+									if (enhancedHtml && enhancedHtml.trim().length > 100) {
+										rEd.setContent(enhancedHtml);
+										rEd.save();
+									}
+								}
+								tinymce.triggerSave();
+							}
+							return true;
+						})()`, nil),
+						chromedp.Sleep(1*time.Second),
+					)
+				}
 			}
 		}
 
-		// 2. Click "Enregistrer" to save the enhanced article (ensuring is_draft is unchecked)
-		task.AppendLog("Enregistrement de l'article amélioré (décochage brouillon)...")
+		// 2. Check the translations checkbox (force_translation), uncheck draft (is_draft),
+		// and submit the form while keeping the session open until all 4 translations complete.
+		task.AppendLog("Cochage des traductions (force_translation), décochage du brouillon (is_draft) et lancement de la sauvegarde + traductions...")
 		var saved bool
 		err = chromedp.Run(chromeCtx,
 			chromedp.Evaluate(`(function() {
-				const draftInputs = document.querySelectorAll('input[name="is_draft"], input[id*="draft"]');
-				draftInputs.forEach(cb => {
-					cb.checked = false;
-					cb.removeAttribute('checked');
+				window.confirm = function() { return true; };
+				window.alert = function() { return true; };
+				if (typeof tinymce !== 'undefined') tinymce.triggerSave();
+
+				// Check the translations checkbox
+				const transInputs = document.querySelectorAll('input[name="force_translation"], input[id*="translation"]');
+				transInputs.forEach(cb => {
+					cb.checked = true;
+					cb.value = "true";
 					cb.dispatchEvent(new Event('change', { bubbles: true }));
 				});
-				const buttons = Array.from(document.querySelectorAll('button, input[type="submit"]'));
-				for (const b of buttons) {
-					const text = (b.innerText || b.textContent || b.value || '').toLowerCase();
-					if (text.includes('enregistrer') || text.includes('sauvegarder') || text.includes('save') || text.includes('créer') || text.includes('creer')) {
-						b.click();
-						return true;
-					}
-				}
-				return false;
-			})()`, &saved),
-			chromedp.Sleep(4*time.Second), // Wait for save and reload
-		)
-		if err != nil || !saved {
-			task.AppendLog("Avertissement : échec de l'enregistrement de l'article amélioré.")
-		} else {
-			task.AppendLog("Article enregistré avec succès.")
-		}
 
-		// 3. Attente stricte pour permettre aux traductions de se terminer en arrière-plan
-		task.AppendLog("Attente de 3 minutes pour permettre les traductions côté serveur...")
-		chromedp.Run(chromeCtx, chromedp.Sleep(3*time.Minute))
-
-		// 4. Publication finale (Décocher brouillon et Enregistrer/Soumettre)
-		task.AppendLog("Désactivation définitive de l'option brouillon et publication finale...")
-		var finalPublished bool
-		err = chromedp.Run(chromeCtx,
-			chromedp.Evaluate(`(function() {
-				window.confirm = function() { return true; }; // Override native confirm dialog
-				window.alert = function() { return true; };
-
+				// Uncheck draft checkbox so the article and its translations are published
 				const draftInputs = document.querySelectorAll('input[name="is_draft"], input[id*="draft"], input[name*="brouillon"]');
 				draftInputs.forEach(cb => {
 					cb.checked = false;
 					cb.removeAttribute('checked');
-					cb.value = "false";
 					cb.dispatchEvent(new Event('change', { bubbles: true }));
 				});
+
 				const selects = document.querySelectorAll('select[name="status"], select[name*="state"]');
 				selects.forEach(select => {
 					const opts = Array.from(select.options);
@@ -1033,27 +1052,88 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 						select.dispatchEvent(new Event('change', { bubbles: true }));
 					}
 				});
-				
-				const buttons = Array.from(document.querySelectorAll('button, input[type="submit"], a.btn'));
+
+				window.__pixelSubmitting = true;
+				const buttons = Array.from(document.querySelectorAll('button[type="submit"], input[type="submit"], button'));
 				for (const b of buttons) {
 					const text = (b.innerText || b.textContent || b.value || '').toLowerCase();
-					if ((text.includes('publier') && !text.includes('dépublier')) || text.includes('enregistrer') || text.includes('sauvegarder') || text.includes('save') || text.includes('créer') || text.includes('creer')) {
+					if (text.includes('dépublier') || text.includes('depublier') || text.includes('améliorer') || text.includes('ameliorer')) continue;
+					if (b.type === 'submit' || text.includes('enregistrer') || text.includes('sauvegarder') || text.includes('save')) {
+						b.scrollIntoView({ behavior: 'instant', block: 'center' });
 						b.click();
 						return true;
 					}
 				}
-				const form = document.querySelector('form');
+				const form = document.getElementById('articleForm') || document.querySelector('form');
 				if (form) {
 					form.submit();
 					return true;
 				}
 				return false;
-			})()`, &finalPublished),
-			chromedp.Sleep(1*time.Second),
+			})()`, &saved),
 		)
+		if err != nil || !saved {
+			task.AppendLog("Avertissement : échec du clic sur Enregistrer pour la sauvegarde et les traductions.")
+			return recordFailure("Échec de l'enregistrement de l'article amélioré et des traductions", err)
+		}
 
-		// 4b. Validation automatique des fenêtres/boutons de confirmation modales (ex: Confirmer la publication)
-		task.AppendLog("Recherche et clic automatique sur tout bouton de confirmation / validation (popup modal)...")
+		// 3. Keep the browser session open while the server synchronously translates into EN, ES, DE, IT and reloads the page (up to 8 minutes)
+		task.AppendLog("Session maintenue ouverte : attente de la sauvegarde et de la génération des 4 traductions (EN, ES, DE, IT) par le serveur...")
+		chromedp.Run(chromeCtx, chromedp.Sleep(3*time.Second))
+		var saveAndTransDone bool
+		for i := 0; i < 240; i++ { // 240 * 2s = 480s (8 minutes max)
+			errPoll := chromedp.Run(chromeCtx,
+				chromedp.Evaluate(`(function() {
+					if (document.readyState !== 'complete') return false;
+					const modal = document.getElementById('translationModal');
+					const modalVisible = modal && !modal.classList.contains('hidden');
+					if (window.__pixelSubmitting === true || modalVisible) {
+						return false;
+					}
+					return true;
+				})()`, &saveAndTransDone),
+			)
+			if errPoll == nil && saveAndTransDone {
+				break
+			}
+			chromedp.Run(chromeCtx, chromedp.Sleep(2*time.Second))
+		}
+		if saveAndTransDone {
+			task.AppendLog("Sauvegarde de l'article amélioré et génération des traductions terminées avec succès !")
+		} else {
+			task.AppendLog("Avertissement : délai d'attente maximal atteint pour le retour de la sauvegarde/traductions.")
+		}
+
+		// 4. Final publication check: if the article still shows a "Publier" button (publishArticle()), trigger it and wait
+		task.AppendLog("Vérification et activation finale de la publication...")
+		var publishTriggered string
+		_ = chromedp.Run(chromeCtx,
+			chromedp.Evaluate(`(function() {
+				window.confirm = function() { return true; };
+				window.alert = function() { return true; };
+				const isAlreadyPublished = Array.from(document.querySelectorAll('button')).some(b => {
+					const t = (b.innerText || b.textContent || '').toLowerCase();
+					return t.includes('dépublier') || t.includes('depublier');
+				});
+				if (!isAlreadyPublished && typeof publishArticle === 'function') {
+					publishArticle();
+					return "publishArticle_called";
+				}
+				const pubBtn = Array.from(document.querySelectorAll('button, a.btn')).find(b => {
+					const t = (b.innerText || b.textContent || '').toLowerCase();
+					return t.includes('publier') && !t.includes('dépublier') && !t.includes('depublier');
+				});
+				if (!isAlreadyPublished && pubBtn) {
+					pubBtn.click();
+					return "pubBtn_clicked";
+				}
+				return "already_published";
+			})()`, &publishTriggered),
+			chromedp.Sleep(5*time.Second),
+		)
+		task.AppendLog(fmt.Sprintf("État de publication final : %s", publishTriggered))
+
+		// 4b. Validation automatique des éventuelles fenêtres modales de confirmation
 		var modalConfirmed bool
 		errConfirm := chromedp.Run(chromeCtx,
 			chromedp.Evaluate(`(function() {
@@ -1070,15 +1150,10 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 				}
 				return false;
 			})()`, &modalConfirmed),
-			chromedp.Sleep(4*time.Second),
+			chromedp.Sleep(3*time.Second),
 		)
 		if errConfirm == nil && modalConfirmed {
 			task.AppendLog("Bouton de confirmation / validation de la publication cliqué avec succès !")
-		}
-
-		if err != nil || !finalPublished {
-			task.AppendLog("Avertissement : échec de l'enregistrement final pour la publication.")
-			return recordFailure("Échec de l'enregistrement ou de la validation de la publication finale", err)
 		}
 
 		task.AppendLog("Article publié avec succès via l'interface !")

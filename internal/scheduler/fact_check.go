@@ -75,17 +75,17 @@ func FactCheckRequired() bool {
 }
 
 // AppliYouAIEnhanceEnabled reports whether the AppliYou "Améliorer avec l'IA" button should be used.
-// It rewrites the article after verification and may reintroduce inaccuracies, so it is disabled
-// by default whenever the fact-checker is active (override with PIXEL_APPLIYOU_AI_ENHANCE=on).
+// Enabled by default so that Pixel enhances the verified article via 1min.AI + Mistral (summary, SEO meta, tags, formatting)
+// before triggering translations and publication (override with PIXEL_APPLIYOU_AI_ENHANCE=off to disable).
 func AppliYouAIEnhanceEnabled() bool {
 	v := strings.ToLower(strings.TrimSpace(os.Getenv("PIXEL_APPLIYOU_AI_ENHANCE")))
 	switch v {
-	case "on", "true", "1":
-		return true
 	case "off", "false", "0":
 		return false
+	case "on", "true", "1":
+		return true
 	}
-	return !FactCheckEnabled()
+	return true
 }
 
 func truncateRunes(s string, n int) string {

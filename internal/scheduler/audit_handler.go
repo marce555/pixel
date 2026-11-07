@@ -537,23 +537,117 @@ func NewAuditAndFixArticlesHandlerWithBibliographicAuditor(broadcaster EventBroa
 							cb.dispatchEvent(new Event('change', { bubbles: true }));
 						});
 
+						// Cochage des traductions (force_translation)
+						const transInputs = document.querySelectorAll('input[name="force_translation"], input[id*="translation"]');
+						transInputs.forEach(cb => {
+							cb.checked = true;
+							cb.value = "true";
+							cb.dispatchEvent(new Event('change', { bubbles: true }));
+						});
+
 						return set;
 					})()`, string(revJSON), string(sumJSON), string(metaJSON)), &updated),
 				)
 
+				// Lancement optionnel du bouton « Améliorer avec l'IA » (#enhanceBtn) en gardant la session ouverte
+				if errSet == nil && updated && AppliYouAIEnhanceEnabled() {
+					task.AppendLog("  ✨ Lancement de « Améliorer avec l'IA » (#enhanceBtn) avant sauvegarde...")
+					var clickedEnhance bool
+					_ = chromedp.Run(chromeCtx,
+						chromedp.Evaluate(`(function() {
+							window.confirm = function() { return true; };
+							window.alert = function() { return true; };
+							const btn = document.getElementById('enhanceBtn');
+							if (btn) {
+								btn.scrollIntoView({ behavior: 'instant', block: 'center' });
+								btn.click();
+								return true;
+							}
+							return false;
+						})()`, &clickedEnhance),
+					)
+					if clickedEnhance {
+						for i := 0; i < 20; i++ {
+							var started bool
+							_ = chromedp.Run(chromeCtx,
+								chromedp.Evaluate(`(function() {
+									const progress = document.getElementById('aiProgress');
+									const btn = document.getElementById('enhanceBtn');
+									return (progress && !progress.classList.contains('hidden')) || (btn && btn.disabled === true);
+								})()`, &started),
+							)
+							if started {
+								break
+							}
+							chromedp.Run(chromeCtx, chromedp.Sleep(500*time.Millisecond))
+						}
+						task.AppendLog("  ⏳ Session maintenue ouverte : attente de la fin de « Améliorer avec l'IA » (jusqu'à 6 minutes)...")
+						var finished bool
+						for i := 0; i < 360; i++ {
+							_ = chromedp.Run(chromeCtx,
+								chromedp.Evaluate(`(function() {
+									const progress = document.getElementById('aiProgress');
+									const btn = document.getElementById('enhanceBtn');
+									const progressHidden = progress ? progress.classList.contains('hidden') : true;
+									const btnEnabled = btn ? !btn.disabled : true;
+									return progressHidden && btnEnabled;
+								})()`, &finished),
+							)
+							if finished {
+								break
+							}
+							chromedp.Run(chromeCtx, chromedp.Sleep(1*time.Second))
+						}
+						if finished {
+							task.AppendLog("  ✅ Amélioration IA terminée ! Synchronisation des éditeurs...")
+							_ = chromedp.Run(chromeCtx,
+								chromedp.Evaluate(`(function() {
+									if (typeof tinymce !== 'undefined') {
+										const cEd = tinymce.get('content');
+										const rEd = tinymce.get('raw_content');
+										if (cEd && rEd) {
+											const enhancedHtml = cEd.getContent();
+											if (enhancedHtml && enhancedHtml.trim().length > 100) {
+												rEd.setContent(enhancedHtml);
+												rEd.save();
+											}
+										}
+										tinymce.triggerSave();
+									}
+									return true;
+								})()`, nil),
+							)
+						}
+					}
+				}
+
 				var submitted bool
 				var saveSuccess bool
 				if errSet == nil && updated {
-					task.AppendLog("  🚀 Envoi de la requête de sauvegarde du formulaire...")
+					task.AppendLog("  🚀 Cochage des traductions et envoi de la sauvegarde du formulaire...")
 					errClick := chromedp.Run(chromeCtx,
 						chromedp.Evaluate(`(function() {
 								window.confirm = function() { return true; };
 								window.alert = function() { return true; };
 								if (typeof tinymce !== 'undefined') tinymce.triggerSave();
 
+								const transInputs = document.querySelectorAll('input[name="force_translation"], input[id*="translation"]');
+								transInputs.forEach(cb => {
+									cb.checked = true;
+									cb.value = "true";
+									cb.dispatchEvent(new Event('change', { bubbles: true }));
+								});
+								const draftInputs = document.querySelectorAll('input[name="is_draft"], input[id*="draft"], input[name*="brouillon"]');
+								draftInputs.forEach(cb => {
+									cb.checked = false;
+									cb.removeAttribute('checked');
+									cb.dispatchEvent(new Event('change', { bubbles: true }));
+								});
+
+								window.__pixelSubmitting = true;
 								const btn = Array.from(document.querySelectorAll('button, input[type="submit"]')).find(b => {
 									const text = (b.innerText || b.textContent || b.value || '').toLowerCase().trim();
-									if (text.includes('dépublier') || text.includes('depublier')) return false;
+									if (text.includes('dépublier') || text.includes('depublier') || text.includes('améliorer') || text.includes('ameliorer')) return false;
 									return b.type === 'submit' || text.includes('enregistrer') || text.includes('sauvegarder') || text.includes('save');
 								});
 								if (btn) {
@@ -570,9 +664,25 @@ func NewAuditAndFixArticlesHandlerWithBibliographicAuditor(broadcaster EventBroa
 							})()`, &submitted),
 					)
 					if errClick == nil && submitted {
-						// Wait for form submission and server processing
-						task.AppendLog("  ⏳ Attente de la confirmation de mise à jour par le serveur...")
-						time.Sleep(10 * time.Second)
+						// Keep session open and wait for synchronous form submission + 4 translations (up to 8 minutes)
+						task.AppendLog("  ⏳ Session maintenue ouverte : attente de la sauvegarde et des 4 traductions par le serveur...")
+						chromedp.Run(chromeCtx, chromedp.Sleep(3*time.Second))
+						for i := 0; i < 240; i++ {
+							var done bool
+							errPoll := chromedp.Run(chromeCtx,
+								chromedp.Evaluate(`(function() {
+									if (document.readyState !== 'complete') return false;
+									const modal = document.getElementById('translationModal');
+									const modalVisible = modal && !modal.classList.contains('hidden');
+									if (window.__pixelSubmitting === true || modalVisible) return false;
+									return true;
+								})()`, &done),
+							)
+							if errPoll == nil && done {
+								break
+							}
+							chromedp.Run(chromeCtx, chromedp.Sleep(2*time.Second))
+						}
 						var successMsg string
 						_ = chromedp.Run(chromeCtx,
 							chromedp.Evaluate(`(function() {
@@ -602,7 +712,7 @@ func NewAuditAndFixArticlesHandlerWithBibliographicAuditor(broadcaster EventBroa
 									}
 									return "already published or no publish function";
 								})()`, nil),
-							chromedp.Sleep(3*time.Second),
+							chromedp.Sleep(5*time.Second),
 						)
 					}
 				}

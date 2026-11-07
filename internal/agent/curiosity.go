@@ -222,7 +222,7 @@ func (c *CuriosityAgent) Start(ctx context.Context) {
 					// Vérification rapide de présence via la vision
 					vision := c.coreMemory.GetProfile().Volatile["Dernière vision"]
 					visionLower := strings.ToLower(vision)
-					isAbsent := strings.Contains(visionLower, "absent") || strings.Contains(visionLower, "parti") || strings.Contains(visionLower, "vide") || strings.Contains(visionLower, "disparu") || strings.Contains(visionLower, "ne voit plus") || strings.Contains(visionLower, "personne") || strings.Contains(visionLower, "aucun")
+					isAbsent := IsEmptyOrBlackVision(vision) || strings.Contains(visionLower, "absent") || strings.Contains(visionLower, "parti") || strings.Contains(visionLower, "vide") || strings.Contains(visionLower, "disparu") || strings.Contains(visionLower, "ne voit plus") || strings.Contains(visionLower, "personne") || strings.Contains(visionLower, "aucun")
 
 					// Proposer de partager la pensée uniquement si un client est connecté, que l'utilisateur n'est pas absent,
 					// et que la pensée présente une continuité cognitive (vérifiée par ThalamicGate dans proposeToShare).
@@ -319,10 +319,10 @@ func (c *CuriosityAgent) checkPresenceWithCamera(ctx context.Context) bool {
 		res, err := sm.ExecuteSkill(ctx, "decouvrir_nouveau_visage", "vérification présence")
 		if err == nil && res != "" {
 			resLower := strings.ToLower(res)
-			if strings.Contains(resLower, "aucun visage") || strings.Contains(resLower, "aucune personne") ||
+			if IsEmptyOrBlackVision(res) || strings.Contains(resLower, "aucun visage") || strings.Contains(resLower, "aucune personne") ||
 				strings.Contains(resLower, "aucun_visage") || strings.Contains(resLower, "identité incertaine") ||
 				strings.Contains(resLower, "identite incertaine") {
-				log.Println("[CuriosityAgent] Résultat brique caméra : Aucun visage détecté devant l'écran.")
+				log.Println("[CuriosityAgent] Résultat brique caméra : Aucun visage détecté devant l'écran (ou écran/pièce sombre).")
 				if c.coreMemory != nil {
 					c.coreMemory.UpdateVolatileState("Dernière vision", "Aucune personne détectée devant la caméra.")
 				}

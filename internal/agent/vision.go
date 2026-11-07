@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image/jpeg"
 	"io"
 	"log"
 	"net/http"
@@ -154,10 +155,15 @@ func (va *VisionAgent) CaptureAndAnalyze(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("capture webcam via ffmpeg échouée: %w (details: %s)", err, stderr.String())
 	}
 
-	// 2. Read the image file and encode to base64
+	// 2. Read the image file and check pixel-level luminance before calling the vision model
 	imgBytes, err := os.ReadFile(tempFile)
 	if err != nil {
 		return "", fmt.Errorf("lecture de l'image capturée échouée: %w", err)
+	}
+
+	if isJPEGImageDarkOrBlack(imgBytes) {
+		log.Println("[VisionAgent] Image capturée noire ou trop sombre (luminance insuffisante) : aucune inférence lancée.")
+		return "L'image est entièrement noire et ne montre aucune personne, ni aucun détail visible.", nil
 	}
 
 	imgBase64 := base64.StdEncoding.EncodeToString(imgBytes)
@@ -194,7 +200,7 @@ func (va *VisionAgent) CaptureAndAnalyze(ctx context.Context) (string, error) {
 				Content: []visionMessageContent{
 					{
 						Type: "text",
-						Text: "Décris brièvement en une seule phrase simple ce que tu vois devant la caméra. Indique clairement si l'image est noire, sombre ou sans personne visible, ou bien combien de personnes sont présentes, leur apparence physique (genre, barbe, lunettes, cheveux, vêtements) et ce qu'elles font. Réponds en français.",
+						Text: "Décris brièvement en une seule phrase simple ce que tu vois devant la caméra. RÈGLE STRICTE : Si l'image est noire, sombre, mal éclairée, floue, ou si aucune personne n'est clairement et nettement visible en pleine lumière, réponds UNIQUEMENT : 'L'image est noire et aucune personne n'est visible.' N'invente JAMAIS de silhouette ni de personne dans l'obscurité. Si une personne est nettement visible, décris brièvement son apparence physique et ce qu'elle fait. Réponds en français.",
 					},
 					{
 						Type: "image_url",
@@ -253,20 +259,76 @@ func (va *VisionAgent) CaptureAndAnalyze(ctx context.Context) (string, error) {
 	return "", fmt.Errorf("aucune description visuelle renvoyée par le modèle (raw: %s)", string(bodyBytes))
 }
 
-// IsEmptyOrBlackVision detects black screens, dark/obstructed camera frames, or scenes with nobody present.
+// isJPEGImageDarkOrBlack decodes a JPEG image and returns true if the frame is black or too dark
+// to reliably distinguish any human face (preventing VLM hallucinations in the dark).
+func isJPEGImageDarkOrBlack(imgBytes []byte) bool {
+	if len(imgBytes) == 0 {
+		return true
+	}
+	img, err := jpeg.Decode(bytes.NewReader(imgBytes))
+	if err != nil {
+		return false
+	}
+	bounds := img.Bounds()
+	w := bounds.Dx()
+	h := bounds.Dy()
+	if w <= 0 || h <= 0 {
+		return true
+	}
+
+	var totalLuma float64
+	var brightCount int
+	var sampleCount int
+	step := 4
+	for y := bounds.Min.Y; y < bounds.Max.Y; y += step {
+		for x := bounds.Min.X; x < bounds.Max.X; x += step {
+			r, g, b, _ := img.At(x, y).RGBA()
+			// Convert 16-bit RGBA to 8-bit luma (0..255)
+			luma := (0.299*float64(r>>8) + 0.587*float64(g>>8) + 0.114*float64(b>>8))
+			totalLuma += luma
+			if luma >= 85.0 {
+				brightCount++
+			}
+			sampleCount++
+		}
+	}
+	if sampleCount == 0 {
+		return true
+	}
+	meanLuma := totalLuma / float64(sampleCount)
+	brightRatio := float64(brightCount) / float64(sampleCount)
+
+	// If average luminance is very low (< 48/255) or almost no pixels are well-lit (< 3% above 85/255),
+	// the room/screen is dark or the camera is obstructed.
+	return meanLuma < 48.0 || (meanLuma < 62.0 && brightRatio < 0.03)
+}
+
+// IsEmptyOrBlackVision detects black screens, dark/obstructed camera frames, indistinct silhouettes, or scenes with nobody present.
 func IsEmptyOrBlackVision(description string) bool {
 	d := strings.ToLower(strings.TrimSpace(description))
 	if d == "" {
 		return true
 	}
 	emptyOrBlackMarkers := []string{
-		"image complètement noire", "image noire", "écran noir", "ecran noir",
+		"image complètement noire", "image noire", "image entièrement noire",
+		"presque noire", "quasiment noire", "écran noir", "ecran noir",
 		"tout noir", "fond noir", "entièrement noir", "totalement noir",
-		"très sombre", "trop sombre", "image sombre", "obscurité", "dans le noir",
-		"mal éclairée", "aucun détail visible", "ne vois rien", "rien n'est visible",
-		"objectif obstrué", "caméra masquée", "caméra cachée", "image floue",
-		"sans personne", "aucune personne", "aucun visage", "personne n'est",
-		"il n'y a personne", "ne vois personne", "ne vois clairement personne",
+		"environnement est entièrement noir", "dans le noir",
+		"très sombre", "trop sombre", "image sombre", "salle sombre",
+		"pièce sombre", "pièce très sombre", "cuisine sombre", "scène sombre",
+		"scène intérieure sombre", "intérieur sombre", "environnement sombre",
+		"chambre sombre", "bureau sombre", "coin sombre", "endroit sombre",
+		"fond sombre", "cadre sombre", "vue sombre", "photo sombre", "capture sombre",
+		"obscurité", "pénombre", "éclairage faible", "faible éclairage",
+		"faiblement éclairé", "peu éclairé", "peu éclairée", "mal éclairé", "mal éclairée",
+		"luminosité faible", "faible luminosité", "lumière faible",
+		"aucun détail visible", "aucun détail discernable", "aucun détail ne peut",
+		"ne vois rien", "rien n'est visible", "difficile à discerner", "difficilement discernable",
+		"objectif obstrué", "caméra masquée", "caméra cachée",
+		"image floue", "légèrement floue", "image grainée", "formes floues", "forme floue",
+		"silhouette", "indistinct", "partiellement visible",
+		"sans personne", "sans aucune personne", "aucune personne", "aucun visage", "aucun individu",
+		"personne n'est", "il n'y a personne", "ne vois personne", "ne vois clairement personne",
 		"pas de personne", "pas de visage", "aucune présence", "non, aucune",
 		"pièce vide", "chambre vide", "bureau vide", "fauteuil vide", "chaise vide",
 		"salle vide", "mur vide", "seulement un plafond", "absent", "parti",
@@ -322,6 +384,34 @@ func hasMultiplePeople(descLower string) bool {
 	return false
 }
 
+func isLikelyMarcelo(descLower string) bool {
+	if isMarceloNegated(descLower) || hasMultiplePeople(descLower) {
+		return false
+	}
+	if strings.Contains(descLower, "marcelo") {
+		return true
+	}
+	if strings.Contains(descLower, "jeune homme") || strings.Contains(descLower, "adolescent") ||
+		strings.Contains(descLower, "enfant") || strings.Contains(descLower, "femme") ||
+		strings.Contains(descLower, "fille") || strings.Contains(descLower, "dame") {
+		return false
+	}
+	isMaleOrPerson := strings.Contains(descLower, "homme") || strings.Contains(descLower, "monsieur") || strings.Contains(descLower, "personne")
+	if !isMaleOrPerson {
+		return false
+	}
+	marceloTraits := []string{
+		"cheveux gris", "cheveux blancs", "poivre et sel", "homme âgé", "âge mûr",
+		"d'âge mûr", "portant des lunettes", "avec des lunettes",
+	}
+	for _, t := range marceloTraits {
+		if strings.Contains(descLower, t) {
+			return true
+		}
+	}
+	return false
+}
+
 // ProcessVisualPerception updates CoreMemory volatile state, indexes memory in LTM, and acts as a surveillance system.
 // Black screens, empty scenes, or scenes with only Marcelo NEVER trigger notifications.
 // Only the presence of another person (unknown or someone other than Marcelo) triggers a surveillance notification.
@@ -347,7 +437,7 @@ func (va *VisionAgent) ProcessVisualPerception(ctx context.Context, description 
 
 	if hasMultiplePeople(descLower) {
 		presentPerson = "Inconnu"
-	} else if strings.Contains(descLower, "marcelo") && !isMarceloNegated(descLower) {
+	} else if isLikelyMarcelo(descLower) {
 		presentPerson = "Marcelo"
 	} else {
 		presentPerson = va.identifyInterlocutor(ctx, description)
@@ -413,7 +503,6 @@ func (va *VisionAgent) ProcessVisualPerception(ctx context.Context, description 
 		} else {
 			alertMsg = fmt.Sprintf("🚨 [Surveillance Pixel] Présence détectée (%s) devant la caméra : %s", presentPerson, description)
 		}
-		va.stm.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: alertMsg})
 		va.onBroadcast(alertMsg)
 		log.Printf("[VisionAgent] Notification de surveillance envoyée : %s\n", alertMsg)
 	}
@@ -669,10 +758,13 @@ Ne mets aucun autre mot ni ponctuation dans ta réponse.`, description, knownPeo
 		return "Inconnu"
 	}
 
+	if idx := strings.Index(strings.ToLower(res), "</think>"); idx != -1 {
+		res = res[idx+len("</think>"):]
+	}
 	res = strings.TrimSpace(res)
 	res = strings.Trim(res, `.,!?;:"'`)
 
-	if strings.EqualFold("Marcelo", res) {
+	if strings.EqualFold("Marcelo", res) || strings.Contains(strings.ToLower(res), "marcelo") {
 		return "Marcelo"
 	}
 	for name := range interlocutors {

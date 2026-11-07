@@ -391,10 +391,20 @@ func TestVisionAgentSurveillanceMode(t *testing.T) {
 		t.Fatalf("expected 0 notifications for empty room, got: %v", notifications)
 	}
 
-	// 3. Seul Marcelo présent -> AUCUNE notification
+	// 3. Seul Marcelo présent (même si le LLM externe renvoyait par erreur "Inconnu") -> AUCUNE notification
+	provider.generateResp = "Inconnu"
 	va.ProcessVisualPerception(ctx, "Un homme d'âge mûr aux cheveux gris est assis devant son bureau.", true)
+	va.ProcessVisualPerception(ctx, "Une seule personne, un homme âgé aux cheveux gris et portant des lunettes, est assis sur un canapé en regardant vers la caméra.", true)
 	if len(notifications) != 0 {
 		t.Fatalf("expected 0 notifications when only Marcelo is present, got: %v", notifications)
+	}
+
+	// 3b. Salle sombre / pièce sombre / silhouette indistincte -> AUCUNE notification
+	va.ProcessVisualPerception(ctx, "Dans une salle sombre, un homme âgé aux cheveux gris courts, vêtu d’un pull noir, regarde vers le bas.", true)
+	va.ProcessVisualPerception(ctx, "Dans une pièce très sombre avec des murs blancs, on voit la silhouette sombre d'une personne au centre, dont l'apparence et les vêtements sont indistincts.", true)
+	va.ProcessVisualPerception(ctx, "Une seule personne, aux cheveux gris et portant des lunettes, est partiellement visible au premier plan dans une pièce sombre.", true)
+	if len(notifications) != 0 {
+		t.Fatalf("expected 0 notifications for dark room or indistinct silhouette, got: %v", notifications)
 	}
 
 	// 4. Autre personne (Inconnu) présente -> Notification de surveillance envoyée !

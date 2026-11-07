@@ -63,6 +63,18 @@ def capture_photo():
         raise RuntimeError(f"Impossible de capturer l'image depuis la webcam (/dev/video0..3): {last_err}")
         
     try:
+        # Vérification matérielle de la luminance via ffmpeg rawvideo avant d'appeler le VLM
+        gray_res = subprocess.run(
+            ["ffmpeg", "-i", temp_path, "-vf", "format=gray", "-f", "rawvideo", "-"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5
+        )
+        raw_gray = gray_res.stdout
+        if raw_gray and len(raw_gray) > 0:
+            mean_luma = sum(raw_gray) / len(raw_gray)
+            bright_count = sum(1 for px in raw_gray if px >= 85)
+            bright_ratio = bright_count / len(raw_gray)
+            if mean_luma < 48.0 or (mean_luma < 62.0 and bright_ratio < 0.03):
+                return None
         with open(temp_path, "rb") as f:
             data = f.read()
         return base64.b64encode(data).decode("utf-8")
@@ -75,13 +87,13 @@ def capture_photo():
 
 def analyze_image_with_vision(b64_image, query_context=""):
     """Envoie l'image au modèle multimodal local FastFlowLM pour analyse faciale et environnementale."""
+    if not b64_image:
+        return "L'image est entièrement noire et aucune personne n'est visible."
     prompt = (
         "Tu es le système de vision de Pixel. Analyse attentivement cette capture webcam en français.\n"
-        "1. Présence humaine : Y a-t-il une personne ou un visage humain visible face à la caméra ?\n"
-        "2. Description physique si quelqu'un est présent (genre, âge approximatif, cheveux/barbe, lunettes, vêtements, posture).\n"
-        "3. Environnement : Que vois-tu dans le champ de vision (bureau, écran, objets, arrière-plan, éclairage) ? Réponds précisément si la question porte sur ce que tu vois ou sur le bureau.\n"
-        "4. Si personne n'est visible ou si la caméra est masquée, indique-le clairement.\n"
-        "Reste concis, précis et factuel."
+        "RÈGLE STRICTE : Si l'image est noire, sombre, mal éclairée, floue, ou si aucune personne n'est clairement et nettement visible en pleine lumière, "
+        "réponds UNIQUEMENT : 'L'image est noire et aucune personne n'est visible.' N'invente JAMAIS de silhouette ni de personne dans l'obscurité.\n"
+        "Si et seulement si une personne est clairement visible, décris brièvement son genre, ses cheveux/lunettes/barbe et ce qu'elle fait."
     )
     if query_context:
         prompt += f"\nContexte de la demande utilisateur : \"{query_context}\""
@@ -142,16 +154,28 @@ def match_person(description, memory):
     
     # 1. Vérifier si écran noir / sombre / aucun visage / aucune personne
     no_person_markers = [
-        "image complètement noire", "image noire", "écran noir", "ecran noir",
+        "image complètement noire", "image noire", "image entièrement noire",
+        "presque noire", "quasiment noire", "écran noir", "ecran noir",
         "tout noir", "fond noir", "entièrement noir", "totalement noir",
-        "très sombre", "trop sombre", "image sombre", "obscurité", "dans le noir",
-        "mal éclairée", "aucun détail visible", "ne vois rien", "rien n'est visible",
+        "environnement est entièrement noir", "dans le noir",
+        "très sombre", "trop sombre", "image sombre", "salle sombre",
+        "pièce sombre", "pièce très sombre", "cuisine sombre", "scène sombre",
+        "scène intérieure sombre", "intérieur sombre", "environnement sombre",
+        "chambre sombre", "bureau sombre", "coin sombre", "endroit sombre",
+        "fond sombre", "cadre sombre", "vue sombre", "photo sombre", "capture sombre",
+        "obscurité", "pénombre", "éclairage faible", "faible éclairage",
+        "faiblement éclairé", "peu éclairé", "peu éclairée", "mal éclairé", "mal éclairée",
+        "luminosité faible", "faible luminosité", "lumière faible",
+        "aucun détail visible", "aucun détail discernable", "aucun détail ne peut",
+        "ne vois rien", "rien n'est visible", "difficile à discerner", "difficilement discernable",
         "objectif obstrué", "caméra masquée", "caméra cachée",
-        "sans personne", "aucune personne", "aucun visage", "personne n'est",
-        "il n'y a personne", "ne vois personne", "ne vois clairement personne",
+        "image floue", "légèrement floue", "image grainée", "formes floues", "forme floue",
+        "silhouette", "indistinct", "partiellement visible",
+        "sans personne", "sans aucune personne", "aucune personne", "aucun visage", "aucun individu",
+        "personne n'est", "il n'y a personne", "ne vois personne", "ne vois clairement personne",
         "pas de personne", "pas de visage", "aucune présence", "non, aucune",
         "pièce vide", "chambre vide", "bureau vide", "fauteuil vide", "chaise vide",
-        "seulement un plafond", "mur vide"
+        "salle vide", "seulement un plafond", "mur vide", "absent", "parti"
     ]
     if any(m in desc_lower for m in no_person_markers):
         return {
@@ -184,8 +208,8 @@ def match_person(description, memory):
             "details": "Femme détectée, correspond potentiellement à Marion enregistrée dans tes interlocuteurs."
         }
 
-    # Si une personne est vue mais ne correspond à rien de connu
-    if is_male or is_female or "personne" in desc_lower or "visage" in desc_lower:
+    # Si une personne est explicitement vue mais ne correspond à rien de connu
+    if is_male or is_female:
         return {
             "status": "NOUVEAU_VISAGE",
             "matched_name": "Inconnu",
@@ -193,9 +217,9 @@ def match_person(description, memory):
         }
 
     return {
-        "status": "INDETERMINE",
-        "matched_name": "Inconnu",
-        "details": "Présence incertaine ou visage difficilement discernable."
+        "status": "AUCUN_VISAGE",
+        "matched_name": None,
+        "details": "Aucune présence humaine clairement confirmée devant la caméra."
     }
 
 def main():

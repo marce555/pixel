@@ -328,14 +328,13 @@ func isInternalThought(msg string) bool {
 		strings.Contains(lower, "<think>") {
 		return true
 	}
-	// Mode surveillance : ne jamais notifier les écrans noirs ou l'absence de personne sur le smartphone
-	if !strings.Contains(lower, "[surveillance pixel]") {
-		if strings.Contains(lower, "image complètement noire") || strings.Contains(lower, "image noire") ||
-			strings.Contains(lower, "écran noir") || strings.Contains(lower, "sans personne") ||
-			strings.Contains(lower, "ne vois clairement personne") || strings.Contains(lower, "aucune personne") ||
-			strings.Contains(lower, "nouveau visage face à ma caméra que je ne reconnais pas... qui es-tu") {
-			return true
-		}
+	// Mode surveillance : ne jamais notifier les écrans noirs, scènes sombres ou l'absence de personne sur le smartphone
+	if agent.IsEmptyOrBlackVision(msg) ||
+		strings.Contains(lower, "image complètement noire") || strings.Contains(lower, "image noire") ||
+		strings.Contains(lower, "écran noir") || strings.Contains(lower, "sans personne") ||
+		strings.Contains(lower, "ne vois clairement personne") || strings.Contains(lower, "aucune personne") ||
+		strings.Contains(lower, "nouveau visage face à ma caméra que je ne reconnais pas... qui es-tu") {
+		return true
 	}
 	return false
 }

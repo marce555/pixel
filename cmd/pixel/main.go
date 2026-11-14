@@ -78,7 +78,7 @@ func main() {
 		igpuModel = "qwen3.5:9b"
 	}
 	igpuProvider := llm.NewAdaptiveProvider(
-		llmSettings.ActiveMode,
+		"local",
 		llmSettings.CloudAPIKey,
 		llmSettings.CloudBaseURL,
 		llmSettings.CloudModel,
@@ -97,7 +97,7 @@ func main() {
 		npuModel = "qwen3.5:2b"
 	}
 	npuProvider := llm.NewAdaptiveProvider(
-		llmSettings.ActiveMode,
+		"local",
 		llmSettings.CloudAPIKey,
 		llmSettings.CloudBaseURL,
 		llmSettings.CloudModel,

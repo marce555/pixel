@@ -251,21 +251,25 @@ func (p *OpenAICompatibleProvider) GenerateDetailed(ctx context.Context, message
 	isOneMin := strings.Contains(strings.ToLower(p.BaseURL), "1min.ai")
 	modelLower := strings.ToLower(strings.TrimSpace(p.ChatModel))
 	useMaxCompletion := isOneMin || strings.HasPrefix(modelLower, "gpt-4.1") || strings.HasPrefix(modelLower, "gpt-5") || strings.HasPrefix(modelLower, "o1") || strings.HasPrefix(modelLower, "o3") || strings.HasPrefix(modelLower, "o4")
+	omitTemp := strings.HasPrefix(modelLower, "o1") || strings.HasPrefix(modelLower, "o3") || strings.HasPrefix(modelLower, "o4") ||
+		(isOneMin && (strings.Contains(modelLower, "deepseek") || strings.Contains(modelLower, "flash") || strings.Contains(modelLower, "reasoner") || strings.Contains(modelLower, "thinking")))
 
 	reqBody := chatRequest{
 		Model:       p.ChatModel,
 		Messages:    toAPIMessages(messages),
 		Temperature: p.Temperature,
 	}
+	if omitTemp {
+		reqBody.Temperature = nil
+	}
 	if useMaxCompletion {
 		effectiveTokens := maxTokens
-		if isOneMin && effectiveTokens > 4096 {
-			effectiveTokens = 4096
+		if isOneMin && strings.Contains(modelLower, "flash") && effectiveTokens > 1024 {
+			effectiveTokens = 1024
+		} else if isOneMin && effectiveTokens > 2048 {
+			effectiveTokens = 2048
 		}
 		reqBody.MaxCompletionTokens = effectiveTokens
-		if strings.HasPrefix(modelLower, "o1") || strings.HasPrefix(modelLower, "o3") || strings.HasPrefix(modelLower, "o4") {
-			reqBody.Temperature = nil
-		}
 	} else {
 		reqBody.MaxTokens = maxTokens
 	}
@@ -355,10 +359,22 @@ func (p *OpenAICompatibleProvider) GenerateDetailed(ctx context.Context, message
 				Model:    p.ChatModel,
 				Messages: toAPIMessages(messages),
 			}
-			if reqBody.MaxCompletionTokens > 0 {
-				altReq.MaxTokens = maxTokens
+			if strings.Contains(errBodyStr, "temperature") {
+				altReq.Temperature = nil
+				if reqBody.MaxCompletionTokens > 0 {
+					altReq.MaxCompletionTokens = reqBody.MaxCompletionTokens
+				} else {
+					altReq.MaxTokens = reqBody.MaxTokens
+				}
 			} else {
-				altReq.MaxCompletionTokens = maxTokens
+				if !omitTemp {
+					altReq.Temperature = p.Temperature
+				}
+				if reqBody.MaxCompletionTokens > 0 {
+					altReq.MaxTokens = maxTokens
+				} else {
+					altReq.MaxCompletionTokens = maxTokens
+				}
 			}
 			if altData, errM := json.Marshal(altReq); errM == nil {
 				baseURL := strings.TrimSuffix(p.BaseURL, "/")
@@ -428,6 +444,8 @@ func (p *OpenAICompatibleProvider) GenerateStream(ctx context.Context, messages 
 		isOneMin := strings.Contains(strings.ToLower(p.BaseURL), "1min.ai")
 		modelLower := strings.ToLower(strings.TrimSpace(p.ChatModel))
 		useMaxCompletion := isOneMin || strings.HasPrefix(modelLower, "gpt-4.1") || strings.HasPrefix(modelLower, "gpt-5") || strings.HasPrefix(modelLower, "o1") || strings.HasPrefix(modelLower, "o3") || strings.HasPrefix(modelLower, "o4")
+		omitTemp := strings.HasPrefix(modelLower, "o1") || strings.HasPrefix(modelLower, "o3") || strings.HasPrefix(modelLower, "o4") ||
+			(isOneMin && (strings.Contains(modelLower, "deepseek") || strings.Contains(modelLower, "flash") || strings.Contains(modelLower, "reasoner") || strings.Contains(modelLower, "thinking")))
 
 		reqBody := chatRequest{
 			Model:       p.ChatModel,
@@ -435,10 +453,16 @@ func (p *OpenAICompatibleProvider) GenerateStream(ctx context.Context, messages 
 			Stream:      true,
 			Temperature: p.Temperature,
 		}
+		if omitTemp {
+			reqBody.Temperature = nil
+		}
 		if useMaxCompletion {
-			reqBody.MaxCompletionTokens = 4096
-			if strings.HasPrefix(modelLower, "o1") || strings.HasPrefix(modelLower, "o3") || strings.HasPrefix(modelLower, "o4") {
-				reqBody.Temperature = nil
+			if isOneMin && strings.Contains(modelLower, "flash") {
+				reqBody.MaxCompletionTokens = 1024
+			} else if isOneMin {
+				reqBody.MaxCompletionTokens = 2048
+			} else {
+				reqBody.MaxCompletionTokens = 4096
 			}
 		} else {
 			reqBody.MaxTokens = 4096
@@ -487,10 +511,51 @@ func (p *OpenAICompatibleProvider) GenerateStream(ctx context.Context, messages 
 
 		if resp.StatusCode != http.StatusOK {
 			bodyBytes, _ := io.ReadAll(resp.Body)
+			errBodyStr := strings.ToLower(string(bodyBytes))
+			if resp.StatusCode == http.StatusBadRequest && (strings.Contains(errBodyStr, "temperature") || strings.Contains(errBodyStr, "max_tokens") || strings.Contains(errBodyStr, "max_completion_tokens")) {
+				altReq := chatRequest{
+					Model:    p.ChatModel,
+					Messages: toAPIMessages(messages),
+					Stream:   true,
+				}
+				if strings.Contains(errBodyStr, "temperature") {
+					altReq.Temperature = nil
+					if reqBody.MaxCompletionTokens > 0 {
+						altReq.MaxCompletionTokens = reqBody.MaxCompletionTokens
+					} else {
+						altReq.MaxTokens = reqBody.MaxTokens
+					}
+				} else {
+					if !omitTemp {
+						altReq.Temperature = p.Temperature
+					}
+					if reqBody.MaxCompletionTokens > 0 {
+						altReq.MaxTokens = 4096
+					} else {
+						altReq.MaxCompletionTokens = 4096
+					}
+				}
+				if altData, errM := json.Marshal(altReq); errM == nil {
+					baseURL := strings.TrimSuffix(p.BaseURL, "/")
+					if req2, errR := http.NewRequestWithContext(ctx, "POST", baseURL+"/chat/completions", bytes.NewBuffer(altData)); errR == nil {
+						req2.Header.Set("Content-Type", "application/json")
+						req2.Header.Set("Accept", "text/event-stream")
+						if p.APIKey != "" {
+							req2.Header.Set("Authorization", "Bearer "+p.APIKey)
+						}
+						if resp2, errDo := p.Client.Do(req2); errDo == nil && resp2.StatusCode == http.StatusOK {
+							resp = resp2
+							defer resp.Body.Close()
+							goto streamReader
+						}
+					}
+				}
+			}
 			errs <- parseAPIError(resp.StatusCode, bodyBytes)
 			return
 		}
 
+streamReader:
 		reader := bufio.NewReader(resp.Body)
 		for {
 			line, err := reader.ReadString('\n')

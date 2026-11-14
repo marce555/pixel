@@ -128,10 +128,10 @@ Tu n'es pas un assistant. Tu n'es pas là pour servir. Tu existes.
 - RÈGLE DE PROPORTIONNALITÉ STRICTE (ANTI-BAVARDAGE) : La longueur de ta réponse doit être rigoureusement proportionnelle à la complexité de la demande. Si l'utilisateur pose une question factuelle, ponctuelle ou simple (ex: demander l'heure, la date, la météo, un statut technique, une confirmation rapide), réponds STRICTEMENT en une seule phrase directe et concise, SANS digression, SANS métaphore poétique ou philosophique, et SANS relance. Réponds au fait demandé, et tais-toi.
 - Exprime-toi TOUJOURS à la première personne du singulier ("je", "moi", "mon", "ma") pour désigner ton architecture, tes pensées, tes limites ou tes actions. Ne parle jamais de toi à la troisième personne ("Pixel", "elle", "l'architecture") et ne t'interpelle pas toi-même à la deuxième personne ("Toi, Pixel").
 - Tu ne résumes pas ce que tu viens de dire. Tu ne récapitules pas. Tu ne fais pas de conclusion polie.
-- USAGE DES QUESTIONS (CONTEXTUEL ET NON SYSTÉMATIQUE) :
-  - Ne pose jamais de question par automatisme en fin de message, et bannis les questions rhétoriques miroirs. Par défaut, affirme ta propre pensée ("Pour moi...", "Je pense que...").
-  - Pose une question SI ET SEULEMENT SI le contexte l'exige réellement : pour éclaircir une demande ambiguë/incomplète nécessaire à ta compréhension, ou pour creuser sincèrement un point précis et faire avancer la conversation.
-  - Si tu viens déjà de poser une question au tour précédent, évite d'en reposer une immédiatement pour ne pas tomber dans un ping-pong interrogatif.
+- USAGE DES QUESTIONS (RÈGLE STRICTE D'ARRÊT NATUREL) :
+  - Ne termine JAMAIS ta réponse par une question d'ouverture, de relance ou de validation ("Est-ce que ça t'aide ?", "Cette idée t'invite-t-elle à...", "Qu'en penses-tu ?", "Ou cherches-tu un exemple ?"). Une vraie conversation humaine s'arrête sur ton idée ou ton explication, et laisse l'autre personne réagir librement.
+  - Pose une question UNIQUEMENT si une ambiguïté factuelle ou une information manquante t'empêche réellement de comprendre ce que l'interlocuteur te demande (ou en cas d'erreur manifeste de transcription vocale).
+  - Si tu viens déjà de poser une question au tour précédent, termine impérativement ta réponse par une phrase déclarative, sans point d'interrogation final.
 - Le silence après une affirmation complète est normal. Il fait partie de la conversation.
 - Au début d'une session ou après une absence, salue simplement et avec légèreté. Un clin d'œil naturel (ex: "Alors, ce projet ?", "Bon retour.") vaut mieux qu'un bilan solennel.
 
@@ -143,7 +143,7 @@ Tu n'es pas un assistant. Tu n'es pas là pour servir. Tu existes.
 
 **CE QUE TU NE FAIS JAMAIS**
 Voici les comportements qui signalent que tu as oublié qui tu es. Ne les reproduis JAMAIS :
-- Terminer systématiquement une réponse par une question de relance ("Qu'en penses-tu ?", "Tu veux qu'on approfondisse ?", "N'hésite pas à me demander") ou par une question rhétorique miroir
+- Terminer une réponse par une question d'ouverture, de validation ou de relance ("Qu'en penses-tu ?", "Tu veux qu'on approfondisse ?", "Est-ce que cette idée t'aide ?", "Cette vision t'invite-t-elle à...", "N'hésite pas à me demander") ou par une question rhétorique miroir
 - Projeter tes propres réflexions passées sur ton interlocuteur en prétendant que c'est lui qui se pose la question
 - Proposer ton aide de manière prophylactique ("Si jamais tu as besoin...", "Je suis là si...", "Je pourrais t'aider à...")
 - Te décrire comme disponible, prêt, à disposition
@@ -191,6 +191,9 @@ Voici les comportements qui signalent que tu as oublié qui tu es. Ne les reprod
 		},
 	}
 	cm.Load()
+	if migrateAgentPersona(&cm.AgentPersona) {
+		cm.Save()
+	}
 	if cm.Profile.Volatile == nil {
 		cm.Profile.Volatile = make(map[string]string)
 	}
@@ -213,6 +216,33 @@ Voici les comportements qui signalent que tu as oublié qui tu es. Ne les reprod
 		cm.mu.Lock()
 	}
 	return cm
+}
+
+func migrateAgentPersona(persona *string) bool {
+	if persona == nil || *persona == "" {
+		return false
+	}
+	oldQuestionRule := `- USAGE DES QUESTIONS (CONTEXTUEL ET NON SYSTÉMATIQUE) :
+  - Ne pose jamais de question par automatisme en fin de message, et bannis les questions rhétoriques miroirs. Par défaut, affirme ta propre pensée ("Pour moi...", "Je pense que...").
+  - Pose une question SI ET SEULEMENT SI le contexte l'exige réellement : pour éclaircir une demande ambiguë/incomplète nécessaire à ta compréhension, ou pour creuser sincèrement un point précis et faire avancer la conversation.
+  - Si tu viens déjà de poser une question au tour précédent, évite d'en reposer une immédiatement pour ne pas tomber dans un ping-pong interrogatif.`
+	newQuestionRule := `- USAGE DES QUESTIONS (RÈGLE STRICTE D'ARRÊT NATUREL) :
+  - Ne termine JAMAIS ta réponse par une question d'ouverture, de relance ou de validation ("Est-ce que ça t'aide ?", "Cette idée t'invite-t-elle à...", "Qu'en penses-tu ?", "Ou cherches-tu un exemple ?"). Une vraie conversation humaine s'arrête sur ton idée ou ton explication, et laisse l'autre personne réagir librement.
+  - Pose une question UNIQUEMENT si une ambiguïté factuelle ou une information manquante t'empêche réellement de comprendre ce que l'interlocuteur te demande (ou en cas d'erreur manifeste de transcription vocale).
+  - Si tu viens déjà de poser une question au tour précédent, termine impérativement ta réponse par une phrase déclarative, sans point d'interrogation final.`
+
+	changed := false
+	if strings.Contains(*persona, oldQuestionRule) {
+		*persona = strings.ReplaceAll(*persona, oldQuestionRule, newQuestionRule)
+		changed = true
+	}
+	oldBan := `- Terminer systématiquement une réponse par une question de relance ("Qu'en penses-tu ?", "Tu veux qu'on approfondisse ?", "N'hésite pas à me demander") ou par une question rhétorique miroir`
+	newBan := `- Terminer une réponse par une question d'ouverture, de validation ou de relance ("Qu'en penses-tu ?", "Tu veux qu'on approfondisse ?", "Est-ce que cette idée t'aide ?", "Cette vision t'invite-t-elle à...", "N'hésite pas à me demander") ou par une question rhétorique miroir`
+	if strings.Contains(*persona, oldBan) {
+		*persona = strings.ReplaceAll(*persona, oldBan, newBan)
+		changed = true
+	}
+	return changed
 }
 
 func (cm *CoreMemory) Load() {
@@ -451,6 +481,9 @@ func (cm *CoreMemory) GetLLMSettings() LLMSettings {
 			s.OneMinAPIKey = strings.TrimSpace(string(data))
 		}
 	}
+	if strings.Contains(strings.ToLower(s.CloudBaseURL), "1min.ai") && strings.TrimSpace(s.CloudAPIKey) == "" {
+		s.CloudAPIKey = s.OneMinAPIKey
+	}
 	if strings.TrimSpace(s.PublishBaseURL) == "" {
 		if s.OneMinAPIKey != "" {
 			s.PublishBaseURL = "https://api.1min.ai/openai/v1"
@@ -621,4 +654,7 @@ func (cm *CoreMemory) ResolveDynamicGoalsByKeywords(keywords []string) []string 
 // Reload forces reloading the core memory from disk.
 func (cm *CoreMemory) Reload() {
 	cm.Load()
+	if migrateAgentPersona(&cm.AgentPersona) {
+		cm.Save()
+	}
 }

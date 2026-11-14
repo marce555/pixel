@@ -65,15 +65,17 @@ func NewVoiceManager() (*VoiceManager, error) {
 	return vm, nil
 }
 
-// ConvertWebMToWav décode le fichier WebM audio du navigateur en WAV 16kHz mono PCM compatible Whisper.
+const whisperDomainPrompt = "Pixel, KDJ, remix, Club House."
+
+// ConvertWebMToWav décode le fichier audio (WebM, M4A ou WAV) en WAV 16kHz mono PCM compatible Whisper.
 func (vm *VoiceManager) ConvertWebMToWav(webmPath, wavPath string) error {
-	// Commande ffmpeg pour transcoder avec traitement DSP voix haut de gamme :
-	// - aformat=channel_layouts=mono : downmix natif stéréo→mono (inclut les deux canaux)
-	// - highpass=f=75 : coupe les bruits sourds et ronronnements sans tronquer la fondamentale de la voix (85-180Hz)
-	// - lowpass=f=9500 : préserve le timbre vocal naturel et les sibilantes françaises
-	// - dynaudnorm=f=150:g=15 : normalisation dynamique par fenêtres de 150ms pour niveau optimal Whisper
+	// Traitement DSP voix optimisé pour environnement mobile / habitacle voiture :
+	// - aformat=channel_layouts=mono : downmix natif stéréo→mono
+	// - highpass=f=85 : coupe les bruits sourds (moteur/roulement voiture < 85Hz) sans toucher la voix
+	// - lowpass=f=7800 : coupe le souffle haute fréquence tout en préservant les sibilantes françaises
+	// - afftdn=nf=-25 : débruitage spectral FFT léger sans pompage de gain (évite d'amplifier le bruit de fond)
 	cmd := exec.Command("ffmpeg", "-y", "-i", webmPath, "-ar", "16000", "-af",
-		"aformat=channel_layouts=mono,highpass=f=75,lowpass=f=9500,dynaudnorm=f=150:g=15",
+		"aformat=channel_layouts=mono,highpass=f=85,lowpass=f=7800,afftdn=nf=-25",
 		"-c:a", "pcm_s16le", wavPath)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -120,15 +122,20 @@ func (vm *VoiceManager) EnsureWhisperServer(ctx context.Context) error {
 	args := []string{
 		"-m", modelPath,
 		"-l", "fr",
-		"-t", "4",
+		"-t", "8",
+		"-fa",
 		"--suppress-nst",
-		"--beam-size", "5",
-		"--best-of", "5",
+		"--no-speech-thold", "0.62",
+		"--entropy-thold", "2.4",
+		"--beam-size", "2",
+		"--best-of", "2",
+		"--prompt", whisperDomainPrompt,
+		"--carry-initial-prompt",
 		"--port", "8089",
 	}
 
 	if _, err := os.Stat(vadModelPath); err == nil {
-		args = append(args, "--vad", "--vad-model", vadModelPath, "--vad-threshold", "0.5")
+		args = append(args, "--vad", "--vad-model", vadModelPath, "--vad-threshold", "0.52")
 	}
 
 	cmd := exec.Command(serverPath, args...)
@@ -140,7 +147,7 @@ func (vm *VoiceManager) EnsureWhisperServer(ctx context.Context) error {
 	}
 
 	vm.whisperServerCmd = cmd
-	fmt.Println("[VoiceManager] Serveur GPU persistant Whisper lancé sur http://127.0.0.1:8089")
+	fmt.Println("[VoiceManager] Serveur GPU persistant Whisper (RTX Flash-Attn, beam=2) lancé sur http://127.0.0.1:8089")
 
 	time.Sleep(1 * time.Second)
 	return nil
@@ -162,6 +169,9 @@ func (vm *VoiceManager) transcribeViaServer(ctx context.Context, wavPath string)
 	if err != nil {
 		return "", err
 	}
+	_ = writer.WriteField("temperature", "0.0")
+	_ = writer.WriteField("prompt", whisperDomainPrompt)
+	_ = writer.WriteField("response_format", "json")
 	writer.Close()
 
 	req, err := http.NewRequestWithContext(ctx, "POST", vm.asrEndpoint, &reqBody)
@@ -192,6 +202,24 @@ func (vm *VoiceManager) transcribeViaServer(ctx context.Context, wavPath string)
 	return result.Text, nil
 }
 
+var (
+	reWakeWordPhonetic = regexp.MustCompile(`(?i)\b(excell|excel|exel|fixel(?:\s*2\.0)?|pixeler|pixelle|picsel|picel|piksèl|piksel|bixel|bicelle|bicel)\b`)
+	reKDJPhonetic      = regexp.MustCompile(`(?i)\b(kadidj[éee]|kadij[éee]|k\.?\s*didier|k\.?\s*d\.?\s*g\.?|kdg|k[\-\s]+d[\-\s]+j)\b`)
+	reLanceMoiPhonetic = regexp.MustCompile(`(?i)\b(l'insomnoir|l'insan|l'ensemble|lancement\s+à|l'enceinte)\b`)
+	reNextPhonetic     = regexp.MustCompile(`(?i)\b(passez?\s+(?:à\s+)?la\s+suite(?:\s+en)?|l[aà]\s+c'est\s+le\s+suivant)\b`)
+)
+
+func normalizeWhisperTranscript(text string) string {
+	if text == "" {
+		return ""
+	}
+	text = reWakeWordPhonetic.ReplaceAllString(text, "Pixel")
+	text = reKDJPhonetic.ReplaceAllString(text, "KDJ")
+	text = reLanceMoiPhonetic.ReplaceAllString(text, "lance-moi")
+	text = reNextPhonetic.ReplaceAllString(text, "passe à la suivante")
+	return strings.TrimSpace(text)
+}
+
 func (vm *VoiceManager) cleanWhisperText(text string) string {
 	text = strings.TrimSpace(text)
 	text = strings.ReplaceAll(text, "[BLANK_AUDIO]", "")
@@ -217,6 +245,7 @@ func (vm *VoiceManager) cleanWhisperText(text string) string {
 		"n'oubliez pas de liker",
 		"conversation en français avec pixel",
 		"une assistante ia",
+		"pixel, kdj, remix, club house",
 	}
 	textLower := strings.ToLower(text)
 	for _, pattern := range hallucinationPatterns {
@@ -225,7 +254,7 @@ func (vm *VoiceManager) cleanWhisperText(text string) string {
 			return ""
 		}
 	}
-	return text
+	return normalizeWhisperTranscript(text)
 }
 
 // TranscribeAudio exécute la transcription via whisper-server GPU ou fallback whisper-cli.

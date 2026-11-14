@@ -2,8 +2,13 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 type mockDetailedProvider struct {
@@ -85,5 +90,51 @@ func TestGenerateWithContinuationLength(t *testing.T) {
 	}
 	if mock.callIndex != 2 {
 		t.Errorf("expected exactly 2 calls, got %d", mock.callIndex)
+	}
+}
+
+func TestAdaptiveProviderCreateEmbeddingSkips1MinAIAndQuotaCooldown(t *testing.T) {
+	cloudCalled := false
+	cloudServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cloudCalled = true
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer cloudServer.Close()
+
+	localCalled := false
+	localServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		localCalled = true
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{
+				{"embedding": []float32{0.5, 0.25}},
+			},
+		})
+	}))
+	defer localServer.Close()
+
+	// Use 1min.ai cloud BaseURL marker via NewAdaptiveProvider, then override localProvider BaseURL to httptest server.
+	p := NewAdaptiveProvider("cloud", "dummy-key", "https://api.1min.ai/openai/v1", "gpt-4.1-mini", localServer.URL, "qwen3.5:4b")
+	p.cloudProvider.BaseURL = cloudServer.URL + "/1min.ai/v1"
+
+	emb, err := p.CreateEmbedding(context.Background(), "bonjour")
+	if err != nil {
+		t.Fatalf("CreateEmbedding failed: %v", err)
+	}
+	if cloudCalled {
+		t.Errorf("expected CreateEmbedding to skip 1min.ai cloud endpoint, but cloud server was called")
+	}
+	if !localCalled {
+		t.Errorf("expected local embedding server to be called")
+	}
+	if len(emb) != 2 || emb[0] != 0.5 {
+		t.Errorf("unexpected embedding result: %v", emb)
+	}
+
+	p.handleCloudError(errors.New("API error 429: Insufficient credits"))
+	p.mu.RLock()
+	remaining := time.Until(p.cloudCooldownUntil)
+	p.mu.RUnlock()
+	if remaining < 10*time.Minute {
+		t.Errorf("expected >=10m cooldown for insufficient credits, got %v", remaining)
 	}
 }

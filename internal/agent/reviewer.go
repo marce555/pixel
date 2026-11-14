@@ -189,7 +189,7 @@ func parseReviewOutput(output string) (title, keywords, content, notes string) {
 		} else if contMatch != nil && contMatch[0] > titleStart {
 			titleEnd = contMatch[0]
 		}
-		title = strings.TrimSpace(output[titleStart:titleEnd])
+		title = scheduler.CleanExtractedField(output[titleStart:titleEnd])
 	}
 
 	// 3. Extract keywords
@@ -199,7 +199,7 @@ func parseReviewOutput(output string) (title, keywords, content, notes string) {
 		if contMatch != nil && contMatch[0] > keysStart {
 			keysEnd = contMatch[0]
 		}
-		keywords = strings.TrimSpace(output[keysStart:keysEnd])
+		keywords = scheduler.CleanExtractedField(output[keysStart:keysEnd])
 	}
 
 	// 4. Extract content

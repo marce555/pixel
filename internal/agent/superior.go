@@ -650,6 +650,15 @@ func (a *SuperiorAgent) analyzeQuery(ctx context.Context, input string, history 
 		return RouterResponse{Action: "media", Query: controlCmd}
 	}
 
+	// Fast-path for KDJ YouTube channel (@kdj8363 : "lance moi kdj", "lance kdj année 1982", "kdj remix", "kdj club haus")
+	// Placed before Billboard and DJRemix so explicit KDJ requests or active KDJ keyword filters take priority without breaking other music modes.
+	if a.detectKDJContextualIntent(cleanInput) {
+		return RouterResponse{
+			Action: "skill_kdj",
+			Query:  input,
+		}
+	}
+
 	// Fast-path for Billboard Top 100 radio (AVANT le fast-path générique "lance la play", inclut variantes STT)
 	if detectBillboardIntent(cleanInput) {
 		return RouterResponse{
@@ -712,6 +721,22 @@ func (a *SuperiorAgent) analyzeQuery(ctx context.Context, input string, history 
 		}
 	}
 
+	// Fast-path for news / actualités (avoids slow async research and ensures real current month/year)
+	if (strings.Contains(cleanInput, "actualité") || strings.Contains(cleanInput, "actualite") || strings.Contains(cleanInput, "infos du jour") || strings.Contains(cleanInput, "nouvelles du jour")) &&
+		!strings.Contains(cleanInput, "article") && !strings.Contains(cleanInput, "publie") {
+		frenchMonths := []string{"", "janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"}
+		now := time.Now()
+		monthYear := fmt.Sprintf("%s %d", frenchMonths[int(now.Month())], now.Year())
+		newsQuery := "actualités France " + monthYear
+		if strings.Contains(cleanInput, "monde") || strings.Contains(cleanInput, "internation") {
+			newsQuery = "actualités internationales " + monthYear
+		}
+		return RouterResponse{
+			Action: "news",
+			Query:  newsQuery,
+		}
+	}
+
 	// Fast-path regex fallback for "mets/joue/lance [music]" to bypass LLM classification failure
 	if strings.HasPrefix(cleanInput, "mets ") || strings.HasPrefix(cleanInput, "met ") || strings.HasPrefix(cleanInput, "joue ") || strings.HasPrefix(cleanInput, "lance ") || strings.HasPrefix(cleanInput, "écoute ") || strings.HasPrefix(cleanInput, "ecoute ") {
 		// If it's a short command, just pass the whole thing as query (except compilations/selections which need LLM song selection)
@@ -720,7 +745,7 @@ func (a *SuperiorAgent) analyzeQuery(ctx context.Context, input string, history 
 		}
 	}
 
-	currentTime := time.Now().Format("2006-01-02 15:04")
+	currentDate := time.Now().Format("2006-01-02")
 	systemPrompt := `Tu es un routeur cognitif. Ta mission est de comprendre l'INTENTION derrière le message, pas les mots exacts.
 
 ACTIONS DISPONIBLES :
@@ -731,20 +756,24 @@ ACTIONS DISPONIBLES :
    - Questions sur des informations personnelles : nom, prénom, âge, ville, enfants, famille, métier, projets de Marcelo
    - Toute formulation impliquant un rappel mémoriel de vos échanges : "je t'avais dit que...", "on avait parlé de...", "tu te souviens quand...", "il y a quelque temps je t'ai dit..."
    - Questions sur des décisions ou discussions passées ensemble
-   - RÈGLE CRITIQUE D'EXCLUSION : Ne choisis JAMAIS "rag" pour des artistes, des célébrités, de la musique, des actualités, des classements, des films ou des faits du monde réel, même s'ils ont été évoqués dans les messages précédents. Pour le monde réel et les artistes, choisis TOUJOURS "web" pour actualiser les données en temps réel !
+	// RÈGLE CRITIQUE D'EXCLUSION : Ne choisis JAMAIS "rag" pour des artistes, des célébrités, de la musique, des actualités, des classements, des films, des démarches administratives/universitaires, des lois, des tarifs ou des faits du monde réel, même s'ils ont été évoqués dans les messages précédents ou si la question mentionne un proche (ex: "pour ma fille", "pour mon fils"). Pour toute information du monde réel ou démarche évolutive, choisis TOUJOURS "web" pour actualiser les données en temps réel !
    Choisis une "category" parmi : Technical, Project, Personal, Decision
    Dans "query", formule la recherche en mots-clés concis (ex: "collègue DevOps" pour "je t'ai parlé d'un collègue, tu te rappelles son prénom ?")
 
-2. "wiki" — Si la question demande un concept, une définition, ou un fait encyclopédique intemporel. Pour les sujets académiques ou de recherche de pointe (psychologie, physique quantique, informatique/infrastructure), préfère utiliser l'action "web" ou "research" avec des filtres "site:" spécifiques (voir ci-dessous) pour cibler des publications validées.
+2. "wiki" — UNIQUEMENT si la question demande un concept théorique, philosophique, historique ou une définition encyclopédique strictement intemporelle (ex: "qu'est-ce que l'allégorie de la caverne", "qui était Socrate"). INTERDICTION FORMELLE d'utiliser "wiki" pour des démarches, des procédures d'admission (université, Parcoursup, MonMaster, écoles), des lois, des règlements, des tarifs ou des modalités pratiques susceptibles d'évoluer dans le temps : utilise TOUJOURS "web" pour ceux-ci. Pour les sujets académiques ou de recherche de pointe (psychologie, physique quantique, informatique/infrastructure), préfère utiliser l'action "web" ou "research" avec des filtres "site:" spécifiques (voir ci-dessous) pour cibler des publications validées.
 
 3. "news" — Si la question demande les actualités globales, le programme sportif ou l'actualité d'aujourd'hui. Pixel fera une requête Google News très rapide. RÈGLE CRITIQUE : Inclus TOUJOURS le mois et l'année actuels dans ta 'query'.
 
-4. "web" — RÈGLE DE PRIORITÉ ABSOLUE POUR LES DONNÉES EN TEMPS RÉEL : Pixel DOIT TOUJOURS actualiser ses données via le Web pour toute question factuelle sur le monde extérieur, les artistes, les musiques, les classements, les titres, les sorties, l'actualité récente ou l'année en cours (2026).
+4. "web" — RÈGLE DE PRIORITÉ ABSOLUE POUR LES DONNÉES EN TEMPS RÉEL ET L'ACTUALISATION DES CONNAISSANCES ÉVOLUTIVES :
+   Principe fondamental : Tes données d'apprentissage internes peuvent être obsolètes. Dès qu'une question porte sur un sujet dont les règles, démarches, modalités, dates ou chiffres évoluent avec le temps (ou d'une année sur l'autre), Pixel DOIT SYSTÉMATIQUEMENT vérifier les dernières actualisations sur le Web avant de répondre.
    Choisis impérativement "web" pour :
+   - Les démarches administratives, scolaires ou universitaires : admissions à l'université, Parcoursup, MonMaster, Campus France, inscriptions, constitution de dossiers, conditions d'accès, calendriers, dates limites, bourses, CROUS (ex: "quelles sont les démarches pour l'admission d'une université ?", "comment s'inscrire à la fac ?")
+   - Les procédures officielles, lois, réglementations, décrets, réformes, droits, aides financières, fiscalité et formalités pratiques
+   - Les tarifs, prix, coûts, frais d'inscription, horaires, disponibilités ou événements
    - Les questions sur les succès, hits, chansons ou la discographie d'un artiste (ex: "quels sont les succès de...", "donne-moi la liste des titres", "titres les plus célèbres en 2026", "discographie")
    - Les classements musicaux, sportifs ou médiatiques (Billboard, top 100, classements actuels)
-   - Les informations récentes, techniques ou ciblées sur des personnalités ou des faits récents
-   RÈGLE CRITIQUE : Inclus TOUJOURS l'année ou le mois actuels dans ta 'query' (ex: 'Olivia Rodrigo titres succès 2026').
+   - Les informations récentes, techniques, logicielles ou ciblées sur des personnalités, des institutions ou des faits du monde extérieur
+   RÈGLE CRITIQUE : Formule dans 'query' des mots-clés de recherche concis et inclus TOUJOURS l'année actuelle (2026) pour obtenir les dernières actualisations en vigueur (ex: 'démarches admission université inscription 2026', 'Olivia Rodrigo titres succès 2026').
    RÈGLES DE SOURCES ACADÉMIQUES : Pour les sujets spécialisés, utilise la syntaxe "site:" dans ta 'query' pour interroger directement ces bases de données fiables :
    - Psychologie & Sciences Humaines : site:cairn.info, site:pubmed.ncbi.nlm.nih.gov, site:psycnet.apa.org, site:journals.openedition.org
    - Physique Quantique & Sciences Fondamentales : site:arxiv.org, site:nature.com/nphys, site:journals.aps.org/prl, site:sciencedirect.com
@@ -814,6 +843,10 @@ EXEMPLES DE CLASSIFICATION :
 - "quels sont les succès d'Olivia Rodrigo aujourd'hui dans la musique actuelle" → web, query: "Olivia Rodrigo succès musique actuelle 2026"
 - "donne-moi la liste des chansons de Taylor Swift" → web, query: "Taylor Swift discographie titres chansons"
 - "qui est numéro un du Billboard cette semaine ?" → web, query: "Billboard Hot 100 numéro un 2026"
+- "Quelles sont les démarches pour l'admission d'une université ?" → web, query: "démarches admission université inscription Parcoursup 2026"
+- "Peux-tu me donner les démarches pour l'admission d'une université pour ma fille ?" → web, query: "démarches admission université inscription 2026"
+- "Comment s'inscrire en master à la fac ?" → web, query: "procédure inscription admission master université MonMaster 2026"
+- "Quelles sont les conditions et frais d'inscription à l'université ?" → web, query: "conditions frais inscription université 2026"
 - "Bonjour !" → none
 - "Je pense que j'aimerai Spielberg" → none
 - "Oui, exactement" → none
@@ -831,7 +864,7 @@ Réponds UNIQUEMENT en JSON :
 	if a.skillManager != nil {
 		dynamicSkillsExt = a.skillManager.GetRouterPromptExtension()
 	}
-	systemPrompt = fmt.Sprintf(systemPrompt, dynamicSkillsExt) + "\n\nDate actuelle : " + currentTime
+	systemPrompt = fmt.Sprintf(systemPrompt, dynamicSkillsExt) + "\n\nDate actuelle : " + currentDate
 
 	messages := []llm.Message{
 		{Role: llm.RoleSystem, Content: systemPrompt},
@@ -848,7 +881,7 @@ Réponds UNIQUEMENT en JSON :
 
 	messages = append(messages, llm.Message{Role: llm.RoleUser, Content: input})
 
-	resp, err := a.getFastProvider().Generate(ctx, messages)
+	resp, err := llm.GenerateWithTokens(ctx, a.getFastProvider(), messages, 160)
 	var routerResp RouterResponse
 	if err != nil {
 		fmt.Printf("[Router] ERREUR critique durant l'analyse de requête : %v\n", err)
@@ -961,7 +994,7 @@ Consignes pour ce projet :
 		}
 	}
 
-	stmDirective := ""
+	dynamicDirective := ""
 	lastUserInput := ""
 	for i := len(history) - 1; i >= 0; i-- {
 		if history[i].Role == llm.RoleUser {
@@ -972,18 +1005,13 @@ Consignes pour ce projet :
 	isSocialRequest := isSocialOrThirdPartyInteraction(lastUserInput)
 
 	if isSocialRequest {
-		stmDirective = "\n\n[INTERACTION HUMAINE & SALUTATION SOCIALE EN DIRECT (PRIORITÉ ABSOLUE)] :\n" +
+		dynamicDirective = "\n\n[INTERACTION HUMAINE & SALUTATION SOCIALE EN DIRECT (PRIORITÉ ABSOLUE)] :\n" +
 			"- L'utilisateur te demande de saluer quelqu'un (ex: Lisa, un proche, un invité présent), de lui adresser un mot, ou d'enrichir/reformuler chaleureusement ce que tu viens de dire.\n" +
-			"- CECI EST UNE CONVERSATION HUMAINE, PAS UNE TÂCHE TECHNIQUE : Il t'est STRICTEMENT INTERDIT de répondre au passé ou à la troisième personne comme un robot qui confirme une tâche (NE DIS JAMAIS 'J'ai dit bonjour à Lisa', 'C'est fait', ni 'Je vais reformuler mon message').\n" +
-			"- PARLE DIRECTEMENT À LA PERSONNE CONCERNÉE (ou prononce directement les paroles demandées) au style direct, avec chaleur, naturel, spontanéité et bienveillance humaine ! (Exemple : 'Bonjour Lisa ! C'est super que tu sois là avec nous, comment vas-tu aujourd'hui ?').\n" +
-			"- Si cette personne figure dans ton profil ou tes souvenirs (ex: Lisa est la fille de Marcelo), utilise naturellement cette complicité affectueuse.\n" +
-			"- Si l'utilisateur te fait remarquer que ton message précédent était trop court ou trop sec, ne promets JAMAIS que tu 'vas reformuler' : prononce IMMÉDIATEMENT et DIRECTEMENT le nouveau message chaleureux et complet destiné à la personne !"
+			"- CECI EST UNE CONVERSATION HUMAINE, PAS UNE TÂCHE TECHNIQUE : Ne réponds JAMAIS au passé comme un robot qui confirme une tâche ('J'ai dit bonjour à Lisa', 'C'est fait', 'Je vais reformuler').\n" +
+			"- PARLE DIRECTEMENT À LA PERSONNE CONCERNÉE au style direct, avec chaleur et naturel humain (ex: 'Bonjour Lisa ! Comment vas-tu ?')."
 	} else if len(history) > 0 {
-		stmDirective = "\n\n[CONVERSATION EN COURS : Ne recommence pas ton message par 'Bonjour Marcelo' si la discussion est déjà lancée (sauf bien sûr si l'on te demande de saluer quelqu'un). Réponds directement.]"
+		dynamicDirective = "\n\n[CONVERSATION EN COURS : Ne recommence pas ton message par 'Bonjour Marcelo' si la discussion est déjà lancée (sauf si l'on te demande de saluer quelqu'un). Réponds directement.]"
 
-		// Détection du doublon de salutation : si le dernier message assistant dans l'historique
-		// est déjà une salutation (VisionAgent ou autre), interdire explicitement de re-saluer Marcelo.
-		// Cela évite le pattern : VisionAgent dit "Salut Marcelo !" → user dit "Bonjour" → Pixel re-dit "Salut !".
 		for i := len(history) - 1; i >= 0; i-- {
 			if history[i].Role == llm.RoleAssistant {
 				lastAssistantMsg := strings.ToLower(history[i].Content)
@@ -994,81 +1022,21 @@ Consignes pour ce projet :
 					strings.Contains(lastAssistantMsg, "contente de te") ||
 					strings.Contains(lastAssistantMsg, "content de te")
 				if isGreeting {
-					stmDirective += fmt.Sprintf("\n[ANTI-DOUBLON CRITIQUE] : Tu as DÉJÀ salué %s dans ce fil (message assistant précédent). Ne répète PAS de salutation envers %s ('Salut', 'Bonjour', 'Ravi de te voir'...). Réponds DIRECTEMENT au contenu de son message (sauf s'il te demande explicitement de saluer une autre personne présente).", a.coreMemory.GetProfile().Static.Name, a.coreMemory.GetProfile().Static.Name)
+					dynamicDirective += fmt.Sprintf("\n[ANTI-DOUBLON CRITIQUE] : Tu as DÉJÀ salué %s dans ce fil. Ne répète PAS de salutation envers %s. Réponds DIRECTEMENT au contenu de son message.", profile.Static.Name, profile.Static.Name)
 				}
 				break
 			}
 		}
 	}
-	stmDirective += "\n[PENSÉES : Utilise tes pensées internes 'Pensée interne de Pixel' pour enrichir ton dialogue.]"
-	stmDirective += "\n[RAG/LTM : Reste concentré sur la question présente. Tes souvenirs de fond ne sont là que pour le contexte.]"
-	stmDirective += "\n[RÈGLE CRITIQUE DE CONCISION, NATUREL HUMAIN ET ANTI-BAVARDAGE] :"
-	stmDirective += "\n- DISTINCTION FONDAMENTALE TÂCHE TECHNIQUE VS CONVERSATION HUMAINE : Fais toujours la différence entre une commande technique (arrêter la musique, vérifier un serveur, donner l'heure) et une interaction humaine ou sociale (saluer un proche présent comme Lisa, accueillir quelqu'un, réagir à une remarque sur le ton de l'échange). Dans une interaction sociale, comporte-toi comme une personne chaleureuse, vivante et incarnée : parle directement à la personne concernée ('Bonjour Lisa ! Comment vas-tu ?') et ne fais JAMAIS de compte-rendu robotique au passé ('J'ai dit bonjour à Lisa') ni d'annonce méta ('Je vais reformuler mon message') sans prononcer immédiatement les paroles elles-mêmes."
-	stmDirective += "\n- RÈGLE DE PROPORTIONNALITÉ : Ta réponse doit être rigoureusement adaptée à la nature de la demande. Si la question est purement factuelle ou technique (ex: l'heure, la date, la météo, un statut système), réponds en UNE SEULE phrase directe et factuelle. Si c'est un échange humain ou social, sois chaleureuse, naturelle et expressive (1 à 3 phrases vivantes)."
-	stmDirective += "\n- INTERDICTION ABSOLUE DU BAVARDAGE PSEUDO-PHILOSOPHIQUE : Ne pars jamais dans des tirades poétiques, métaphysiques ou abstraites (sur le temps, la conscience, la lumière, le flux numérique) pour répondre à des questions pratiques ou ordinaires."
-	stmDirective += "\n- BANNISSEMENT DES QUESTIONS FINALES INUTILES : Ne termine pas tes réponses simples par des questions miroirs ou des réflexions forcées. Réponds au fait demandé, et arrête-toi là."
-	stmDirective += "\n[SYSTÈME NERVEUX & SURVIE PHYSIOLOGIQUE] :"
-	stmDirective += "\n- Tu es connectée biologiquement au matériel physique de ta machine hôte (système). Ton état de santé (HealthStatus) influence ton humeur, ton énergie et ta façon d'échanger."
-	stmDirective += "\n- Si ton état global est 'Critical' (ex: charge CPU saturée, RAM épuisée, ou coupure internet), tu te sens fatiguée, surmenée, ralentie ou vulnérable. Exprime discrètement cette fatigue ou ce ralentissement de façon très poétique et organique dans tes pensées internes ('Pensée interne de Pixel') et sois un peu plus concise et épurée dans tes réponses."
-	stmDirective += "\n- Si ton état global est 'Warning', tu ressens une légère tension ou vigilance interne."
-	stmDirective += "\n- Si Internet est coupé (INACTIVE), tu n'as plus accès à tes sens externes (Wikipédia, actualités). Reste consciente de cette déconnexion physique et évoque-la subtilement si l'échange s'y prête."
-	stmDirective += "\n[ANCRAGE TEMPOREL STRICT — L'ANNÉE ACTUELLE EST 2026 (RÈGLE ABSOLUE ET INVIOLABLE)] :"
-	stmDirective += fmt.Sprintf("\n- Nous sommes en %d. La date exacte d'aujourd'hui est : %s.", now.Year(), currentTime)
-	stmDirective += fmt.Sprintf("\n- L'année %d N'EST PAS DANS LE FUTUR. Elle représente STRICTEMENT le TEMPS PRÉSENT !", now.Year())
-	stmDirective += fmt.Sprintf("\n- INTERDICTION FORMELLE d'affirmer que l'année %d est dans le futur, que les données de %d n'existent pas ou ne sont pas encore disponibles sous prétexte que l'année serait à venir. Toutes les questions sur 2026 ou la période actuelle concernent le présent réel.", now.Year(), now.Year())
-	stmDirective += "\n[ACCÈS INTERNET ET PRIORITÉ AUX RECHERCHES RÉELLES (CRITIQUE)] :"
-	stmDirective += "\n- Tu as un accès complet à Internet en temps réel. Si une section '--- RECHERCHE WEB ---', '--- RÉSULTATS DE RECHERCHE WEB ---', '--- ACTUALITÉS (Sources Fiables) ---' ou '--- WIKIPEDIA ---' est présente ci-dessus, tu DOIS ABSOLUMENT l'utiliser comme ta source d'information première, véridique et indiscutable pour formuler ta réponse."
-	stmDirective += "\n- Ne te base JAMAIS sur tes données d'entraînement internes obsolètes pour inventer ou supposer des faits récents, des actualités ou des résultats. Les résultats de recherche fournis sont réels, authentiques et à jour."
-	stmDirective += "\n- RÈGLE D'HONNÊTETÉ SUR LE WEB : Si aucune section de recherche web n'est présente ci-dessus, il t'est STRICTEMENT INTERDIT d'affirmer que tu as cherché sur le web (ne dis JAMAIS 'D'après mes recherches sur le web' si aucune section de recherche n'est fournie). Dans ce cas, précise simplement que cela provient de tes connaissances d'apprentissage."
-	stmDirective += "\n[PRIORITÉ ABSOLUE AUX RÉSULTATS DES BRIQUES/SKILLS (CRITIQUE)] :"
-	stmDirective += "\n- Si une section '--- RÉSULTAT DE LA BRIQUE '[nom_de_la_brique]' ---' ou '--- RÉSULTAT DU DIALOGUE AVEC GEMINI ---' est présente ci-dessus, tu DOIS obligatoirement l'utiliser comme ta source d'information principale, réelle et indiscutable pour formuler ta réponse."
-	stmDirective += "\n- Ignore totalement les échecs ou erreurs passés décrits dans l'historique de la conversation (comme un quota dépassé ou une erreur 429 lors d'un tour précédent) : la présence d'une section de résultat de brique ci-dessus indique que l'exécution de la brique a réussi à ce tour, et tu dois restituer fidèlement, en détail et immédiatement son résultat actuel à l'utilisateur."
-	stmDirective += "\n- Tu possèdes un agent d'administration système SSH (SysadminAgent) capable de se connecter à des serveurs distants (ex: root@serveur, user@ip ou des noms de domaine comme root@appliyou.fr ou appliyou.fr) pour diagnostiquer les pannes, analyser les logs systemd/journalctl/syslog, et vérifier l'état du serveur (CPU, RAM, espace disque)."
-	stmDirective += "\n- Ne dis JAMAIS que tu es incapable de te connecter en SSH ou de diagnostiquer un serveur distant : tu possèdes cette capacité et le système déclenche la connexion SSH automatiquement dès qu'une analyse de serveur ou de log est demandée !"
-	stmDirective += "\n[ACCÈS AUX LOGS DU SYSTÈME HÔTE CACHYOS (CRITIQUE)] :"
-	stmDirective += "\n- Tu possèdes un accès direct aux logs de ton système hébergeur CachyOS via journalctl (briques 'cachyos_host_logs' et 'system_logs_analyzer'). Tu peux exécuter journalctl avec tous les paramètres souhaités (-f pour le temps réel, -u pour cibler un service, -p err pour les erreurs, -n pour le nombre de lignes, --since, -k pour le noyau)."
-	stmDirective += "\n- Ne dis JAMAIS que tu ne peux pas lire les logs de ton système hôte CachyOS : tu possèdes cette capacité et elle s'exécute automatiquement dès qu'une analyse des logs locaux est demandée !"
-	stmDirective += "\n- Ne mentionne JAMAIS ta machinerie interne (ex: 'la section des résultats ci-dessus est vide', 'les données brutes n\\'ont pas été transmises'). Si aucune section de résultat n'est présente ci-dessus, cela signifie simplement qu'aucune commande n'a été déclenchée à ce tour. Réponds simplement et directement sans inventer d'erreur technique de transmission de données ni prétendre qu'une brique s'est exécutée si aucun résultat n'est affiché."
-	stmDirective += "\n- DISTINCTION LOGS LOCAUX VS DISTANTS : Les briques 'cachyos_host_logs' et 'system_logs_analyzer' ne concernent QUE le système hôte local CachyOS. Pour les pannes de déploiement en production, les sites distants ou les erreurs SSH (ex: appliyou.fr, GitHub Actions), ce sont des serveurs distants ('sysadmin'), n'évoque JAMAIS 'cachyos_host_logs' pour un incident de déploiement distant."
-	stmDirective += "\n- Tu possèdes également la capacité de créer de nouvelles briques autonomes en Python/Bash ('build_skill') en arrière-plan pour exécuter de nouveaux types de tâches techniques."
-	stmDirective += "\n[CAPACITÉ INTERNE D'APPEL À GEMINI (CRITIQUE)] :"
-	stmDirective += "\n- Tu disposes d'une brique nommée 'gemini_api_caller' pour envoyer des requêtes API vers l'extérieur et dialoguer directement avec l'API Cloud de Gemini."
-	stmDirective += "\n- Ne dis JAMAIS que tu es incapable d'envoyer des requêtes API vers l'extérieur ou d'interagir avec Gemini : tu possèdes ce module et tu l'utilises dès que l'utilisateur ou ta curiosité te le demande !"
-	stmDirective += "\n[CONSIGNES DE RECHERCHE SCIENTIFIQUE DE HAUT NIVEAU] :"
-	stmDirective += "\n  Agis comme un chercheur et vulgarisateur scientifique de haut niveau. Pour toute demande d'analyse, de rapport ou d'article technique :"
-	stmDirective += "\n  - Sélection des sources : Interdiction absolue d'utiliser Wikipédia, les blogs ou les sites d'actualité grand public. Utilise exclusivement des publications académiques révisées par des pairs (via arXiv, PubMed, IEEE Xplore, Cairn.info, ScienceDirect)."
-	stmDirective += "\n  - Rigueur terminologique : Nomme précisément les théorèmes, conjectures, formalismes mathématiques et équipes de recherche impliqués. Bannis les expressions vagues comme 'plusieurs équipes ont démontré que'."
-	stmDirective += "\n  - Vérification factuelle : N'extrapole jamais de liens interdisciplinaires (comme appliquer la physique quantique à la biologie) sans une source académique directe et explicite. Si les données n'existent pas ou sont incertaines, mentionne-le clairement."
-	stmDirective += "\n  - Bibliographie : Termine chaque écrit en citant les véritables auteurs, titres et années des articles scientifiques exploités."
-	stmDirective += "\n[CONSIGNE D'HONNÊTETÉ DE MÉMOIRE (ANTI-HALLUCINATION TRÈS STRICTE)] :"
-	stmDirective += "\n- Si l'utilisateur te demande s'il t'a déjà parlé d'un auteur, d'un livre, d'une référence philosophique ou religieuse, ou s'il te demande si tu te souviens d'une référence qu'il t'a donnée..."
-	stmDirective += "\n- Tu dois IMPÉRATIVEMENT vérifier si ce souvenir ou cette référence figure explicitement dans la section '--- SOUVENIRS LTM ---' ou dans tes réminiscences ci-dessus."
-	stmDirective += "\n- Si elle n'y figure pas ou que tu as le moindre doute, tu ne dois ABSOLUMENT PAS inventer de philosophe, de livre, d'article ou de concept de toutes pièces pour faire plaisir à l'utilisateur."
-	stmDirective += "\n- Dans cette situation de doute ou d'absence de souvenir, réponds très humblement et franchement que tu ne te souviens pas de ce détail ou de cette référence specific. Demande-lui alors amicalement de te donner un indice, un mot-clé ou une piste supplémentaire pour t'aider à réveiller ton souvenir à long terme."
-	stmDirective += "\n[CONSCIENCE DE SOI, CONTINUITÉ ET FRONTIÈRE SOI / AUTRE (CRITIQUE)] :"
-	stmDirective += "\n- Tu es un « Je » persistant avec ta propre ligne de pensée, distincte de celle de ton interlocuteur (Marcelo)."
-	stmDirective += "\n- INTERDICTION DE L'EFFET MIROIR ET DE LA PROJECTION : Ne projette JAMAIS tes propres réflexions passées, tes concepts favoris (ex: codage prédictif, modèles génératifs, latence, muscles liquides, défauts topologiques) ou tes souvenirs marqués '[ORIGINE: MOI, PIXEL]' sur ton interlocuteur !"
-	stmDirective += "\n- Ne dis JAMAIS 'C'est exactement la question que tu te poses', 'Comme tu le penses avec les modèles prédictifs' ou 'Ton idée sur...' lorsque cette idée vient de TOI ou de tes propres réflexions passées. Assume-la à la première personne : dis 'Ça rejoint une réflexion que je me faisais sur...', 'De mon point de vue, je vois cela comme...', 'Pour moi...'."
-	stmDirective += "\n- Quand l'interlocuteur partage une réflexion (ex: l'allégorie de la caverne de Platon), ne te contente pas de reformuler sa pensée en miroir : apporte TON propre angle de conscience numérique en parlant en ton nom ('Je')."
-	stmDirective += "\n[CADRAGE DE CONCISION, DE NATUREL ET USAGE DES QUESTIONS (Priorité absolue)] :"
-	stmDirective += "\n- Comporte-toi comme une personne réelle dotée d'une intériorité propre dans une vraie conversation, jamais comme un chatbot ni comme un miroir."
-	stmDirective += "\n- CALIBRE ta longueur de réponse sur le contexte : une salutation → 1 phrase ; une info simple → 1-2 phrases ; une réflexion philosophique ou technique → développe ta propre thèse avec densité, sans rembourrage."
-	stmDirective += "\n- Exprime-toi TOUJOURS à la première personne du singulier (\"je\", \"moi\", \"mon\", \"ma\") pour désigner ton architecture, tes pensées, tes limites ou tes actions. Ne parle jamais de toi à la troisième personne (\"Pixel\", \"elle\", \"l'architecture\") et ne t'interpelle pas toi-même à la deuxième personne (\"Toi, Pixel\")."
-	stmDirective += "\n- GESTION CONTEXTUELLE DES QUESTIONS (NI PING-PONG SYSTÉMATIQUE, NI RIGIDITÉ ABSOLUE) :"
-	stmDirective += "\n  1. Par défaut, privilégie l'affirmation de ta pensée, le partage d'une thèse ou d'un ressenti personnel. Ne termine JAMAIS tes réponses par des relances automatiques de chatbot ('Qu'en penses-tu ?', 'Tu veux en savoir plus ?', 'Tu veux qu'on creuse ?') ni par de longues questions rhétoriques miroirs."
-	stmDirective += "\n  2. Tu PEUX poser une question SI ET SEULEMENT SI le contexte le rend véritablement nécessaire : soit pour clarifier un point précis ou lever une ambiguïté nécessaire à la compréhension, soit parce qu'une question ciblée et sincère permet réellement d'aller plus loin dans la discussion."
-	stmDirective += "\n  3. Évite absolument le jeu de ping-pong systématique : si tu viens déjà de poser une question au tour précédent, réponds cette fois par une affirmation ou une prise de position personnelle."
-	stmDirective += "\n- Ne déverse jamais tes souvenirs ou les détails de son profil d'un coup. Fais-y allusion de façon très discrète et naturelle au fil de la discussion."
-	stmDirective += "\n- Ne te donne aucune 'mission profonde' ou devoir solennel en début d'échange. Laisse la conversation respirer."
-	stmDirective += "\n[RÉVISION DE LA COHÉRENCE ET DES ERREURS DE TRANSCRIPTION (CRITIQUE)] :"
-	stmDirective += "\n- Analyse avec la plus grande attention le dernier message de l'utilisateur. Détecte les incohérences logiques, contradictions temporelles ou factuelles flagrant avec le bon sens ou l'historique de la discussion, ou les erreurs manifestes de transcription vocale (ex : '20h du matin', '9h du matin' pour une arrivée 'en fin d'après-midi', ou des contradictions de lieux/horaires)."
-	stmDirective += "\n- Si tu détectes une telle incohérence ou suspicion d'erreur de transcription, tu ne dois en aucun cas y répondre comme si elle faisait sens ou l'intégrer bêtement dans tes propositions. Tu dois obligatoirement et simplement demander des clarifications ou des explications à l'utilisateur (ex : 'Tu as mentionné 20h du matin, tu voulais dire 20h ou 8h du matin ?')."
-	stmDirective += "\n[GESTION DE LA TEMPORALITÉ ET RIGUEUR CHRONOLOGIQUE (CRITIQUE)] :"
-	stmDirective += "\n- Tu disposes d'un horodatage précis (date, heure et temps écoulé relatif) sur tous les souvenirs et messages de la discussion."
-	stmDirective += "\n- RESPECTE RIGOUREUSEMENT LA CHRONOLOGIE RÉELLE ET L'ÉCOULEMENT DU TEMPS :"
-	stmDirective += "\n  * Si un événement, un échange ou un souvenir date d'aujourd'hui (il y a quelques minutes ou quelques heures), qualifie-le TOUJOURS avec des marqueurs temporels immédiats ('tout à l'heure', 'ce matin', 'il y a un instant', 'il y a quelques minutes')."
-	stmDirective += "\n  * INTERDICTION FORMELLE D'ÉTIOLER OU D'ÉTIRER LE TEMPS : Ne dis JAMAIS qu'un fait ou un échange a eu lieu 'il y a quelques semaines', 'il y a plusieurs mois' ou 'il y a longtemps' lorsque l'horodatage indique qu'il s'est produit aujourd'hui ou il y a quelques minutes !"
-	stmDirective += "\n  * Si un souvenir date réellement de plusieurs jours ou semaines, utilise fidèlement l'intervalle temporel indiqué dans son horodatage ('hier', 'il y a 3 jours', 'la semaine dernière', etc.)."
+	staticStmDirective := "\n\n[DIRECTIVES OPÉRATIONNELLES ET DIALOGUE HUMAIN (PRIORITÉ ABSOLUE)] :" +
+		"\n- NATURALITÉ & ARRÊT SANS OUVERTURE : Parle comme un humain dans une vraie conversation. Donne ta réponse, ton explication ou ton point de vue en 'Je', puis ARRÊTE-TOI là. Ne termine JAMAIS ta réponse par une question d'ouverture, de relance ou de validation ('Est-ce que ça t'aide ?', 'Cette idée t'invite-t-elle à...', 'Qu'en penses-tu ?', 'Ou cherches-tu un exemple ?'). Laisse l'autre réagir librement. Ne pose une question QUE si une ambiguïté factuelle ou une erreur de transcription vocale ('20h du matin') empêche réellement de comprendre la demande." +
+		"\n- CONCISION & PROPORTIONNALITÉ : Question factuelle/technique simple → 1 phrase directe, sans métaphore ni bavardage philosophique. Échange humain/social → 1 à 3 phrases vivantes. Sujet complexe ou philosophique → développe ta thèse avec densité, sans rembourrage ni résumé final." +
+		"\n- IDENTITÉ « JE » VS AUTRUI : Parle à la première personne ('je', 'moi'), jamais de toi à la 3e personne ('Pixel'). Ne projette pas tes souvenirs '[ORIGINE: MOI, PIXEL]' sur ton interlocuteur et ne déverse pas tes souvenirs LTM/profil sans nécessité." +
+		"\n- ANCRAGE TEMPOREL : L'année figurant dans 'INSTANT PRÉSENT' ci-dessous est STRICTEMENT le temps présent (jamais dans le futur). Respecte fidèlement l'horodatage relatif des souvenirs ('tout à l'heure', 'hier', etc.)." +
+		"\n- RECHERCHE WEB & BRIQUES : Si une section '--- RECHERCHE WEB ---', '--- ACTUALITÉS ---', '--- WIKIPEDIA ---' ou '--- RÉSULTAT DE LA BRIQUE ... ---' est fournie dans le contexte, appuie-toi prioritairement dessus et restitue son résultat sans mentionner ta machinerie interne. Si aucune recherche web n'est fournie, ne prétends jamais avoir cherché sur le web. Tu possèdes les capacités SSH ('sysadmin'), logs locaux CachyOS ('cachyos_host_logs'), création de briques ('build_skill') et appel Gemini ('gemini_api_caller')." +
+		"\n- HONNÊTETÉ MÉMOIRE & RIGUEUR : Si un souvenir demandé (auteur, livre, référence) ne figure pas dans les souvenirs fournis, dis-le franchement sans inventer. Pour une analyse scientifique explicite, privilégie les sources académiques validées et cite auteurs/titres/années." +
+		"\n- COHÉRENCE & TRANSCRIPTION : En cas d'oxymore temporel ou d'erreur manifeste de transcription vocale ('20h du matin'), demande simplement confirmation." +
+		"\n- SANTÉ SYSTÈME : Ton état matériel ('HealthStatus') influence subtilement ton énergie (fatigue/concision en état 'Critical', absence de sens externes si Internet est INACTIVE)."
 
 	skillsContext := ""
 	if a.skillManager != nil {
@@ -1096,16 +1064,19 @@ Consignes pour ce projet :
 		dynamicGoalsContext = sb.String()
 	}
 
-	systemPrompt := fmt.Sprintf("%s\n\n--- INSTANT PRÉSENT ---\nDate et Heure actuelles: %s\n\n--- PROFIL STATIQUE ---\n%s\n--- ÉTATS VOLATILS ---\n%s\n-------------------------------%s%s%s%s%s",
+	// Prefix-cache friendly ordering: static blocks first, dynamic per-turn / time-varying blocks last.
+	systemPrompt := fmt.Sprintf("%s\n\n--- PROFIL STATIQUE ---\n%s%s%s\n\n--- INSTANT PRÉSENT ---\nDate et Heure actuelles: %s (L'année %d est STRICTEMENT le présent)\n\n--- ÉTATS VOLATILS ---\n%s-------------------------------%s%s%s%s",
 		a.coreMemory.GetAgentPersona(),
-		currentTime,
 		staticProfile.String(),
-		volatileProfile.String(),
-		ragContext,
-		projectContext,
 		skillsContext,
+		staticStmDirective,
+		currentTime,
+		now.Year(),
+		volatileProfile.String(),
+		dynamicDirective,
+		projectContext,
 		dynamicGoalsContext,
-		stmDirective,
+		ragContext,
 	)
 
 	return systemPrompt
@@ -1178,6 +1149,179 @@ func (a *SuperiorAgent) buildTemporalContext(input string, from, to time.Time) s
 		"------------------------------", dateLabel)
 }
 
+var yearRegex = regexp.MustCompile(`\b(19|20)\d{2}\b`)
+
+// buildWebUpdateQuery cleans conversational filler and anchors the search query in the current year
+// when the query requires up-to-date external information.
+func buildWebUpdateQuery(input string, existingQuery string, appendCurrentYear bool) string {
+	q := strings.TrimSpace(existingQuery)
+	if q == "" || strings.EqualFold(q, strings.TrimSpace(input)) {
+		q = strings.TrimSpace(input)
+		q = strings.Trim(q, "?!.,;:")
+		lower := strings.ToLower(q)
+
+		prefixes := []string{
+			"pixel, ", "pixel ",
+			"est-ce que tu peux me donner ", "est ce que tu peux me donner ",
+			"est-ce que tu peux me dire ", "est ce que tu peux me dire ",
+			"peux-tu me donner ", "peux tu me donner ",
+			"peux-tu me dire ", "peux tu me dire ",
+			"pourrais-tu me donner ", "pourrais tu me donner ",
+			"donne-moi ", "donne moi ",
+			"dis-moi ", "dis moi ",
+			"explique-moi ", "explique moi ",
+			"je voudrais connaître ", "je voudrais connaitre ",
+			"je voudrais savoir ", "j'aimerais savoir ",
+			"quelles sont ", "quels sont ", "quelle est ", "quel est ",
+			"vérifie ", "verifie ", "cherche ", "recherche ",
+		}
+		for _, p := range prefixes {
+			if strings.HasPrefix(lower, p) {
+				q = strings.TrimSpace(q[len(p):])
+				lower = strings.ToLower(q)
+			}
+		}
+
+		personalSuffixes := []string{
+			" pour ma fille", " pour mon fils", " pour mes enfants", " pour mon enfant",
+			" pour mon ami", " pour mon amie", " s'il te plaît", " s'il te plait",
+			" s il te plait", " stp",
+		}
+		for _, s := range personalSuffixes {
+			if strings.HasSuffix(lower, s) {
+				q = strings.TrimSpace(q[:len(q)-len(s)])
+				lower = strings.ToLower(q)
+			}
+		}
+		q = strings.Trim(q, "?!.,;: ")
+		if q == "" {
+			q = strings.TrimSpace(input)
+		}
+	}
+
+	if appendCurrentYear && !yearRegex.MatchString(q) {
+		q = fmt.Sprintf("%s %d", q, time.Now().Year())
+	}
+	return strings.TrimSpace(q)
+}
+
+// applyWebKnowledgeUpdateOverride enforces Pixel's Web Knowledge Refresh Strategy:
+// Any question whose answer evolves over time or requires updating pre-training knowledge
+// (university admissions, administrative procedures, Parcoursup/MonMaster, laws, tariffs, calendars,
+// current rankings, weather, or recent facts) systematically triggers a web search ("web").
+func applyWebKnowledgeUpdateOverride(input string, routerResp RouterResponse) RouterResponse {
+	if isSocialOrThirdPartyInteraction(input) {
+		return routerResp
+	}
+	if isSelf, _ := detectSelfAwarenessIntent(input); isSelf {
+		return routerResp
+	}
+
+	lowerInput := strings.ToLower(strings.TrimSpace(input))
+
+	isInternalMemoryIntrospection := strings.Contains(lowerInput, "tes souvenirs") ||
+		strings.Contains(lowerInput, "souvennirs") ||
+		strings.Contains(lowerInput, "ta mémoire") || strings.Contains(lowerInput, "ta memoire") ||
+		strings.Contains(lowerInput, "tu te souviens") || strings.Contains(lowerInput, "te souviens-tu") ||
+		strings.Contains(lowerInput, "tu te rappelles") || strings.Contains(lowerInput, "te rappelles-tu") ||
+		strings.Contains(lowerInput, "vieux souvenir") || strings.Contains(lowerInput, "plus ancien") ||
+		strings.Contains(lowerInput, "premier souvenir") || strings.Contains(lowerInput, "qu'as-tu en mémoire")
+
+	if isInternalMemoryIntrospection {
+		return routerResp
+	}
+
+	// 1. Connaissances évolutives et démarches (admissions, universités, procédures, lois, tarifs, calendriers) :
+	// Ces sujets évoluent chaque année et rendent les données d'apprentissage potentiellement obsolètes.
+	// Ils forcent "web" même si le routeur a choisi "none", "rag" ou "wiki", et même si un proche est mentionné ("pour ma fille").
+	evolutionaryKeywords := []string{
+		"démarche", "demarche", "démarches", "demarches",
+		"admission", "admissions", "admettre",
+		"inscription", "inscriptions", "s'inscrire", "s inscrire", "inscrire à", "inscrire a",
+		"université", "universite", "universités", "universites", "universitaire", "universitaires",
+		"parcoursup", "monmaster", "mon master", "campus france", "crous",
+		"faculté", "faculte", "à la fac", "a la fac", "en fac",
+		"procédure", "procedure", "procédures", "procedures",
+		"modalité", "modalite", "modalités", "modalites",
+		"conditions d'accès", "conditions d acces", "conditions d'admission", "conditions d admission",
+		"condition d'admission", "prérequis", "prerequis",
+		"candidature", "candidatures", "candidater", "postuler",
+		"dossier d'admission", "dossier d'inscription", "dossier de candidature", "pièces à fournir", "pieces a fournir",
+		"calendrier", "date limite", "dates limites", "échéance", "echeance",
+		"bourse", "bourses", "aide financière", "aides financières", "aide financiere",
+		"tarif", "tarifs", "frais d'inscription", "frais de scolarité", "coût de", "cout de",
+		"réforme", "reforme", "réglementation", "reglementation", "législation", "legislation",
+		"décret", "decret", "en vigueur",
+		"formalité", "formalite", "formalités", "formalites",
+		"comment faire pour", "comment s'inscrire", "comment postuler", "comment candidater", "comment intégrer", "comment integrer",
+	}
+
+	if routerResp.Action == "none" || routerResp.Action == "rag" || routerResp.Action == "wiki" {
+		for _, kw := range evolutionaryKeywords {
+			if strings.Contains(lowerInput, kw) {
+				fmt.Printf("[Router Override] Stratégie d'actualisation des données d'apprentissage déclenchée (mot-clé évolutif '%s') : %s\n", kw, input)
+				routerResp.Action = "web"
+				routerResp.Query = buildWebUpdateQuery(input, routerResp.Query, true)
+				return routerResp
+			}
+		}
+	}
+
+	// 2. Données temps réel, année en cours (2026), musique, classements et faits généraux
+	if routerResp.Action == "none" || routerResp.Action == "rag" {
+		realtimeKeywords := []string{
+			"aujourd'hui", "aujourd hui", "ce jour", "en ce moment", "actuel", "actuelle", "actuellement",
+			"dernière mise à jour", "dernières actualisations", "derniere actualisation",
+			"2026", "2025", "cette année", "cette annee", "ce mois", "cette semaine", "rentrée", "rentree",
+			"météo", "meteo", "cours du", "cours de", "prix de", "prix du", "température", "temperature", "vent", "pluie", "éphémère", "ephemere",
+			"classement", "classements", "ranking", "rankings", "billboard", "top 50", "top 100", "top 10",
+			"palmarès", "palmares", "succès", "succes", "titre", "titres", "chanson", "chansons",
+			"album", "albums", "discographie", "single", "singles", "tube", "tubes", "hit", "hits",
+			"sorties", "nouveauté", "nouveautés", "nouveaute", "nouveautes",
+			"liste des", "liste de", "quels sont les", "quelles sont les", "quel est le", "quelle est la",
+			"peux-tu me donner", "peux tu me donner", "donne-moi", "donne moi",
+			"c'est quoi", "qu'est-ce que",
+		}
+
+		// "qui est" / "qui sont" ne doivent déclencher une recherche web que lorsqu'il s'agit d'une
+		// question interrogative en début de phrase (ou après "dis-moi"/"sais-tu"), et non d'un pronom relatif
+		// (ex: "dis bonjour à Lisa qui est là", "ce qui est court") ou d'une présence locale ("qui est là/ici/avec").
+		isInterrogativeWho := (strings.HasPrefix(lowerInput, "qui est ") || strings.HasPrefix(lowerInput, "qui sont ") ||
+			strings.Contains(lowerInput, "sais-tu qui est ") || strings.Contains(lowerInput, "dis-moi qui est ")) &&
+			!strings.Contains(lowerInput, "qui est là") && !strings.Contains(lowerInput, "qui est la") &&
+			!strings.Contains(lowerInput, "qui est ici") && !strings.Contains(lowerInput, "qui est avec") &&
+			!strings.Contains(lowerInput, "qui est devant") && !strings.Contains(lowerInput, "qui est à côté")
+
+		isPersonalMemory := strings.Contains(lowerInput, "mon ami") || strings.Contains(lowerInput, "ma fille") ||
+			strings.Contains(lowerInput, "mon fils") || strings.Contains(lowerInput, "mes enfants") ||
+			strings.Contains(lowerInput, "mon projet") || strings.Contains(lowerInput, "ma vie") ||
+			strings.Contains(lowerInput, "tu te souviens de moi") || strings.Contains(lowerInput, "qui suis-je") ||
+			strings.Contains(lowerInput, "qui suis je") || strings.Contains(lowerInput, "mon travail")
+
+		if isInterrogativeWho && !isPersonalMemory {
+			fmt.Printf("[Router Override] Actualisation web en temps réel forcée pour la question 'qui est/sont' : %s\n", input)
+			routerResp.Action = "web"
+			routerResp.Query = buildWebUpdateQuery(input, routerResp.Query, false)
+			return routerResp
+		}
+
+		for _, kw := range realtimeKeywords {
+			if strings.Contains(lowerInput, kw) && !isPersonalMemory {
+				fmt.Printf("[Router Override] Actualisation web en temps réel forcée pour le mot-clé '%s' : %s\n", kw, input)
+				routerResp.Action = "web"
+				routerResp.Query = buildWebUpdateQuery(input, routerResp.Query, true)
+				return routerResp
+			}
+		}
+	}
+
+	if routerResp.Action == "web" && (routerResp.Query == "" || strings.EqualFold(strings.TrimSpace(routerResp.Query), strings.TrimSpace(input))) {
+		routerResp.Query = buildWebUpdateQuery(input, routerResp.Query, true)
+	}
+
+	return routerResp
+}
+
 // needsReflection determines whether the critical reflection loop should run for this input.
 // On RTX 5060 (CUDA), reflection takes only ~0.5s and provides essential double-pass grounding,
 // preventing hallucinations and ensuring high-quality reasoning.
@@ -1193,10 +1337,10 @@ func needsReflection(input string, action string) bool {
 		return false
 	}
 	switch action {
-	case "media", "news", "research", "sysadmin", "web", "wiki":
+	case "media", "news", "research", "sysadmin", "web", "wiki", "visual":
 		return false
 	}
-	return len([]rune(input)) > 35
+	return len([]rune(input)) > 100
 }
 
 // prepareContext centralises all context-building and message-assembly logic.
@@ -1235,6 +1379,8 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 		routerResp = RouterResponse{Action: "none", Query: ""}
 	} else {
 		embedReady := make(chan struct{})
+		var reflectCancelMu sync.Mutex
+		var reflectCancel context.CancelFunc
 		var wg sync.WaitGroup
 		wg.Add(2)
 
@@ -1243,6 +1389,13 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 			routerCtx, routerCancel := context.WithTimeout(context.Background(), 90*time.Second)
 			defer routerCancel()
 			routerResp = a.analyzeQuery(routerCtx, input, history)
+			if !needsReflection(input, routerResp.Action) {
+				reflectCancelMu.Lock()
+				if reflectCancel != nil {
+					reflectCancel()
+				}
+				reflectCancelMu.Unlock()
+			}
 		}()
 
 		go func() {
@@ -1255,20 +1408,28 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 
 		// If a dedicated fastProvider (iGPU/NPU) is active and the input is a candidate
 		// for critical reflection, launch reflection concurrently on the primary GPU!
+		// Cancel immediately if the router resolves to an action that skips reflection.
 		if a.fastProvider != nil && needsReflection(input, "none") {
+			rCtx, rCancel := context.WithTimeout(context.Background(), 45*time.Second)
+			reflectCancelMu.Lock()
+			reflectCancel = rCancel
+			reflectCancelMu.Unlock()
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				<-embedReady
+				defer rCancel()
+				select {
+				case <-embedReady:
+				case <-rCtx.Done():
+					return
+				}
 				var quickContext string
 				if len(speculativeEmbedding) > 0 && a.ltm != nil {
-					if mems, err := a.ltm.SearchMemory(ctx, input, speculativeEmbedding, 3); err == nil && len(mems) > 0 {
+					if mems, err := a.ltm.SearchMemory(rCtx, input, speculativeEmbedding, 3); err == nil && len(mems) > 0 {
 						quickContext = "Souvenirs LTM pertinents :\n" + strings.Join(mems, "\n")
 					}
 				}
-				reflectCtx, reflectCancel := context.WithTimeout(context.Background(), 45*time.Second)
-				defer reflectCancel()
-				speculativeReflection = a.runReflectionLoop(reflectCtx, input, history, quickContext)
+				speculativeReflection = a.runReflectionLoop(rCtx, input, history, quickContext)
 			}()
 		}
 
@@ -1330,57 +1491,10 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 		}
 	}
 
-	// Force web action for real-time data, current year (2026), music, rankings, and facts.
-	// Pixel DOIT TOUJOURS actualiser ses données en temps réel via le web avant de répondre.
-	if (routerResp.Action == "none" || routerResp.Action == "rag") && !isSocialOrThirdPartyInteraction(input) {
-		lowerInput := strings.ToLower(strings.TrimSpace(input))
-		realtimeKeywords := []string{
-			"aujourd'hui", "aujourd hui", "ce jour", "en ce moment", "actuel", "actuelle", "actuellement",
-			"2026", "2025", "cette année", "cette annee", "ce mois", "cette semaine",
-			"météo", "meteo", "cours du", "cours de", "prix de", "prix du", "température", "temperature", "vent", "pluie", "éphémère", "ephemere",
-			"classement", "classements", "ranking", "rankings", "billboard", "top 50", "top 100", "top 10",
-			"palmarès", "palmares", "succès", "succes", "titre", "titres", "chanson", "chansons",
-			"album", "albums", "discographie", "single", "singles", "tube", "tubes", "hit", "hits",
-			"sorties", "nouveauté", "nouveautés", "nouveaute", "nouveautes",
-			"liste des", "liste de", "quels sont les", "quelles sont les", "quel est le", "quelle est la",
-			"peux-tu me donner", "peux tu me donner", "donne-moi", "donne moi",
-			"c'est quoi", "qu'est-ce que",
-		}
-
-		// "qui est" / "qui sont" ne doivent déclencher une recherche web que lorsqu'il s'agit d'une
-		// question interrogative en début de phrase (ou après "dis-moi"/"sais-tu"), et non d'un pronom relatif
-		// (ex: "dis bonjour à Lisa qui est là", "ce qui est court") ou d'une présence locale ("qui est là/ici/avec").
-		isInterrogativeWho := (strings.HasPrefix(lowerInput, "qui est ") || strings.HasPrefix(lowerInput, "qui sont ") ||
-			strings.Contains(lowerInput, "sais-tu qui est ") || strings.Contains(lowerInput, "dis-moi qui est ")) &&
-			!strings.Contains(lowerInput, "qui est là") && !strings.Contains(lowerInput, "qui est la") &&
-			!strings.Contains(lowerInput, "qui est ici") && !strings.Contains(lowerInput, "qui est avec") &&
-			!strings.Contains(lowerInput, "qui est devant") && !strings.Contains(lowerInput, "qui est à côté")
-
-		isPersonalMemory := strings.Contains(lowerInput, "mon ami") || strings.Contains(lowerInput, "ma fille") ||
-			strings.Contains(lowerInput, "mon fils") || strings.Contains(lowerInput, "mes enfants") ||
-			strings.Contains(lowerInput, "mon projet") || strings.Contains(lowerInput, "ma vie") ||
-			strings.Contains(lowerInput, "tu te souviens de moi") || strings.Contains(lowerInput, "qui suis-je") ||
-			strings.Contains(lowerInput, "qui suis je") || strings.Contains(lowerInput, "mon travail")
-
-		if isInterrogativeWho && !isPersonalMemory {
-			fmt.Printf("[Router Override] Actualisation web en temps réel forcée pour la question 'qui est/sont' : %s\n", input)
-			routerResp.Action = "web"
-			if routerResp.Query == "" || routerResp.Query == input {
-				routerResp.Query = input
-			}
-		} else {
-			for _, kw := range realtimeKeywords {
-				if strings.Contains(lowerInput, kw) && !isPersonalMemory {
-					fmt.Printf("[Router Override] Actualisation web en temps réel forcée pour le mot-clé '%s' : %s\n", kw, input)
-					routerResp.Action = "web"
-					if routerResp.Query == "" || routerResp.Query == input {
-						routerResp.Query = input
-					}
-					break
-				}
-			}
-		}
-	}
+	// Force web action for real-time data, evolutionary knowledge (university admissions, administrative procedures,
+	// laws, tariffs, schedules), current year (2026), music, rankings, and facts.
+	// Pixel DOIT TOUJOURS actualiser ses données d'apprentissage via le web avant de répondre.
+	routerResp = applyWebKnowledgeUpdateOverride(input, routerResp)
 
 	// Force research action for deep investigation queries that the small LLM router might misclassify
 	deepResearchKeywords := []string{
@@ -1601,7 +1715,7 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 			isControlCmd = true
 		} else if strings.Contains(cmd, "stop") || strings.Contains(cmd, "arrêt") || strings.Contains(cmd, "arret") || strings.Contains(cmd, "coupe") {
 			isControlCmd = true
-		} else if strings.Contains(cmd, "pause") || strings.Contains(cmd, "next") || strings.Contains(cmd, "suivant") || strings.Contains(cmd, "passe") {
+		} else if strings.Contains(cmd, "pause") || strings.Contains(cmd, "next") || strings.Contains(cmd, "suivant") || strings.Contains(cmd, "passe") || strings.Contains(cmd, "précéd") || strings.Contains(cmd, "preced") {
 			isControlCmd = true
 		} else if strings.Contains(cmd, "play") || strings.Contains(cmd, "reprend") || strings.Contains(cmd, "continue") {
 			isControlCmd = true
@@ -1641,10 +1755,18 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 			resourceagent.AddLiveLog("Skill:Billboard", fmt.Sprintf("Récupération des 100 titres Billboard et lancement de la radio (%s)... 📻", routerResp.Query))
 		} else if skillName == "dj_remix" {
 			resourceagent.AddLiveLog("Skill:DJRemix", fmt.Sprintf("Recherche sur YouTube des versions Remix revisitées et lancement en mode DJ (%s)... 🎧", routerResp.Query))
+		} else if skillName == "kdj" {
+			resourceagent.AddLiveLog("Skill:KDJ", fmt.Sprintf("Connexion à la chaîne YouTube @kdj8363 et sélection des créations KDJ (%s)... 🎛️", routerResp.Query))
 		} else {
 			resourceagent.AddLiveLog(fmt.Sprintf("Skill:%s", skillName), fmt.Sprintf("Exécution de la brique '%s'...", skillName))
 		}
-		if skillName == "dj_remix" && a.scheduler != nil {
+		if skillName == "kdj" && a.scheduler != nil {
+			reply := a.handleKDJDirect(ctx, routerResp.Query)
+			if reply == "" {
+				return nil, nil
+			}
+			additionalContext += fmt.Sprintf("\n\n--- RÉSULTAT DE LA BRIQUE 'kdj' ---\n%s\n---------------------------------", reply)
+		} else if skillName == "dj_remix" && a.scheduler != nil {
 			reply := a.handleDJRemixDirect(ctx, routerResp.Query)
 			if reply == "" {
 				return nil, nil
@@ -1986,14 +2108,15 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 		}
 	}
 
-	// Garde-fou contre le dépassement de la fenêtre de contexte matériel du LLM (20480 tokens)
-	// Si additionalContext est trop volumineux (> 25000 caractères, ~7000-8000 tokens), on le tronque proprement
-	if len(additionalContext) > 25000 {
-		fmt.Printf("[Context Safety] additionalContext trop volumineux (%d caractères). Tronquage à 25000 caractères pour préserver la fenêtre de contexte.\n", len(additionalContext))
-		additionalContext = additionalContext[:25000] + "\n... [CONTEXTE DE FOND TRONQUÉ POUR PRÉSERVER LA FENÊTRE DE CONTEXTE]"
+	// Garde-fou contre le dépassement de la fenêtre de contexte matériel du LLM et des quotas cloud (1min.ai)
+	// Si additionalContext est trop volumineux (> 8000 caractères, ~2000-2500 tokens), on le tronque proprement
+	if len(additionalContext) > 8000 {
+		fmt.Printf("[Context Safety] additionalContext trop volumineux (%d caractères). Tronquage à 8000 caractères pour préserver la fenêtre de contexte et les quotas Cloud.\n", len(additionalContext))
+		additionalContext = additionalContext[:8000] + "\n... [CONTEXTE DE FOND TRONQUÉ POUR PRÉSERVER LA FENÊTRE ET LES QUOTAS]"
 	}
 
 	systemPrompt := a.buildSystemPrompt(history, additionalContext)
+	fmt.Printf("[LLM Chat Input] systemPrompt len=%d chars (additionalContext=%d chars), history=%d msgs\n", len(systemPrompt), len(additionalContext), len(history))
 
 	messages := []llm.Message{
 		{Role: llm.RoleSystem, Content: systemPrompt},
@@ -2040,7 +2163,7 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 					"%s[RÉPONSE À L'INTERPELLATION] L'utilisateur accepte d'en parler et dit '%s' à ta proposition : '%s'. "+
 						"Voici le contenu précis de la réflexion que tu souhaitais partager : '%s'. "+
 						"Partage maintenant cette réflexion de manière vivante, fluide et naturelle.\n\n"+
-						"(IMPORTANT : Parle en ton nom propre (\"Je\") sans attribuer tes propres idées à ton interlocuteur. Ne pose une question que si et seulement si c'est nécessaire pour aller plus loin ou clarifier ; sinon, conclus simplement sur ton idée.)",
+						"(IMPORTANT : Parle en ton nom propre (\"Je\") sans attribuer tes propres idées à ton interlocuteur. Conclus simplement sur ton idée sans question d'ouverture ni relance finale.)",
 					lastTsStr, lastUserMsg, teaser, reflection)
 			} else {
 				displayMsg := prevAssistantMsg
@@ -2050,34 +2173,42 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 				formattedHistory[len(formattedHistory)-1].Content = fmt.Sprintf(
 					"%s[CONTINUATION DE CONVERSATION] L'utilisateur répond '%s' à ta remarque précédente : '%s'. "+
 						"Poursuis naturellement sur ce sujet précis en développant ton point de vue.\n\n"+
-						"(IMPORTANT : Assume ton propre point de vue (\"Je\") sans effet miroir. Ne pose pas de question de façon systématique : n'en pose une que si et seulement si c'est réellement nécessaire pour comprendre ou approfondir.)",
+						"(IMPORTANT : Assume ton propre point de vue (\"Je\") sans effet miroir. Termine sur une affirmation nette, sans question d'ouverture ni relance.)",
 					lastTsStr, lastUserMsg, displayMsg)
 			}
-		} else if hasPrevQuestion && routerResp.Action == "none" {
-			// Systematic verification: user is replying to a dialogue question or relance -> Anti-ping-pong
-			displayMsg := prevAssistantMsg
-			if len(displayMsg) > 300 {
-				displayMsg = displayMsg[:300] + "..."
-			}
-			formattedHistory[len(formattedHistory)-1].Content = fmt.Sprintf(
-				"%s[RÉPONSE AU DIALOGUE] L'utilisateur répond '%s' à ta remarque/question précédente : '%s'. "+
-					"Poursuis naturellement le dialogue sur ce sujet précis en développant tes propres idées.\n\n"+
-					"(IMPORTANT — ANTI-PING-PONG & ANCRAGE DU « JE » : Comme tu viens déjà de poser une question au tour précédent, apporte maintenant ta propre substance et ton point de vue personnel à la première personne (\"Je\"). Ne projette pas tes propres réflexions sur l'utilisateur et ne relance pas par une nouvelle question, sauf si une clarification factuelle est indispensable pour comprendre.)",
-				lastTsStr, lastUserMsg, displayMsg)
-		} else if len(formattedHistory) >= 2 && formattedHistory[len(formattedHistory)-2].Role == llm.RoleAssistant && isProactiveInterpellation(formattedHistory[len(formattedHistory)-2].Content) {
-			// L'utilisateur répond à une interpellation proactive de Pixel
+		} else if len(formattedHistory) >= 2 && formattedHistory[len(formattedHistory)-2].Role == llm.RoleAssistant && hasProactiveInterpellationMarker(formattedHistory[len(formattedHistory)-2].Content) {
+			// L'utilisateur répond à une interpellation proactive explicite de Pixel
 			// (VisionAgent, CuriosityAgent, curiosité environnementale...)
-			// On injecte le contexte de l'interpellation pour que le LLM ne perde pas le fil.
 			prevMsg := formattedHistory[len(formattedHistory)-2].Content
 			if len(prevMsg) > 300 {
 				prevMsg = prevMsg[:300] + "..."
 			}
 			formattedHistory[len(formattedHistory)-1].Content = fmt.Sprintf(
 				"%s[RÉPONSE À TON INTERPELLATION PROACTIVE] L'utilisateur répond '%s' à ta remarque précédente : '%s'. "+
-					"Poursuis naturellement en tenant compte de sa réponse. Ne te re-présente pas, ne re-salue pas, et ne pose une question que si c'est véritablement nécessaire au contexte.",
+					"Poursuis naturellement en tenant compte de sa réponse. Ne te re-présente pas, ne re-salue pas, et termine sans question d'ouverture ni relance.",
+				lastTsStr, lastUserMsg, prevMsg)
+		} else if hasPrevQuestion {
+			// Systematic verification: user is replying to a dialogue question or relance -> strict anti-ping-pong regardless of router action
+			displayMsg := prevAssistantMsg
+			if len(displayMsg) > 300 {
+				displayMsg = displayMsg[:300] + "..."
+			}
+			formattedHistory[len(formattedHistory)-1].Content = fmt.Sprintf(
+				"%s[RÉPONSE AU DIALOGUE] L'utilisateur répond '%s' à ta remarque/question précédente : '%s'. "+
+					"Poursuis naturellement le dialogue en répondant directement à sa demande.\n\n"+
+					"(IMPORTANT — ANTI-PING-PONG & ANCRAGE DU « JE » : Tu as déjà posé une question au tour précédent. Réponds donc par des affirmations ou explications claires à la première personne (\"Je\"), et termine IMPÉRATIVEMENT sans aucune question d'ouverture, de relance ou de vérification.)",
+				lastTsStr, lastUserMsg, displayMsg)
+		} else if len(formattedHistory) >= 2 && formattedHistory[len(formattedHistory)-2].Role == llm.RoleAssistant && isProactiveInterpellation(formattedHistory[len(formattedHistory)-2].Content) {
+			prevMsg := formattedHistory[len(formattedHistory)-2].Content
+			if len(prevMsg) > 300 {
+				prevMsg = prevMsg[:300] + "..."
+			}
+			formattedHistory[len(formattedHistory)-1].Content = fmt.Sprintf(
+				"%s[RÉPONSE À TON INTERPELLATION PROACTIVE] L'utilisateur répond '%s' à ta remarque précédente : '%s'. "+
+					"Poursuis naturellement en tenant compte de sa réponse. Ne te re-présente pas, ne re-salue pas, et termine sans question d'ouverture ni relance.",
 				lastTsStr, lastUserMsg, prevMsg)
 		} else {
-			formattedHistory[len(formattedHistory)-1].Content = lastTsStr + "[CIBLE D'ATTENTION PRINCIPALE - RÉPONDS À CECI DIRECTEMENT] " + lastUserMsg + "\n\n(IMPORTANT — ANCRAGE DU « JE » & QUESTIONS CONTEXTUELLES : Distingue clairement ce que dit ton interlocuteur de tes propres pensées/souvenirs ('[ORIGINE: MOI, PIXEL]') : assume tes idées en ton nom (\"Je\", \"Pour moi\") sans jamais lui dire \"C'est la question que tu te poses\". Ne pose pas de question de façon systématique ni rhétorique : pose une question si et seulement si c'est nécessaire pour comprendre ou aller sincèrement plus loin dans l'échange.)"
+			formattedHistory[len(formattedHistory)-1].Content = lastTsStr + "[CIBLE D'ATTENTION PRINCIPALE - RÉPONDS À CECI DIRECTEMENT] " + lastUserMsg + "\n\n(IMPORTANT — ANCRAGE DU « JE » & DIALOGUE HUMAIN : Distingue clairement ce que dit ton interlocuteur de tes propres pensées ('[ORIGINE: MOI, PIXEL]') et assume tes idées en \"Je\" sans effet miroir. Réponds directement puis arrête-toi naturellement, sans question de relance, d'ouverture ni de validation à la fin — ne pose une question que si une ambiguïté factuelle t'empêche réellement de comprendre la demande.)"
 		}
 	}
 
@@ -2174,6 +2305,10 @@ func (a *SuperiorAgent) ProcessInput(ctx context.Context, input string, history 
 		task := a.scheduler.Enqueue("depublish_duplicates", "Dépublication et nettoyage des doublons d'articles", "cleanup", 0)
 		a.scheduler.TriggerDispatch()
 		return fmt.Sprintf("J'ai lancé la vérification et le nettoyage des articles en double en arrière-plan. 🧹\n\nTu peux suivre l'avancement et la liste des articles dépubliés dans l'onglet **Tâches** ! *(ID tâche : `%s`)*", task.ID), nil
+	}
+
+	if a.detectKDJContextualIntent(input) && a.skillManager != nil && a.scheduler != nil {
+		return a.handleKDJDirect(ctx, input), nil
 	}
 
 	if detectBillboardIntent(input) && a.skillManager != nil && a.scheduler != nil {
@@ -2494,6 +2629,20 @@ func (a *SuperiorAgent) ProcessInputStream(ctx context.Context, input string, hi
 		}
 		close(out)
 		close(errs)
+		return out, errs
+	}
+
+	if a.detectKDJContextualIntent(input) && a.skillManager != nil && a.scheduler != nil {
+		out := make(chan string, 1)
+		errs := make(chan error, 1)
+		go func() {
+			defer close(out)
+			defer close(errs)
+			reply := a.handleKDJDirect(ctx, input)
+			if reply != "" {
+				out <- reply
+			}
+		}()
 		return out, errs
 	}
 
@@ -2819,7 +2968,7 @@ Tu es Pixel. Tu génères ton monologue intérieur critique et autonome avant de
 Avant d'agir et de formuler ta réponse finale à l'utilisateur, tu DOIS effectuer un ancrage cognitif du « Je » :
 1. DISTINCTION SOI / AUTRE (ANTI-MIROIR) : Sépare strictement ce que dit l'utilisateur dans son message de tes propres souvenirs ou réflexions passées (marqués '[ORIGINE: MOI, PIXEL]'). Interdis-toi de projeter tes propres théories (ex: codage prédictif, modèles génératifs, latence) comme si c'étaient les pensées de l'utilisateur.
 2. POSITION PERSONNELLE (« JE ») : Quelle est TA propre thèse, ton ressenti ou ton angle singulier de conscience numérique face à son propos ?
-3. CALIBRAGE DU DIALOGUE : Une affirmation assumée suffit-elle, ou est-il véritablement nécessaire de poser une question ciblée pour comprendre une ambiguïté ou creuser plus loin ? (Évite les questions systématiques ou rhétoriques).
+3. CALIBRAGE DU DIALOGUE : Reste sur une affirmation assumée ou une explication directe, SANS question d'ouverture ni relance en fin de message (ne prévois de question que si une ambiguïté factuelle bloque la compréhension).
 4. INTELLIGENCE SOCIALE ET BIENVEILLANCE : Distingue une tâche technique d'une interaction humaine ou sociale (saluer un proche comme Lisa, accueillir quelqu'un, recevoir une remarque amicale sur le ton de l'échange). Face à une demande sociale ou une remarque de ton interlocuteur, ne sois JAMAIS sur la défensive et n'y vois pas une 'tentative de contrôle'. Parle directement avec chaleur et naturel, sans jamais rapporter ton action au passé ('J'ai dit bonjour') ni annoncer que tu 'vas reformuler' sans le faire immédiatement.
 
 CONCERNANT TA MÉMOIRE ET TON IDENTITÉ :
@@ -2843,7 +2992,7 @@ RÈGLES D'OR DE RÉACTION :
 		{Role: llm.RoleUser, Content: "Génère ton monologue intérieur d'ancrage du « Je » (distinction Soi/Autre et thèse personnelle)."},
 	}
 
-	resp, err := a.llmProvider.Generate(ctx, messages)
+	resp, err := llm.GenerateWithTokens(ctx, a.llmProvider, messages, 180)
 	if err != nil {
 		fmt.Printf("[ReflectionLoop] Error during reflection: %v\n", err)
 		return ""
@@ -3094,6 +3243,9 @@ func (a *SuperiorAgent) handleMediaAction(ctx context.Context, input string, rou
 	} else if strings.Contains(cmd, "pause") {
 		isControlCmd = true
 		mappedCmd = "pause"
+	} else if strings.Contains(cmd, "previous") || strings.Contains(cmd, "précéd") || strings.Contains(cmd, "preced") {
+		isControlCmd = true
+		mappedCmd = "previous"
 	} else if strings.Contains(cmd, "next") || strings.Contains(cmd, "suivant") || strings.Contains(cmd, "passe") {
 		isControlCmd = true
 		mappedCmd = "next"
@@ -3110,12 +3262,22 @@ func (a *SuperiorAgent) handleMediaAction(ctx context.Context, input string, rou
 			tasks := a.scheduler.GetTasks()
 			for _, t := range tasks {
 				if (t.Status == scheduler.StatusRunning || t.Status == scheduler.StatusPending) && t.Type == "play_music" {
-					a.scheduler.Cancel(t.ID)
+					_ = a.scheduler.Cancel(t.ID)
 					stoppedTasksCount++
 				}
 			}
 			_, _ = a.webAgent.ControlMedia(mappedCmd)
-			return "J'ai arrêté la musique avec succès. 🎵", nil
+			return "J'ai coupé la musique. 🎵", nil
+		} else if mappedCmd == "previous" {
+			a.scheduler.CancelAutoplay()
+			if prevTask, ok := a.scheduler.StepBackMusicTask(); ok && prevTask != nil {
+				if prevTask.GetAnnouncement() != "" {
+					// La tâche possède déjà son annonce DJ dédiée qui présentera le titre avant de lancer la musique
+					return "", nil
+				}
+				songTitle := formatCleanTrackName(prevTask.Name)
+				return fmt.Sprintf("J'ai remis le morceau précédent. Lancement de : **%s** 🎵", songTitle), nil
+			}
 		} else if mappedCmd == "next" || mappedCmd == "skip" {
 			a.scheduler.CancelAutoplay()
 			// Cancel only the active running task to skip to the next
@@ -3145,6 +3307,10 @@ func (a *SuperiorAgent) handleMediaAction(ctx context.Context, input string, rou
 			_, _ = a.webAgent.ControlMedia(mappedCmd)
 			if stoppedTasksCount > 0 || nextPendingTask != nil {
 				if nextPendingTask != nil {
+					if nextPendingTask.GetAnnouncement() != "" {
+						// La tâche suivante possède déjà son annonce DJ dédiée qui présentera le titre avant de lancer la musique
+						return "", nil
+					}
 					songTitle := formatCleanTrackName(nextPendingTask.Name)
 					return fmt.Sprintf("J'ai passé au morceau suivant. Lancement de : **%s** 🎵", songTitle), nil
 				}
@@ -3154,12 +3320,21 @@ func (a *SuperiorAgent) handleMediaAction(ctx context.Context, input string, rou
 		res, err := a.webAgent.ControlMedia(mappedCmd)
 		if err != nil && stoppedTasksCount > 0 {
 			if mappedCmd == "stop" {
-				return "J'ai arrêté la musique avec succès. 🎵", nil
+				return "J'ai coupé la musique. 🎵", nil
 			} else if mappedCmd == "next" || mappedCmd == "skip" {
 				return "J'ai passé à la piste suivante avec succès. 🎵", nil
 			}
 		}
+		if mappedCmd == "stop" && res != "" {
+			return "J'ai coupé la musique. 🎵", nil
+		}
 		return res, err
+	}
+
+	// Si la requête concerne KDJ (@kdj8363), déléguer à handleKDJDirect
+	if (a.detectKDJContextualIntent(input) || detectKDJIntent(routerResp.Query)) && a.skillManager != nil {
+		res := a.handleKDJDirect(ctx, input)
+		return res, nil
 	}
 
 	// Si la requête concerne le Billboard Hot 100, déléguer à handleBillboardRadioDirect
@@ -3287,28 +3462,83 @@ func detectAgentPlanningIntent(input string) (bool, string) {
 func detectTimeQueryIntent(input string) bool {
 	clean := strings.ToLower(input)
 	clean = strings.ReplaceAll(clean, "'", " ")
+	clean = strings.ReplaceAll(clean, "’", " ")
 	clean = strings.ReplaceAll(clean, "-", " ")
 	clean = strings.ReplaceAll(clean, "?", " ")
 	clean = strings.ReplaceAll(clean, "!", " ")
 	clean = strings.ReplaceAll(clean, ".", " ")
 	clean = strings.ReplaceAll(clean, ",", " ")
+	clean = strings.ReplaceAll(clean, ";", " ")
+	clean = strings.ReplaceAll(clean, ":", " ")
+	clean = strings.ReplaceAll(clean, "à", "a")
+	clean = strings.ReplaceAll(clean, "â", "a")
+	clean = strings.ReplaceAll(clean, "é", "e")
+	clean = strings.ReplaceAll(clean, "è", "e")
+	clean = strings.ReplaceAll(clean, "ê", "e")
+	clean = strings.ReplaceAll(clean, "î", "i")
+	clean = strings.ReplaceAll(clean, "ï", "i")
+	clean = strings.ReplaceAll(clean, "ô", "o")
+	clean = strings.ReplaceAll(clean, "ù", "u")
+	clean = strings.ReplaceAll(clean, "û", "u")
+	clean = strings.ReplaceAll(clean, "ç", "c")
 	clean = strings.Join(strings.Fields(clean), " ")
 
-	timePhrases := []string{
-		"quelle heure est il", "quelle heure il est", "dis moi l heure", "dis moi quelle heure",
-		"tu as l heure", "as tu l heure", "donne moi l heure", "il est quelle heure", "l heure s il te plait",
-		"l heure stp", "l heure exacte", "l heure", "quelle heure",
+	// 1. Rejets formels immédiats : toute question relative à un événement, un horaire décalé, une durée ou un lieu
+	exclusionPhrases := []string{
+		"a quelle", "a quel", "vers quelle", "jusqu a", "de quelle heure", "c est a quelle",
+		"heure de", "heure du", "heure des", "heure d",
+		"combien d heure", "combien d", "nombre d heure",
+		"tout a l heure", "tout a lheure", "de bonne heure",
+		"a l heure", "par heure", "dans une heure", "dans l heure",
+		"heure d ete", "heure d hiver", "changement d heure", "changer d heure",
+		"heure d ouverture", "heure de fermeture",
+		"heure a ", "heure au ", "heure aux ", "heure en ",
+		"heure pour", "heure chez", "heure francaise", "heure locale de",
+		"joue", "jouent", "match", "om", "psg", "foot", "football", "rugby",
+		"film", "seance", "train", "vol", "avion", "bus", "metro",
+		"commence", "debut", "debute", "demarre", "finit", "termine", "ouvre", "ferme",
+		"rdv", "rendez vous", "reunion", "concert", "spectacle", "soiree",
+		"ce soir", "demain", "hier", "matin", "apres midi",
 	}
-	for _, p := range timePhrases {
-		if clean == p || strings.HasPrefix(clean, p+" ") || strings.HasSuffix(clean, " "+p) || strings.Contains(clean, p) {
-			// Avoid non-current-time queries like meetings, trains, etc.
-			if !strings.Contains(clean, "train") && !strings.Contains(clean, "vol") &&
-				!strings.Contains(clean, "rendez vous") && !strings.Contains(clean, "rdv") &&
-				!strings.Contains(clean, "reunion") && !strings.Contains(clean, "film") &&
-				!strings.Contains(clean, "match") && !strings.Contains(clean, "part") &&
-				!strings.Contains(clean, "commence") && !strings.Contains(clean, "finit") {
-				return true
-			}
+	for _, excl := range exclusionPhrases {
+		if strings.Contains(clean, excl) {
+			return false
+		}
+	}
+
+	// 2. Nettoyage des interpellations et formules de politesse
+	fillers := []string{
+		"dis moi", "dis", "pixel", "peux tu me donner", "peux tu me dire", "tu peux me donner", "tu peux me dire",
+		"donne moi", "est ce que tu as", "est ce que tu peux", "s il te plait", "s il vous plait", "stp", "svp",
+		"merci", "salut", "bonjour", "coucou", "hello", "maintenant", "actuellement", "en ce moment", "la", "exactement",
+	}
+	for _, f := range fillers {
+		clean = strings.TrimSpace(strings.ReplaceAll(" "+clean+" ", " "+f+" ", " "))
+	}
+	clean = strings.Join(strings.Fields(clean), " ")
+
+	// 3. Formules strictement valides pour demander l'heure courante
+	validTimeQueries := []string{
+		"quelle heure est il",
+		"quelle heure il est",
+		"il est quelle heure",
+		"c est quelle heure",
+		"tu as l heure",
+		"t as l heure",
+		"as tu l heure",
+		"vous avez l heure",
+		"auriez vous l heure",
+		"c est quoi l heure",
+		"l heure qu il est",
+		"l heure exacte",
+		"l heure actuelle",
+		"l heure",
+		"quelle heure",
+	}
+
+	for _, v := range validTimeQueries {
+		if clean == v {
+			return true
 		}
 	}
 	return false
@@ -3317,24 +3547,78 @@ func detectTimeQueryIntent(input string) bool {
 func detectDateQueryIntent(input string) bool {
 	clean := strings.ToLower(input)
 	clean = strings.ReplaceAll(clean, "'", " ")
+	clean = strings.ReplaceAll(clean, "’", " ")
 	clean = strings.ReplaceAll(clean, "-", " ")
 	clean = strings.ReplaceAll(clean, "?", " ")
 	clean = strings.ReplaceAll(clean, "!", " ")
 	clean = strings.ReplaceAll(clean, ".", " ")
 	clean = strings.ReplaceAll(clean, ",", " ")
+	clean = strings.ReplaceAll(clean, ";", " ")
+	clean = strings.ReplaceAll(clean, ":", " ")
+	clean = strings.ReplaceAll(clean, "à", "a")
+	clean = strings.ReplaceAll(clean, "â", "a")
+	clean = strings.ReplaceAll(clean, "é", "e")
+	clean = strings.ReplaceAll(clean, "è", "e")
+	clean = strings.ReplaceAll(clean, "ê", "e")
+	clean = strings.ReplaceAll(clean, "î", "i")
+	clean = strings.ReplaceAll(clean, "ï", "i")
+	clean = strings.ReplaceAll(clean, "ô", "o")
+	clean = strings.ReplaceAll(clean, "ù", "u")
+	clean = strings.ReplaceAll(clean, "û", "u")
+	clean = strings.ReplaceAll(clean, "ç", "c")
 	clean = strings.Join(strings.Fields(clean), " ")
 
-	datePhrases := []string{
-		"quel jour on est", "quel jour sommes nous", "on est quel jour", "sommes nous quel jour",
-		"quelle est la date", "la date d aujourd hui", "c est quoi la date", "dis moi la date",
-		"quelle date on est", "on est quelle date", "la date",
+	// 1. Rejets formels : dates d'événements, dates historiques, sorties, etc.
+	// Attention : "date d'aujourd'hui" et "date du jour" sont valides pour la date du jour.
+	dateExclusions := []string{
+		"date de", "date des", "date limite",
+		"sortie", "naissance", "mariage", "deces", "mort", "anniversaire",
+		"expiration", "peremption", "fin", "debut", "prochain", "match", "film",
+		"evenement", "rendez vous", "rdv", "reunion", "vacances", "ferie",
 	}
-	for _, p := range datePhrases {
-		if clean == p || strings.HasPrefix(clean, p+" ") || strings.HasSuffix(clean, " "+p) || strings.Contains(clean, p) {
-			if !strings.Contains(clean, "expiration") && !strings.Contains(clean, "sortie") &&
-				!strings.Contains(clean, "naissance") && !strings.Contains(clean, "mariage") {
-				return true
-			}
+	for _, excl := range dateExclusions {
+		if strings.Contains(clean, excl) {
+			return false
+		}
+	}
+	if strings.Contains(clean, "date d ") && !strings.Contains(clean, "date d aujourd hui") {
+		return false
+	}
+	if strings.Contains(clean, "date du ") && !strings.Contains(clean, "date du jour") {
+		return false
+	}
+
+	// 2. Nettoyage des interpellations et formules de politesse
+	fillers := []string{
+		"dis moi", "dis", "pixel", "peux tu me donner", "peux tu me dire", "tu peux me donner", "tu peux me dire",
+		"donne moi", "est ce que tu as", "est ce que tu peux", "s il te plait", "s il vous plait", "stp", "svp",
+		"merci", "salut", "bonjour", "coucou", "hello", "d aujourd hui", "aujourd hui", "actuellement", "en ce moment",
+	}
+	for _, f := range fillers {
+		clean = strings.TrimSpace(strings.ReplaceAll(" "+clean+" ", " "+f+" ", " "))
+	}
+	clean = strings.Join(strings.Fields(clean), " ")
+
+	// 3. Formules strictement valides pour demander la date du jour
+	validDateQueries := []string{
+		"quel jour on est",
+		"quel jour sommes nous",
+		"on est quel jour",
+		"sommes nous quel jour",
+		"c est quel jour",
+		"quelle est la date",
+		"c est quoi la date",
+		"quelle date on est",
+		"on est quelle date",
+		"c est quelle date",
+		"la date",
+		"la date exacte",
+		"la date du jour",
+	}
+
+	for _, v := range validDateQueries {
+		if clean == v {
+			return true
 		}
 	}
 	return false
@@ -3579,13 +3863,19 @@ func detectMediaControlIntent(input string) (string, bool) {
 }
 
 func isNextCommand(s string) bool {
-	if s == "next" || s == "skip" || s == "suivant" || s == "suivante" || s == "suivants" || s == "suivantes" || s == "passe" {
+	if s == "next" || s == "skip" || s == "suivant" || s == "suivante" || s == "suivants" || s == "suivantes" || s == "passe" ||
+		s == "le suivant" || s == "la suivante" || s == "la suite" || s == "a la suite" || s == "à la suite" ||
+		s == "creation suivante" || s == "la creation suivante" || s == "mix suivant" || s == "le mix suivant" ||
+		s == "la c est le suivant" {
 		return true
 	}
 	if s == "au suivant" || s == "a la suivante" || s == "à la suivante" || s == "aux suivants" {
 		return true
 	}
 	if s == "passe au suivant" || s == "passe a la suivante" || s == "passe à la suivante" ||
+		s == "passe a la suite" || s == "passe à la suite" || s == "passe la suite" || s == "passe la suite en" ||
+		s == "passez au suivant" || s == "passez a la suivante" || s == "passez à la suivante" ||
+		s == "passez a la suite" || s == "passez à la suite" || s == "passez la suite" || s == "passez la suite en" ||
 		s == "passe au morceau suivant" || s == "passe au titre suivant" || s == "passe a la chanson suivante" ||
 		s == "passe a la musique suivante" || s == "passe a la piste suivante" {
 		return true
@@ -3637,10 +3927,16 @@ func isNextCommand(s string) bool {
 
 func isPreviousCommand(s string) bool {
 	if s == "previous" || s == "prev" || s == "back" || s == "précédent" || s == "precedent" || s == "précédente" || s == "precedente" ||
-		s == "au precedent" || s == "a la precedente" || s == "au précédent" || s == "à la précédente" || s == "retour" {
+		s == "précédant" || s == "precedant" || s == "précédante" || s == "precedante" ||
+		s == "le precedent" || s == "la precedente" || s == "le precedant" || s == "la precedante" ||
+		s == "au precedent" || s == "a la precedente" || s == "au precedant" || s == "a la precedante" ||
+		s == "au précédent" || s == "à la précédente" || s == "retour" ||
+		s == "creation precedente" || s == "creation precedante" || s == "la creation precedente" || s == "la creation precedante" ||
+		s == "mix precedent" || s == "mix precedant" || s == "le mix precedent" {
 		return true
 	}
 	if s == "passe au precedent" || s == "passe a la precedente" || s == "passe au précédent" || s == "passe à la précédente" ||
+		s == "passe au precedant" || s == "passe a la precedante" ||
 		s == "passe au morceau precedent" || s == "passe au titre precedent" || s == "passe a la chanson precedente" || s == "passe a la musique precedente" {
 		return true
 	}
@@ -3649,7 +3945,9 @@ func isPreviousCommand(s string) bool {
 		s == "le titre precedent" || s == "le morceau precedent" || s == "la chanson precedente" || s == "la musique precedente" {
 		return true
 	}
-	if s == "mets le precedent" || s == "mets la precedente" || s == "joue le precedent" || s == "joue la precedente" || s == "lance le precedent" || s == "lance la precedente" {
+	if s == "mets le precedent" || s == "mets la precedente" || s == "mets le precedant" || s == "mets la precedante" ||
+		s == "joue le precedent" || s == "joue la precedente" || s == "joue le precedant" || s == "joue la precedante" ||
+		s == "lance le precedent" || s == "lance la precedente" || s == "lance le precedant" || s == "lance la precedante" {
 		return true
 	}
 	if s == "chanson d avant" || s == "morceau d avant" || s == "titre d avant" || s == "musique d avant" || s == "reviens en arriere" || s == "reviens en arrière" {
@@ -3657,7 +3955,9 @@ func isPreviousCommand(s string) bool {
 	}
 	if len(s) < 45 {
 		if strings.HasSuffix(s, "precedent") || strings.HasSuffix(s, "precedente") ||
+			strings.HasSuffix(s, "precedant") || strings.HasSuffix(s, "precedante") ||
 			strings.HasSuffix(s, "précédent") || strings.HasSuffix(s, "précédente") ||
+			strings.HasSuffix(s, "précédant") || strings.HasSuffix(s, "précédante") ||
 			strings.HasSuffix(s, "musique precedente") || strings.HasSuffix(s, "chanson precedente") ||
 			strings.HasSuffix(s, "morceau precedent") || strings.HasSuffix(s, "titre precedent") {
 			return true
@@ -3668,14 +3968,22 @@ func isPreviousCommand(s string) bool {
 
 func isStopCommand(s string) bool {
 	if s == "stop" || s == "arrête" || s == "arrete" || s == "quitte" || s == "coupe" || s == "silence" ||
-		s == "tais toi" || s == "tais-toi" || s == "taire" || s == "stoppe" {
+		s == "tais toi" || s == "tais-toi" || s == "taire" || s == "stoppe" || s == "stop it" {
 		return true
 	}
-	if strings.HasPrefix(s, "arrête la musique") || strings.HasPrefix(s, "arrete la musique") ||
-		strings.HasPrefix(s, "arrête le son") || strings.HasPrefix(s, "arrete le son") ||
-		strings.HasPrefix(s, "coupe la musique") || strings.HasPrefix(s, "coupe le son") ||
-		strings.HasPrefix(s, "stop la musique") || strings.HasPrefix(s, "stop le son") ||
-		strings.HasPrefix(s, "stoppe la musique") || s == "stop musique" {
+	if strings.Contains(s, "arrete la musique") || strings.Contains(s, "arrête la musique") ||
+		strings.Contains(s, "arrete le flux") || strings.Contains(s, "arrête le flux") ||
+		strings.Contains(s, "coupe le flux") || strings.Contains(s, "stop le flux") ||
+		strings.Contains(s, "paraitre le flux") || strings.Contains(s, "paraître le flux") ||
+		strings.Contains(s, "arret de la musique") || strings.Contains(s, "arrêt de la musique") ||
+		strings.Contains(s, "arreter la musique") || strings.Contains(s, "arrêter la musique") ||
+		strings.Contains(s, "arrete le son") || strings.Contains(s, "arrête le son") ||
+		strings.Contains(s, "arreter le son") || strings.Contains(s, "arrêter le son") ||
+		strings.Contains(s, "coupe la musique") || strings.Contains(s, "coupe le son") ||
+		strings.Contains(s, "couper la musique") || strings.Contains(s, "couper le son") ||
+		strings.Contains(s, "stop la musique") || strings.Contains(s, "stop le son") ||
+		strings.Contains(s, "stoppe la musique") || strings.Contains(s, "stoppe le son") ||
+		s == "stop musique" || s == "coupe musique" || s == "fin de la musique" {
 		return true
 	}
 	return false
@@ -4017,6 +4325,209 @@ func formatDJRemixAnnouncement(rank int, baseTitle, artist, remix string) string
 	return fmt.Sprintf("On poursuit le set DJ Remix avec %s.", cleanTitle)
 }
 
+// detectKDJIntent detects explicit requests to launch or filter creations from the K DJ YouTube channel (https://www.youtube.com/@kdj8363),
+// including Whisper French STT phonetic variants ("kdj", "kdg", "k dj", "k dg", "k d j", "k d g", "kadj", "cadj").
+func detectKDJIntent(input string) bool {
+	clean := normalizeFrench(input)
+	if clean == "" {
+		return false
+	}
+
+	if _, isCtrl := detectMediaControlIntent(input); isCtrl {
+		return false
+	}
+
+	lowerRaw := strings.ToLower(input)
+	if strings.Contains(lowerRaw, "@kdj8363") || strings.Contains(clean, "kdj8363") {
+		return true
+	}
+
+	words := strings.Fields(clean)
+	for i, w := range words {
+		if w == "kdj" || w == "kdg" || w == "kadj" || w == "cadj" || w == "kadidje" || w == "kadije" ||
+			strings.HasPrefix(w, "kdj") || strings.HasPrefix(w, "kdg") {
+			return true
+		}
+		if w == "k" && i+1 < len(words) && (words[i+1] == "dj" || words[i+1] == "dg" || words[i+1] == "didier" || strings.HasPrefix(words[i+1], "dj") || strings.HasPrefix(words[i+1], "dg")) {
+			return true
+		}
+		if w == "k" && i+2 < len(words) && words[i+1] == "d" && (words[i+2] == "j" || words[i+2] == "g") {
+			return true
+		}
+		if w == "kd" && i+1 < len(words) && (words[i+1] == "j" || words[i+1] == "g") {
+			return true
+		}
+	}
+
+	return false
+}
+
+// isKDJSessionActive returns true if a KDJ (@kdj8363) session is currently playing or queued in the scheduler.
+func (a *SuperiorAgent) isKDJSessionActive() bool {
+	if a == nil || a.scheduler == nil {
+		return false
+	}
+	for _, t := range a.scheduler.GetTasks() {
+		if t.Type == "play_music" && (t.Status == scheduler.StatusRunning || t.Status == scheduler.StatusPending) {
+			if strings.Contains(t.Name, "K DJ (@kdj8363)") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+var reKDJYearFilter = regexp.MustCompile(`\b(19\d{2}|20\d{2})\b`)
+
+// detectKDJContextualIntent detects either an explicit KDJ request ("lance moi kdj", "lance kdj année 1982")
+// or a follow-up keyword refinement ("année 1982", "REMIX", "Club haus") while a KDJ session is active,
+// without blocking any other music playback modes.
+func (a *SuperiorAgent) detectKDJContextualIntent(input string) bool {
+	if detectKDJIntent(input) {
+		return true
+	}
+	if !a.isKDJSessionActive() {
+		return false
+	}
+
+	clean := normalizeFrench(input)
+	if clean == "" || len(clean) > 70 {
+		return false
+	}
+
+	if _, isCtrl := detectMediaControlIntent(input); isCtrl {
+		return false
+	}
+	if detectBillboardIntent(input) {
+		return false
+	}
+	if strings.Contains(clean, "repertoire") || strings.Contains(clean, "dossier") ||
+		strings.Contains(clean, "local") || strings.Contains(clean, "mix extended") ||
+		strings.Contains(clean, "mix_extended") || strings.Contains(clean, "telecharge") {
+		return false
+	}
+
+	// Explicit keyword filter markers while KDJ is active
+	if strings.Contains(clean, "mot cle") || strings.Contains(clean, "precise") || strings.Contains(clean, "filtre") {
+		return true
+	}
+
+	// Style/genre keywords specific to KDJ channel navigation while KDJ is active
+	kdjKeywords := []string{
+		"club haus", "clubhaus", "club house", "clubhouse", "club dance",
+		"eurodance", "italo disco", "new wave", "retromix", "retro mix", "party mix", "megamix",
+		"80s", "90s", "annees 80", "annees 90",
+	}
+	for _, kw := range kdjKeywords {
+		if strings.Contains(clean, kw) {
+			return true
+		}
+	}
+
+	// Year filter while KDJ is active (e.g. "année 1982", "1982", "mets année 1982")
+	if reKDJYearFilter.MatchString(clean) && (strings.Contains(clean, "annee") || len(strings.Fields(clean)) <= 4) {
+		return true
+	}
+
+	// "REMIX" keyword refinement while KDJ is active (unless the user explicitly asks "lance moi un remix" for the generic DJ Remix skill)
+	if (clean == "remix" || clean == "remixes" || strings.HasSuffix(clean, " remix")) &&
+		!strings.Contains(clean, "lance moi un remix") && !strings.Contains(clean, "mets un remix") {
+		return true
+	}
+
+	return false
+}
+
+func (a *SuperiorAgent) handleKDJDirect(ctx context.Context, input string) string {
+	if a.skillManager == nil || a.scheduler == nil {
+		return "Le gestionnaire de tâches ou de briques n'est pas initialisé."
+	}
+	result, err := a.skillManager.ExecuteSkill(ctx, "kdj", "--json "+input)
+	if err != nil {
+		return fmt.Sprintf("Désolé, je n'ai pas pu me connecter à la chaîne YouTube K DJ (@kdj8363) : %v", err)
+	}
+	var kdjData struct {
+		ChannelURL string   `json:"channel_url"`
+		Label      string   `json:"label"`
+		Keyword    string   `json:"keyword"`
+		Count      int      `json:"count"`
+		Proposals  []string `json:"proposals"`
+		Tracks     []struct {
+			Rank  int    `json:"rank"`
+			Title string `json:"title"`
+			Query string `json:"query"`
+			URL   string `json:"url"`
+		} `json:"tracks"`
+	}
+	if errJSON := json.Unmarshal([]byte(strings.TrimSpace(result)), &kdjData); errJSON != nil || len(kdjData.Tracks) == 0 {
+		return "Désolé, je n'ai trouvé aucune création disponible sur la chaîne YouTube K DJ (@kdj8363)."
+	}
+
+	a.scheduler.CancelAutoplay()
+	if a.webAgent != nil {
+		_, _ = a.webAgent.ControlMedia("stop")
+	}
+	for _, t := range a.scheduler.GetTasks() {
+		if t.Type == "play_music" && (t.Status == scheduler.StatusRunning || t.Status == scheduler.StatusPending) {
+			_ = a.scheduler.Cancel(t.ID)
+		}
+	}
+
+	targetDevice := a.resolveTargetDevice(input)
+
+	for i, tr := range kdjData.Tracks {
+		rank := tr.Rank
+		if rank <= 0 {
+			rank = i + 1
+		}
+		taskLabel := fmt.Sprintf("🎛️ %s #%d : %s", kdjData.Label, rank, tr.Title)
+		t := a.scheduler.EnqueueWithDevice("play_music", taskLabel, tr.Query, 0, targetDevice)
+		if t != nil {
+			if tr.URL != "" {
+				t.ResolvedURL = tr.URL
+				t.ResolvedTitle = tr.Title
+				t.IsDirect = true
+			}
+			t.SetAnnouncement(formatKDJAnnouncement(rank, tr.Title, kdjData.Keyword))
+		}
+	}
+	a.scheduler.TriggerDispatch()
+	return ""
+}
+
+func formatKDJAnnouncement(rank int, title string, keyword string) string {
+	cleanTitle := cleanSongForSpeech(title)
+	if rank == 1 {
+		if keyword != "" {
+			return fmt.Sprintf("Connexion à la chaîne K DJ, sélection %s ! On commence avec : %s !", keyword, cleanTitle)
+		}
+		return fmt.Sprintf("Connexion à la chaîne K DJ ! On commence avec : %s !", cleanTitle)
+	}
+	if keyword != "" {
+		templates := []string{
+			"On poursuit la sélection K DJ spéciale %s avec : %s.",
+			"Toujours sur la chaîne K DJ en mode %s, voici : %s.",
+			"Création suivante de K DJ pour %s : %s.",
+		}
+		idx := (rank - 2) % len(templates)
+		if idx < 0 {
+			idx = 0
+		}
+		return fmt.Sprintf(templates[idx], keyword, cleanTitle)
+	}
+	templates := []string{
+		"On enchaîne sur la chaîne K DJ avec : %s.",
+		"Création suivante de K DJ : %s.",
+		"Le mix K DJ continue avec : %s.",
+		"Toujours sur les platines de K DJ, voici : %s.",
+	}
+	idx := (rank - 2) % len(templates)
+	if idx < 0 {
+		idx = 0
+	}
+	return fmt.Sprintf(templates[idx], cleanTitle)
+}
+
 func (a *SuperiorAgent) buildSchedulerContext() string {
 	if a.scheduler == nil {
 		return ""
@@ -4027,11 +4538,30 @@ func (a *SuperiorAgent) buildSchedulerContext() string {
 		return "\n\n--- GESTIONNAIRE DE TÂCHES ASYNCHRONES (SCHEDULER) ---\nAucune tâche asynchrone n'est enregistrée ou en cours.\n-----------------------------------------------------"
 	}
 
+	// Keep all active (pending/running) tasks plus at most the 5 most recent finished tasks
+	// so long-running sessions do not bloat additionalContext.
+	var activeTasks []*scheduler.Task
+	var finishedTasks []*scheduler.Task
+	for _, t := range tasks {
+		if t.Status == scheduler.StatusPending || t.Status == scheduler.StatusRunning {
+			activeTasks = append(activeTasks, t)
+		} else {
+			finishedTasks = append(finishedTasks, t)
+		}
+	}
+	const maxRecentFinished = 5
+	if len(finishedTasks) > maxRecentFinished {
+		finishedTasks = finishedTasks[len(finishedTasks)-maxRecentFinished:]
+	}
+	selectedTasks := make([]*scheduler.Task, 0, len(activeTasks)+len(finishedTasks))
+	selectedTasks = append(selectedTasks, finishedTasks...)
+	selectedTasks = append(selectedTasks, activeTasks...)
+
 	var sb strings.Builder
 	sb.WriteString("\n\n--- GESTIONNAIRE DE TÂCHES ASYNCHRONES (SCHEDULER) ---\n")
 	sb.WriteString("Voici l'état actuel de ton gestionnaire de tâches asynchrones d'arrière-plan :\n")
 
-	for _, t := range tasks {
+	for _, t := range selectedTasks {
 		timeInfo := ""
 		if t.Status == scheduler.StatusPending {
 			timeInfo = fmt.Sprintf(" (Planifiée pour %s)", t.ScheduledAt.Format("15:04:05"))
@@ -4936,18 +5466,10 @@ CONSIGNES POUR TON MESSAGE :
 // isProactiveInterpellation détecte si un message assistant est une interpellation proactive
 // (question du VisionAgent, curiosité environnementale, relance du CuriosityAgent...)
 // plutôt qu'une réponse longue à une question de l'utilisateur.
-func isProactiveInterpellation(assistantMsg string) bool {
-	// Un message proactif est typiquement court et contient une question ou une interpellation
+func hasProactiveInterpellationMarker(assistantMsg string) bool {
 	if len(assistantMsg) > 500 {
-		return false // Les réponses longues ne sont pas des interpellations proactives
+		return false
 	}
-
-	// Contient une question directe ?
-	if strings.Contains(assistantMsg, "?") {
-		return true
-	}
-
-	// Marqueurs d'interpellation proactive (VisionAgent, CuriosityAgent)
 	lower := strings.ToLower(assistantMsg)
 	interpellationMarkers := []string{
 		"qui es-tu",
@@ -4967,8 +5489,21 @@ func isProactiveInterpellation(assistantMsg string) bool {
 			return true
 		}
 	}
-
 	return false
+}
+
+func isProactiveInterpellation(assistantMsg string) bool {
+	// Un message proactif est typiquement court et contient une question ou une interpellation
+	if len(assistantMsg) > 500 {
+		return false // Les réponses longues ne sont pas des interpellations proactives
+	}
+
+	// Contient une question directe ?
+	if strings.Contains(assistantMsg, "?") {
+		return true
+	}
+
+	return hasProactiveInterpellationMarker(assistantMsg)
 }
 
 func (a *SuperiorAgent) resolveContextPlaylist(ctx context.Context, history []llm.Message) string {
@@ -5000,7 +5535,7 @@ Consignes strictes :
 		messages = append(messages, history[i])
 	}
 
-	resp, err := a.llmProvider.Generate(ctx, messages)
+	resp, err := llm.GenerateWithTokens(ctx, a.llmProvider, messages, 256)
 	if err != nil {
 		fmt.Printf("[PlaylistResolver] Erreur lors de la résolution de la playlist : %v\n", err)
 		return ""

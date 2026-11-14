@@ -163,6 +163,8 @@ func NewPublishArticleHandlerWithBibliographicAuditor(broadcaster EventBroadcast
 			task.AppendLog(fmt.Sprintf("Erreur format payload : %v", err))
 			return fmt.Errorf("invalid payload: %w", err)
 		}
+		payload.Title = CleanExtractedField(payload.Title)
+		payload.Keywords = CleanExtractedField(payload.Keywords)
 
 		var draft *ArticleDraft
 
@@ -280,10 +282,10 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 				genContent = res
 			}
 			if genTitle != "" {
-				payload.Title = genTitle
+				payload.Title = CleanExtractedField(genTitle)
 			}
 			if genKeywords != "" {
-				payload.Keywords = genKeywords
+				payload.Keywords = CleanExtractedField(genKeywords)
 			}
 			genContent = CleanToSemanticHTML(genContent, payload.Title)
 			payload.Content = genContent
@@ -323,8 +325,8 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 			} else {
 				task.AppendLog(fmt.Sprintf("Relecture et validation réussies ! Notes : %s", revNotes))
 				_ = draftManager.UpdateReviewedContent(draft.ID, revTitle, revKeywords, revContent, revNotes)
-				payload.Title = revTitle
-				payload.Keywords = revKeywords
+				payload.Title = CleanExtractedField(revTitle)
+				payload.Keywords = CleanExtractedField(revKeywords)
 				payload.Content = revContent
 			}
 		} else if draft != nil && draft.Status != DraftStatusValidated && !alreadyFactChecked {
@@ -573,22 +575,35 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 		// 4. Fill Article Form
 		task.AppendLog("Remplissage du formulaire de l'article...")
 
-		// Fill Title
-		err = chromedp.Run(chromeCtx,
-			chromedp.WaitVisible(`input[placeholder*="Titre"]`, chromedp.ByQuery),
-			chromedp.SendKeys(`input[placeholder*="Titre"]`, payload.Title, chromedp.ByQuery),
+		// Fill Title safely via evaluate (avoids Enter key event triggering premature form actions)
+		cleanTitle := CleanExtractedField(payload.Title)
+		payload.Title = cleanTitle
+		var titleFilled bool
+		titleCtx, cancelTitle := context.WithTimeout(chromeCtx, 15*time.Second)
+		err = chromedp.Run(titleCtx,
+			chromedp.Evaluate(fmt.Sprintf(`(function() {
+				const titleInput = document.querySelector('input[placeholder*="Titre"], input[name="title"], #title');
+				if (titleInput) {
+					titleInput.value = %q;
+					titleInput.dispatchEvent(new Event('input', { bubbles: true }));
+					titleInput.dispatchEvent(new Event('change', { bubbles: true }));
+					return true;
+				}
+				return false;
+			})()`, cleanTitle), &titleFilled),
 		)
-		if err != nil {
-			// Fallback selectors for Title
-			chromedp.Run(chromeCtx, chromedp.SendKeys(`input[name="title"]`, payload.Title, chromedp.ByQuery))
+		cancelTitle()
+		if err != nil || !titleFilled {
+			task.AppendLog(fmt.Sprintf("Avertissement lors de la saisie du titre : %v", err))
 		}
 
 		// Select Category
 		if payload.Category != "" {
 			task.AppendLog(fmt.Sprintf("Sélection de la catégorie : %s", payload.Category))
-			chromedp.Run(chromeCtx,
+			catCtx, cancelCat := context.WithTimeout(chromeCtx, 15*time.Second)
+			_ = chromedp.Run(catCtx,
 				chromedp.Evaluate(fmt.Sprintf(`(function() {
-					const select = document.querySelector('select');
+					const select = document.querySelector('select#category_id, select');
 					if (!select) return false;
 					const options = Array.from(select.options);
 					const targetText = %q.toLowerCase();
@@ -607,6 +622,7 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 					return false;
 				})()`, payload.Category), nil),
 			)
+			cancelCat()
 		}
 
 		// Handle Image Search with Multi-Query Navigation, Anti-Duplication and Vision Verification
@@ -626,7 +642,8 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 		task.AppendLog("Sélection du fournisseur d'images Unsplash...")
 		var providerSelected bool
 		for i := 0; i < 6; i++ {
-			err = chromedp.Run(chromeCtx,
+			pCtx, cancelP := context.WithTimeout(chromeCtx, 5*time.Second)
+			err = chromedp.Run(pCtx,
 				chromedp.Evaluate(`(function() {
 					const select = document.getElementById('imageProvider');
 					if (!select) return false;
@@ -639,6 +656,7 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 					return false;
 				})()`, &providerSelected),
 			)
+			cancelP()
 			if err == nil && providerSelected {
 				break
 			}
@@ -650,22 +668,47 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 
 		// Loop through visual queries until a high-scoring unused image (score >= 6) is found
 		for qIdx, vQuery := range visualQueries {
+			vQuery = CleanExtractedField(vQuery)
 			task.AppendLog(fmt.Sprintf("Recherche Unsplash #%d/%d avec la requête : '%s'...", qIdx+1, len(visualQueries), vQuery))
 
-			err = chromedp.Run(chromeCtx,
-				chromedp.WaitVisible(`#imageKeywords`, chromedp.ByID),
-				chromedp.Evaluate(fmt.Sprintf(`document.getElementById('imageKeywords').value = %q;`, vQuery), nil),
-				chromedp.Click(`#searchButton`, chromedp.ByID),
-				chromedp.Sleep(8*time.Second), // Wait for API response
+			// Safeguard: verify page is still on creation form
+			var currentCheckURL string
+			_ = chromedp.Run(chromeCtx, chromedp.Location(&currentCheckURL))
+			if !strings.Contains(currentCheckURL, "/create") && !strings.Contains(currentCheckURL, "/new") {
+				task.AppendLog(fmt.Sprintf("Avertissement : la page a dévié vers %s. Réalignement sur le formulaire...", currentCheckURL))
+				_ = chromedp.Run(chromeCtx, chromedp.Navigate(createURL+"new"), chromedp.Sleep(2*time.Second))
+			}
+
+			// Trigger search via JS click (safe from sticky navbar coordinates interference)
+			var searchLaunched bool
+			stepCtx, cancelStep := context.WithTimeout(chromeCtx, 25*time.Second)
+			err = chromedp.Run(stepCtx,
+				chromedp.Evaluate(fmt.Sprintf(`(function() {
+					const kw = document.getElementById('imageKeywords');
+					if (kw) {
+						kw.value = %q;
+						kw.dispatchEvent(new Event('input', { bubbles: true }));
+						kw.dispatchEvent(new Event('change', { bubbles: true }));
+					}
+					const btn = document.getElementById('searchButton');
+					if (btn) {
+						btn.click();
+						return true;
+					}
+					return false;
+				})()`, vQuery), &searchLaunched),
+				chromedp.Sleep(6*time.Second), // Wait for API response
 			)
-			if err != nil {
+			cancelStep()
+			if err != nil || !searchLaunched {
 				task.AppendLog(fmt.Sprintf("Avertissement : échec du lancement de la recherche pour '%s' : %v", vQuery, err))
 				continue
 			}
 
 			// Extract candidate image URLs from DOM
 			var candidateUrls []string
-			err = chromedp.Run(chromeCtx,
+			evalCtx, cancelEval := context.WithTimeout(chromeCtx, 10*time.Second)
+			err = chromedp.Run(evalCtx,
 				chromedp.Evaluate(`(function() {
 					const container = document.getElementById('imageOptions') || document.querySelector('.unsplash-results');
 					if (!container) return [];
@@ -673,6 +716,7 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 					return imgs.map(img => img.src).filter(src => src && src.startsWith('http'));
 				})()`, &candidateUrls),
 			)
+			cancelEval()
 
 			if err != nil || len(candidateUrls) == 0 {
 				task.AppendLog(fmt.Sprintf("Aucune image trouvée pour la requête '%s'.", vQuery))
@@ -716,39 +760,32 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 
 		// Apply selected image to Chrome form
 		if selectedImageUrl != "" {
-			err = chromedp.Run(chromeCtx,
+			imgCtx, cancelImg := context.WithTimeout(chromeCtx, 15*time.Second)
+			err = chromedp.Run(imgCtx,
 				chromedp.Evaluate(fmt.Sprintf(`(function() {
 					const container = document.getElementById('imageOptions') || document.querySelector('.unsplash-results');
 					if (container) {
 						const img = Array.from(container.querySelectorAll('img')).find(i => i.src === %q);
 						if (img) {
-							let el = img;
-							while (el && el !== container) {
-								el.click();
-								el = el.parentElement;
+							if (typeof selectImage === 'function') {
+								selectImage(img.src);
+							} else {
+								img.click();
 							}
-							if (typeof selectImage === 'function') selectImage(img.src);
-							
-							const inputs = document.querySelectorAll('input[type="hidden"], input[name*="image"], input[name*="thumbnail"], input[name*="cover"]');
-							inputs.forEach(i => {
-								if (i.name && (i.name.toLowerCase().includes('image') || i.name.toLowerCase().includes('thumb') || i.name.toLowerCase().includes('cover') || i.name.toLowerCase().includes('url'))) {
-									i.value = img.src;
-									i.dispatchEvent(new Event('change', { bubbles: true }));
-								}
-							});
-							return true;
 						}
 					}
-					const input = document.getElementById('image_url');
-					if (input) {
-						input.value = %q;
-						input.dispatchEvent(new Event('change', { bubbles: true }));
-						return true;
-					}
-					return false;
+					const inputs = document.querySelectorAll('input[type="hidden"], input[name*="image"], input[name*="thumbnail"], input[name*="cover"], #image_url');
+					inputs.forEach(i => {
+						if (i.id === 'image_url' || (i.name && (i.name.toLowerCase().includes('image') || i.name.toLowerCase().includes('thumb') || i.name.toLowerCase().includes('cover') || i.name.toLowerCase().includes('url')))) {
+							i.value = %q;
+							i.dispatchEvent(new Event('change', { bubbles: true }));
+						}
+					});
+					return true;
 				})()`, selectedImageUrl, selectedImageUrl), &selectedImage),
 				chromedp.Sleep(1*time.Second),
 			)
+			cancelImg()
 			if selectedImage {
 				AddUsedImage(selectedImageUrl)
 			}
@@ -757,18 +794,23 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 		// Fallback if no candidate scored >= 6
 		if !selectedImage {
 			task.AppendLog("Avertissement : Aucune image candidate n'a atteint le score de 6/10. Utilisation du fallback...")
-			err = chromedp.Run(chromeCtx,
+			fbCtx, cancelFb := context.WithTimeout(chromeCtx, 15*time.Second)
+			_ = chromedp.Run(fbCtx,
 				chromedp.Evaluate(`(function() {
 					const container = document.getElementById('imageOptions') || document.querySelector('.unsplash-results');
 					if (container) {
 						const img = container.querySelector('img');
 						if (img) {
-							let el = img;
-							while (el && el !== container) {
-								el.click();
-								el = el.parentElement;
+							if (typeof selectImage === 'function') {
+								selectImage(img.src);
+							} else {
+								img.click();
 							}
-							if (typeof selectImage === 'function') selectImage(img.src);
+							const input = document.getElementById('image_url');
+							if (input) {
+								input.value = img.src;
+								input.dispatchEvent(new Event('change', { bubbles: true }));
+							}
 							return true;
 						}
 					}
@@ -776,6 +818,7 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 				})()`, &selectedImage),
 				chromedp.Sleep(1*time.Second),
 			)
+			cancelFb()
 		}
 
 		if !selectedImage {
@@ -786,15 +829,18 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 
 		// Fill Content
 		task.AppendLog("Insertion du contenu de l'article...")
-		err = chromedp.Run(chromeCtx,
+		contentCtx, cancelContent := context.WithTimeout(chromeCtx, 20*time.Second)
+		err = chromedp.Run(contentCtx,
 			chromedp.Evaluate(fmt.Sprintf(`(function() {
 				let set = false;
 				if (typeof tinymce !== 'undefined') {
 					const editor = tinymce.get('raw_content') || tinymce.activeEditor;
 					if (editor) {
 						editor.setContent(%q);
+						if (typeof editor.save === 'function') editor.save();
 						set = true;
 					}
+					tinymce.triggerSave();
 				}
 				if (typeof CKEDITOR !== 'undefined' && CKEDITOR.instances) {
 					for (const key in CKEDITOR.instances) {
@@ -812,6 +858,7 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 				return set;
 			})()`, payload.Content, payload.Content, payload.Content), nil),
 		)
+		cancelContent()
 		if err != nil {
 			task.AppendLog(fmt.Sprintf("Avertissement lors de la saisie du contenu : %v", err))
 		}
@@ -819,7 +866,8 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 		// Keep draft checkbox checked on initial creation so the draft is saved immediately
 		// before running "Améliorer avec l'IA" and the 4 translations on the edit page.
 		task.AppendLog("Création initiale en mode brouillon (avant amélioration IA et traductions)...")
-		err = chromedp.Run(chromeCtx,
+		draftCtx, cancelDraft := context.WithTimeout(chromeCtx, 15*time.Second)
+		err = chromedp.Run(draftCtx,
 			chromedp.Evaluate(`(function() {
 				if (typeof tinymce !== 'undefined') tinymce.triggerSave();
 				const draftInputs = document.querySelectorAll('input[name="is_draft"], input[id*="draft"]');
@@ -836,6 +884,7 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 				return true;
 			})()`, nil),
 		)
+		cancelDraft()
 		if err != nil {
 			task.AppendLog(fmt.Sprintf("Avertissement lors de la configuration initiale du brouillon : %v", err))
 		}
@@ -843,25 +892,28 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 		// Submit article form to create the draft and open /edit
 		task.AppendLog("Soumission initiale de l'article pour accéder à la page d'édition...")
 		var submitted bool
-		err = chromedp.Run(chromeCtx,
+		submitCtx, cancelSubmit := context.WithTimeout(chromeCtx, 20*time.Second)
+		err = chromedp.Run(submitCtx,
 			chromedp.Evaluate(`(function() {
 				if (typeof tinymce !== 'undefined') tinymce.triggerSave();
-				const buttons = Array.from(document.querySelectorAll('button, input[type="submit"]'));
-				for (const b of buttons) {
-					const text = (b.innerText || b.textContent || b.value || '').toLowerCase();
-					if (text.includes('enregistrer') || text.includes('publier') || text.includes('sauvegarder') || text.includes('submit') || text.includes('publish') || text.includes('creer') || text.includes('créer')) {
-						b.click();
+				const form = document.getElementById('articleForm') || document.querySelector('form[action*="articles"]') || document.querySelector('form');
+				if (form) {
+					const submitBtn = form.querySelector('button[type="submit"], input[type="submit"]');
+					if (submitBtn) {
+						submitBtn.click();
 						return true;
 					}
-				}
-				const form = document.querySelector('form');
-				if (form) {
+					if (typeof form.requestSubmit === 'function') {
+						form.requestSubmit();
+						return true;
+					}
 					form.submit();
 					return true;
 				}
 				return false;
 			})()`, &submitted),
 		)
+		cancelSubmit()
 		if err != nil || !submitted {
 			task.AppendLog("Échec de la soumission du formulaire.")
 			return recordFailure("Le formulaire d'édition n'a pas pu être soumis sur le serveur", err)
@@ -871,17 +923,19 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 		task.AppendLog("Attente de la redirection vers la page d'édition...")
 		var redirectSuccess bool
 		for i := 0; i < 90; i++ {
-			err = chromedp.Run(chromeCtx,
+			pollCtx, cancelPoll := context.WithTimeout(chromeCtx, 3*time.Second)
+			err = chromedp.Run(pollCtx,
 				chromedp.Evaluate(`(function() {
 					const url = window.location.href;
 					if (!url.includes('/create') && !url.includes('/new')) {
-						if (document.getElementById('enhanceBtn') || document.querySelector('table') || document.querySelector('tr')) {
+						if (url.includes('/edit') || document.getElementById('enhanceBtn') || document.querySelector('table') || document.querySelector('tr')) {
 							return true;
 						}
 					}
 					return false;
 				})()`, &redirectSuccess),
 			)
+			cancelPoll()
 			if err == nil && redirectSuccess {
 				break
 			}
@@ -1054,6 +1108,21 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 				});
 
 				window.__pixelSubmitting = true;
+				const form = document.getElementById('articleForm') || document.querySelector('form[action*="articles"]') || document.querySelector('form');
+				if (form) {
+					const submitBtn = form.querySelector('button[type="submit"], input[type="submit"]');
+					if (submitBtn) {
+						submitBtn.scrollIntoView({ behavior: 'instant', block: 'center' });
+						submitBtn.click();
+						return true;
+					}
+					if (typeof form.requestSubmit === 'function') {
+						form.requestSubmit();
+						return true;
+					}
+					form.submit();
+					return true;
+				}
 				const buttons = Array.from(document.querySelectorAll('button[type="submit"], input[type="submit"], button'));
 				for (const b of buttons) {
 					const text = (b.innerText || b.textContent || b.value || '').toLowerCase();
@@ -1063,11 +1132,6 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 						b.click();
 						return true;
 					}
-				}
-				const form = document.getElementById('articleForm') || document.querySelector('form');
-				if (form) {
-					form.submit();
-					return true;
 				}
 				return false;
 			})()`, &saved),

@@ -134,6 +134,18 @@ func (m *DraftManager) GetDirectory() string {
 	return m.dir
 }
 
+// CleanExtractedField removes markdown delimiters (e.g. ---, ***), quotes and newlines from titles and keywords.
+func CleanExtractedField(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimRight(s, "-\r\n*# \t")
+	s = strings.TrimSpace(s)
+	s = strings.Trim(s, "\"`'«»")
+	s = strings.TrimSpace(s)
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	return strings.Join(strings.Fields(s), " ")
+}
+
 // CreateDraft initializes a new ArticleDraft, persists it to disk, and returns it.
 func (m *DraftManager) CreateDraft(title, topic, category, keywords, rawContent string) (*ArticleDraft, error) {
 	m.mu.Lock()
@@ -145,6 +157,9 @@ func (m *DraftManager) CreateDraft(title, topic, category, keywords, rawContent 
 	if category == "" {
 		category = "Technologies"
 	}
+
+	title = CleanExtractedField(title)
+	keywords = CleanExtractedField(keywords)
 
 	draft := &ArticleDraft{
 		ID:         cleanID,
@@ -210,6 +225,9 @@ func (m *DraftManager) GetDraft(id string) (*ArticleDraft, error) {
 	if err := json.Unmarshal(data, &draft); err != nil {
 		return nil, fmt.Errorf("corrupted draft '%s': %w", id, err)
 	}
+
+	draft.Title = CleanExtractedField(draft.Title)
+	draft.Keywords = CleanExtractedField(draft.Keywords)
 
 	return &draft, nil
 }
@@ -297,10 +315,10 @@ func (m *DraftManager) UpdateReviewedContent(id string, reviewedTitle, reviewedK
 	defer m.mu.Unlock()
 
 	if reviewedTitle != "" {
-		draft.Title = reviewedTitle
+		draft.Title = CleanExtractedField(reviewedTitle)
 	}
 	if reviewedKeywords != "" {
-		draft.Keywords = reviewedKeywords
+		draft.Keywords = CleanExtractedField(reviewedKeywords)
 	}
 	if reviewedContent != "" {
 		draft.ReviewedContent = reviewedContent

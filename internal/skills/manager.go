@@ -129,18 +129,10 @@ func (sm *SkillManager) GetSkillsDescriptionForSystemPrompt() string {
 	sort.Strings(names)
 
 	var sb strings.Builder
-	sb.WriteString("\n\n--- 🧩 TES BRIQUES ET SKILLS DYNAMIQUES CHARGÉES (MCP) ---\n")
-	sb.WriteString("Tu possèdes les briques autonomes (skills) suivantes chargées dans ton système, que tu peux exécuter :\n")
-
-	for _, name := range names {
-		skill := sm.skills[name]
-		desc := skill.Description
-		if desc == "" {
-			desc = skill.RouterInstructions
-		}
-		sb.WriteString(fmt.Sprintf("- Brique '%s' : %s\n", skill.Name, desc))
-	}
-	sb.WriteString("----------------------------------------------------------\n")
+	sb.WriteString("\n\n--- 🧩 TES BRIQUES ET SKILLS DYNAMIQUES CHARGÉES ---\n")
+	sb.WriteString("Briques disponibles (exécutées automatiquement par le routeur si nécessaire) : ")
+	sb.WriteString(strings.Join(names, ", "))
+	sb.WriteString("\n---------------------------------------------------\n")
 	return sb.String()
 }
 

@@ -549,3 +549,116 @@ func (s *Scheduler) GetNextPendingMusicTask(currentTaskID string) *Task {
 	}
 	return nil
 }
+
+func clonePendingMusicTask(src *Task) *Task {
+	src.mu.Lock()
+	defer src.mu.Unlock()
+
+	targetDevice := src.TargetDevice
+	if targetDevice == "" {
+		targetDevice = "pc"
+	}
+	t := &Task{
+		ID:            uuid.New().String(),
+		Type:          src.Type,
+		Name:          src.Name,
+		Status:        StatusPending,
+		Payload:       src.Payload,
+		TargetDevice:  targetDevice,
+		ScheduledAt:   time.Now(),
+		ResolvedURL:   src.ResolvedURL,
+		ResolvedTitle: src.ResolvedTitle,
+		IsDirect:      src.IsDirect,
+		Announcement:  src.Announcement,
+	}
+	t.AppendLog(fmt.Sprintf("Tâche replanifiée (retour piste précédente) pour '%s'", targetDevice))
+	return t
+}
+
+// StepBackMusicTask navigates to the previous play_music task in the queue,
+// preserving the current track right after it so subsequent "next" commands
+// or natural track endings continue in order.
+func (s *Scheduler) StepBackMusicTask() (*Task, bool) {
+	s.mu.Lock()
+
+	currIdx := -1
+	for i, t := range s.tasks {
+		if t.Type == "play_music" && t.Status == StatusRunning {
+			currIdx = i
+			break
+		}
+	}
+
+	// Find the most recent finished/cancelled play_music task before currIdx (or at the end if nothing is running)
+	searchEnd := len(s.tasks)
+	if currIdx >= 0 {
+		searchEnd = currIdx
+	}
+
+	prevIdx := -1
+	for i := searchEnd - 1; i >= 0; i-- {
+		t := s.tasks[i]
+		if t.Type == "play_music" && (t.Status == StatusCompleted || t.Status == StatusCancelled || t.Status == StatusFailed) {
+			prevIdx = i
+			break
+		}
+	}
+
+	// If there is no previous track before the running track, restart the running track from the beginning
+	if prevIdx == -1 && currIdx >= 0 {
+		currTask := s.tasks[currIdx]
+		restarted := clonePendingMusicTask(currTask)
+		newTasks := make([]*Task, 0, len(s.tasks))
+		newTasks = append(newTasks, s.tasks[:currIdx]...)
+		newTasks = append(newTasks, restarted)
+		newTasks = append(newTasks, s.tasks[currIdx+1:]...)
+		s.tasks = newTasks
+		s.mu.Unlock()
+
+		_ = s.Cancel(currTask.ID)
+		go s.TriggerDispatch()
+		return restarted, true
+	}
+
+	if prevIdx == -1 {
+		s.mu.Unlock()
+		return nil, false
+	}
+
+	prevTask := s.tasks[prevIdx]
+	prevClone := clonePendingMusicTask(prevTask)
+
+	var currTask *Task
+	var currClone *Task
+	if currIdx >= 0 {
+		currTask = s.tasks[currIdx]
+		currClone = clonePendingMusicTask(currTask)
+	}
+
+	newTasks := make([]*Task, 0, len(s.tasks)+1)
+	for i, t := range s.tasks {
+		if i == prevIdx {
+			continue
+		}
+		if i == currIdx {
+			newTasks = append(newTasks, prevClone)
+			if currClone != nil {
+				newTasks = append(newTasks, currClone)
+			}
+			continue
+		}
+		newTasks = append(newTasks, t)
+	}
+	if currIdx == -1 {
+		newTasks = append(newTasks, prevClone)
+	}
+	s.tasks = newTasks
+	s.mu.Unlock()
+
+	if currTask != nil {
+		_ = s.Cancel(currTask.ID)
+	}
+	go s.TriggerDispatch()
+	return prevClone, true
+}
+

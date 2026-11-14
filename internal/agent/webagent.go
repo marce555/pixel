@@ -309,6 +309,14 @@ func (w *WebAgent) SearchWeb(query string) (string, error) {
 
 	matches := reResult.FindAllStringSubmatch(body, 5)
 	if len(matches) == 0 {
+		// Retry without trailing year if year-specific query yielded 0 results
+		reTrailingYear := regexp.MustCompile(`\s+\b(19|20)\d{2}\b$`)
+		if reTrailingYear.MatchString(strings.TrimSpace(query)) {
+			fallbackQuery := strings.TrimSpace(reTrailingYear.ReplaceAllString(strings.TrimSpace(query), ""))
+			if fallbackQuery != "" && fallbackQuery != query {
+				return w.SearchWeb(fallbackQuery)
+			}
+		}
 		return "", fmt.Errorf("aucun résultat web trouvé pour '%s'", query)
 	}
 

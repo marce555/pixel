@@ -178,9 +178,12 @@ func (p *AdaptiveProvider) handleCloudError(err error) {
 		return
 	}
 	errStr := err.Error()
-	if strings.Contains(errStr, "429") || strings.Contains(errStr, "RESOURCE_EXHAUSTED") || strings.Contains(errStr, "Quota exceeded") {
+	lowerErr := strings.ToLower(errStr)
+	if strings.Contains(errStr, "429") || strings.Contains(errStr, "402") || strings.Contains(errStr, "RESOURCE_EXHAUSTED") || strings.Contains(errStr, "Quota exceeded") || strings.Contains(lowerErr, "insufficient credits") || strings.Contains(lowerErr, "insufficient_quota") {
 		cooldownDuration := 60 * time.Second
-		if idx := strings.Index(errStr, "retry in "); idx != -1 {
+		if strings.Contains(lowerErr, "insufficient credits") || strings.Contains(lowerErr, "insufficient_quota") || strings.Contains(lowerErr, "exceeded your current quota") {
+			cooldownDuration = 15 * time.Minute
+		} else if idx := strings.Index(errStr, "retry in "); idx != -1 {
 			var secs int
 			if _, scanErr := fmt.Sscanf(errStr[idx:], "retry in %ds", &secs); scanErr == nil && secs > 0 {
 				cooldownDuration = time.Duration(secs+5) * time.Second
@@ -189,7 +192,7 @@ func (p *AdaptiveProvider) handleCloudError(err error) {
 		p.mu.Lock()
 		p.cloudCooldownUntil = time.Now().Add(cooldownDuration)
 		p.mu.Unlock()
-		fmt.Printf("[AdaptiveProvider] Limite d'API Cloud atteinte (Erreur 429 - Quota dépassé). Pause Cloud de %v. Basculement automatique vers le modèle local (%s)...\n", cooldownDuration.Round(time.Second), p.localModel)
+		fmt.Printf("[AdaptiveProvider] Limite d'API Cloud atteinte (Erreur 429 - Quota dépassé : %s). Pause Cloud de %v. Basculement automatique vers le modèle local (%s)...\n", errStr, cooldownDuration.Round(time.Second), p.localModel)
 	} else {
 		fmt.Printf("[AdaptiveProvider] Appel Cloud échoué : %v. Basculement vers le modèle local...\n", errStr)
 	}
@@ -257,8 +260,8 @@ func (p *AdaptiveProvider) GenerateStream(ctx context.Context, messages []Messag
 			defer close(outChan)
 			defer close(errChan)
 
-			// Try to connect to cloud stream with a timeout for the first token
-			cloudCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			// Try to connect to cloud stream with a timeout for the first token (30s to allow reasoning models like DeepSeek to think)
+			cloudCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			defer cancel()
 
 			cloudOut, cloudErr := cloud.GenerateStream(cloudCtx, messages)
@@ -316,7 +319,8 @@ func (p *AdaptiveProvider) CreateEmbedding(ctx context.Context, text string) ([]
 	inCooldown := time.Now().Before(p.cloudCooldownUntil)
 	p.mu.RUnlock()
 
-	if !inCooldown && (mode == "cloud" || mode == "auto" || mode == "adaptive") && cloud.APIKey != "" {
+	supportsCloudEmbed := cloud != nil && !strings.Contains(strings.ToLower(cloud.BaseURL), "1min.ai")
+	if !inCooldown && supportsCloudEmbed && (mode == "cloud" || mode == "auto" || mode == "adaptive") && cloud.APIKey != "" {
 		emb, err := cloud.CreateEmbedding(ctx, text)
 		if err == nil {
 			return emb, nil

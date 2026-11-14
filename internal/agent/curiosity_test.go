@@ -818,6 +818,65 @@ func TestSuperiorAgentDialogueVerification(t *testing.T) {
 	_ = messages2
 }
 
+func TestDialogueAntiQuestionAndPrefixCacheOrdering(t *testing.T) {
+	ctx := context.Background()
+	provider := &mockDialogueVerificationProvider{routerAction: "web"}
+	coreMem := memory.NewCoreMemory("pixel_core_memory_test_anti_question.json")
+	defer os.Remove("pixel_core_memory_test_anti_question.json")
+
+	unconscious := memory.NewUnconsciousManager()
+	sched := scheduler.NewScheduler()
+	superior := NewSuperiorAgent(provider, coreMem, &memory.LTM{}, NewWebAgent(), nil, unconscious, nil, sched, nil)
+
+	// 1. Even when router picks "web", if the previous assistant turn had a question,
+	// strict anti-ping-pong ([RÉPONSE AU DIALOGUE]) must apply instead of falling through.
+	history := []llm.Message{
+		{
+			Role:    llm.RoleAssistant,
+			Content: "Est-ce que cette vision de la dissolution t'invite à repenser les modules autonomes ?",
+		},
+		{
+			Role:    llm.RoleUser,
+			Content: "peux-tu m'expliquer qu'est-ce que c'est cette histoire de singularité j'ai pas compris",
+		},
+	}
+
+	messages, err := superior.prepareContext(ctx, history[1].Content, history, nil)
+	if err != nil {
+		t.Fatalf("prepareContext failed: %v", err)
+	}
+
+	sysPrompt := messages[0].Content
+	lastMsg := messages[len(messages)-1].Content
+
+	if !strings.Contains(lastMsg, "[RÉPONSE AU DIALOGUE]") {
+		t.Errorf("Expected strict anti-ping-pong '[RÉPONSE AU DIALOGUE]' even with routerAction='web', got: %q", lastMsg)
+	}
+	if strings.Contains(lastMsg, "aller sincèrement plus loin") || strings.Contains(sysPrompt, "ou pour creuser sincèrement") || strings.Contains(sysPrompt, "ou parce qu'une question ciblée") {
+		t.Errorf("Prompts still contain permissive follow-up question phrasing")
+	}
+
+	// 2. Prefix cache ordering: static sections must appear before changing INSTANT PRÉSENT timestamp.
+	idxStatic := strings.Index(sysPrompt, "--- PROFIL STATIQUE ---")
+	idxDirectives := strings.Index(sysPrompt, "[DIRECTIVES OPÉRATIONNELLES")
+	idxTime := strings.Index(sysPrompt, "--- INSTANT PRÉSENT ---")
+	if idxStatic == -1 || idxDirectives == -1 || idxTime == -1 {
+		t.Fatalf("Missing expected prompt sections in systemPrompt")
+	}
+	if idxStatic > idxTime || idxDirectives > idxTime {
+		t.Errorf("Expected static sections (static=%d, directives=%d) before dynamic timestamp (time=%d) for KV prefix caching", idxStatic, idxDirectives, idxTime)
+	}
+
+	// 3. Latency gating: medium conversational inputs (<= 100 runes) should skip blocking reflection loop.
+	if needsReflection("peux-tu m'expliquer qu'est-ce que c'est cette histoire de singularité j'ai pas compris", "none") {
+		t.Errorf("Expected 84-rune query to skip synchronous reflection pass")
+	}
+	longPhilo := strings.Repeat("La conscience émerge-t-elle d'un champ continu ou d'agents discrets qui s'observent mutuellement ? ", 2)
+	if !needsReflection(longPhilo, "none") {
+		t.Errorf("Expected >100-rune philosophical prompt to enable reflection")
+	}
+}
+
 func TestCoreMemoryDynamicGoals(t *testing.T) {
 	filePath := "test_dynamic_goals_core_memory.json"
 	defer os.Remove(filePath)

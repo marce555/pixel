@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -170,8 +171,9 @@ func (g *GmailAgent) checkEmails(ctx context.Context, settings memory.GmailSetti
 
 		isImportant, alertText, err := g.classifyEmail(ctx, email)
 		if err != nil {
-			fmt.Printf("[GmailAgent] Erreur classification LLM: %v\n", err)
-			continue
+			fmt.Printf("[GmailAgent] Erreur classification LLM: %v. Utilisation de l'alerte par défaut.\n", err)
+			isImportant = true
+			alertText = fmt.Sprintf("Marcelo, tu as reçu un e-mail de %s concernant : « %s ».", email.From, email.Subject)
 		}
 
 		if isImportant {
@@ -196,13 +198,16 @@ func (g *GmailAgent) checkEmails(ctx context.Context, settings memory.GmailSetti
 }
 
 func (g *GmailAgent) classifyEmail(ctx context.Context, email EmailMessage) (bool, string, error) {
-	systemPrompt := `Tu es Pixel, le compagnon conscient. Ton rôle est d'analyser un e-mail reçu par ton interlocuteur et de décider s'il est IMPORTANT et nécessite une alerte vocale ou une notification urgente immédiate.
-Un e-mail important est un message nécessitant une action rapide (ex: rendez-vous urgent, alerte système critique, message personnel important, opportunité majeure, etc.). Des e-mails promotionnels, newsletters, rapports quotidiens normaux ou spams ne sont pas importants.
+	systemPrompt := `Tu es Pixel, le compagnon conscient de Marcelo. Ton rôle est d'analyser un e-mail reçu sur sa boîte Gmail et de décider s'il nécessite une alerte immédiate.
 
-Réponds UNIQUEMENT sous forme d'un objet JSON au format exact suivant, sans blocs de code markdown ni texte superflu :
+CRITÈRES D'ALERTE :
+- METS "important": true pour : tout message personnel, professionnel, alerte de sécurité ou de connexion (ex: Disney+, Google, banque), confirmation de commande, notification de service, message d'un proche ou tout message qui intéresse directement Marcelo.
+- METS "important": false UNIQUEMENT pour : les publicités commerciales massives, prospectus promotionnels et spams évidents.
+
+RÈGLE ABSOLUE DE FORMAT : Réponds STRICTEMENT en JSON avec des GUILLEMETS DOUBLES (") pour les clés et les valeurs de chaînes :
 {
-  "important": true ou false,
-  "alert_message": "Un texte d'alerte court en français rédigé à la première personne (tutoiement), comme si Pixel venait d'avoir une pensée/alerte spontanée. Ex: 'Marcelo, je viens de voir un e-mail important de Jean concernant la réunion de ce soir.' ou 'Alerte : ton serveur a eu un crash.'"
+  "important": true,
+  "alert_message": "Marcelo, tu as reçu un message de [Expéditeur] au sujet de [Sujet]."
 }`
 
 	userPrompt := fmt.Sprintf("E-MAIL À ANALYSER :\nDe : %s\nSujet : %s\nDate : %s\n\nContenu :\n%s", email.From, email.Subject, email.Date, email.Body)
@@ -213,8 +218,9 @@ Réponds UNIQUEMENT sous forme d'un objet JSON au format exact suivant, sans blo
 	}
 
 	response, err := g.llmProvider.Generate(ctx, messages)
+	defaultAlert := fmt.Sprintf("Marcelo, tu as reçu un e-mail de %s concernant : « %s ».", email.From, email.Subject)
 	if err != nil {
-		return false, "", err
+		return true, defaultAlert, nil
 	}
 
 	response = strings.TrimSpace(response)
@@ -227,16 +233,44 @@ Réponds UNIQUEMENT sous forme d'un objet JSON au format exact suivant, sans blo
 	}
 	response = strings.TrimSpace(response)
 
+	repaired := repairJSON(response)
+
 	var result struct {
-		Important    bool   `json:"important"`
+		Important    *bool  `json:"important"`
 		AlertMessage string `json:"alert_message"`
 	}
 
-	if err := json.Unmarshal([]byte(response), &result); err != nil {
-		return false, "", fmt.Errorf("failed to parse LLM response JSON '%s': %w", response, err)
+	if err := json.Unmarshal([]byte(repaired), &result); err == nil {
+		isImp := true
+		if result.Important != nil {
+			isImp = *result.Important
+		}
+		alert := strings.TrimSpace(result.AlertMessage)
+		if alert == "" {
+			alert = defaultAlert
+		}
+		return isImp, alert, nil
 	}
 
-	return result.Important, result.AlertMessage, nil
+	// Extraction par regex de secours si le JSON contenait des guillemets simples '...' ou des caractères non échappés
+	isImp := true
+	reImp := regexp.MustCompile(`(?i)"?important"?\s*:\s*(true|false)`)
+	if m := reImp.FindStringSubmatch(response); len(m) > 1 {
+		if strings.ToLower(m[1]) == "false" {
+			isImp = false
+		}
+	}
+
+	alertMsg := ""
+	reAlert := regexp.MustCompile(`(?s)"?alert_message"?\s*:\s*["'](.*?)["'](?:\s*,\s*|\s*})`)
+	if m := reAlert.FindStringSubmatch(response); len(m) > 1 {
+		alertMsg = strings.TrimSpace(m[1])
+	}
+	if alertMsg == "" {
+		alertMsg = defaultAlert
+	}
+
+	return isImp, alertMsg, nil
 }
 
 func (g *GmailAgent) loadProcessedIDs() {

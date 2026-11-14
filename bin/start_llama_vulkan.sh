@@ -4,9 +4,9 @@ set -e
 BACKEND_DIR="/home/marceloc/.lmstudio/extensions/backends/llama.cpp-linux-x86_64-vulkan-avx2-2.20.1"
 LLAMA_SERVER="${BACKEND_DIR}/llama-server"
 
-MODEL_PATH="/home/marceloc/.cache/huggingface/hub/models--unsloth--Qwen3-4B-GGUF/snapshots/22c9fc8a8c7700b76a1789366280a6a1789366280a6a5a1ad1120/Qwen3-4B-Q4_0.gguf"
+MODEL_PATH="/home/marceloc/.cache/huggingface/hub/models--unsloth--Qwen3.5-4B-MTP-GGUF/snapshots/86835bf9949e4d14d6860f7910b1340ad4f271a9/Qwen3.5-4B-UD-Q4_K_XL.gguf"
 if [ ! -f "${MODEL_PATH}" ]; then
-    MODEL_PATH="/home/marceloc/.cache/huggingface/hub/models--unsloth--Qwen3-4B-GGUF/snapshots/22c9fc8a8c7700b76a1789366280a6a5a1ad1120/Qwen3-4B-Q4_0.gguf"
+    MODEL_PATH="/home/marceloc/.cache/huggingface/hub/models--unsloth--Qwen3-4B-GGUF/snapshots/22c9fc8a8c7700b76a1789366280a6a1789366280a6a5a1ad1120/Qwen3-4B-Q4_0.gguf"
 fi
 PORT="18081"
 HOST="127.0.0.1"

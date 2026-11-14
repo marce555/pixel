@@ -7,6 +7,7 @@ import (
 
 	"github.com/marce555/pixel/internal/llm"
 	"github.com/marce555/pixel/internal/memory"
+	"github.com/marce555/pixel/internal/scheduler"
 )
 
 func TestIsSongDuplicate(t *testing.T) {
@@ -622,6 +623,298 @@ func TestDJRemixIntentAndRouting(t *testing.T) {
 		t.Errorf("formatCleanTrackName got %q", cleanTrack)
 	}
 }
+
+func TestWebKnowledgeUpdateStrategy(t *testing.T) {
+	agent := &SuperiorAgent{}
+
+	evolutionaryCases := []struct {
+		input         string
+		initialAction string
+		initialQuery  string
+		wantSubstr    string
+		wantRAG       bool
+	}{
+		{
+			input:         "Quelles sont les démarches pour l'admission d'une université ?",
+			initialAction: "none",
+			initialQuery:  "",
+			wantSubstr:    "les démarches pour l'admission d'une université",
+			wantRAG:       false,
+		},
+		{
+			input:         "les démarches pour l'admission d'une université",
+			initialAction: "wiki",
+			initialQuery:  "Université",
+			wantSubstr:    "Université",
+			wantRAG:       false,
+		},
+		{
+			input:         "Peux-tu me donner les démarches pour l'admission d'une université pour ma fille ?",
+			initialAction: "rag",
+			initialQuery:  "",
+			wantSubstr:    "les démarches pour l'admission d'une université",
+			wantRAG:       true, // Must also trigger RAG for "ma fille"
+		},
+		{
+			input:         "Comment s'inscrire sur Parcoursup ou MonMaster ?",
+			initialAction: "none",
+			initialQuery:  "",
+			wantSubstr:    "Comment s'inscrire sur Parcoursup ou MonMaster",
+			wantRAG:       false,
+		},
+		{
+			input:         "Quels sont les frais d'inscription à la fac ?",
+			initialAction: "none",
+			initialQuery:  "",
+			wantSubstr:    "les frais d'inscription à la fac",
+			wantRAG:       false,
+		},
+		{
+			input:         "Quelles sont les conditions d'admission en master ?",
+			initialAction: "wiki",
+			initialQuery:  "",
+			wantSubstr:    "les conditions d'admission en master",
+			wantRAG:       false,
+		},
+	}
+
+	for _, tc := range evolutionaryCases {
+		got := applyWebKnowledgeUpdateOverride(tc.input, RouterResponse{
+			Action: tc.initialAction,
+			Query:  tc.initialQuery,
+		})
+		if got.Action != "web" {
+			t.Errorf("applyWebKnowledgeUpdateOverride(%q, initial=%q).Action = %q, want \"web\"", tc.input, tc.initialAction, got.Action)
+		}
+		if !strings.Contains(got.Query, tc.wantSubstr) {
+			t.Errorf("applyWebKnowledgeUpdateOverride(%q).Query = %q, want substring %q", tc.input, got.Query, tc.wantSubstr)
+		}
+		if !yearRegex.MatchString(got.Query) {
+			t.Errorf("applyWebKnowledgeUpdateOverride(%q).Query = %q, expected current year to be appended", tc.input, got.Query)
+		}
+		gotRAG := agent.shouldTriggerRAG(tc.input, got.Action, got.Query)
+		if gotRAG != tc.wantRAG {
+			t.Errorf("shouldTriggerRAG(%q) = %v, want %v", tc.input, gotRAG, tc.wantRAG)
+		}
+	}
+
+	// Ensure purely personal memory and internal introspection queries are NOT overridden to "web"
+	nonWebCases := []struct {
+		input         string
+		initialAction string
+	}{
+		{"Comment s'appelle ma fille ?", "rag"},
+		{"Quels sont les projets de mon fils ?", "rag"},
+		{"Quels sont tes souvenirs concernant la théologie ?", "none"},
+		{"Vraiment tu n'as aucun souvennirs de théologie ?", "self_awareness"},
+		{"Dis bonjour à Lisa qui est là", "none"},
+	}
+
+	for _, tc := range nonWebCases {
+		got := applyWebKnowledgeUpdateOverride(tc.input, RouterResponse{
+			Action: tc.initialAction,
+			Query:  tc.input,
+		})
+		if got.Action == "web" {
+			t.Errorf("applyWebKnowledgeUpdateOverride(%q) unexpectedly forced Action=\"web\"", tc.input)
+		}
+	}
+}
+
+func TestKDJSkillIntentAndNavigation(t *testing.T) {
+	sched := scheduler.NewScheduler()
+	agent := &SuperiorAgent{
+		scheduler: sched,
+	}
+
+	// 1. Explicit KDJ requests when no KDJ session is active (including Whisper STT variants like "KDG")
+	explicitKDJ := []string{
+		"lance moi kdj",
+		"lance-moi kdj",
+		"lancement à KDG.",
+		"Pixel lancement à KDG.",
+		"mets kdj",
+		"joue kdj",
+		"lance moi kdj année 1982",
+		"lance moi kdj REMIX",
+		"lance moi kdj Club haus",
+		"connecte-toi sur https://www.youtube.com/@kdj8363",
+	}
+	for _, q := range explicitKDJ {
+		if !agent.detectKDJContextualIntent(q) {
+			t.Errorf("detectKDJContextualIntent(%q) = false, want true", q)
+		}
+	}
+
+	// 2. Non-regression on other music modes when KDJ is NOT active
+	if agent.detectKDJContextualIntent("lance moi un remix") {
+		t.Errorf("detectKDJContextualIntent(\"lance moi un remix\") should be false when KDJ is inactive")
+	}
+	if !detectDJRemixIntent("lance moi un remix") {
+		t.Errorf("detectDJRemixIntent(\"lance moi un remix\") = false, want true")
+	}
+	if !detectBillboardIntent("lance la radio billboard 1982") {
+		t.Errorf("detectBillboardIntent(\"lance la radio billboard 1982\") = false, want true")
+	}
+
+	// 3. Next / Previous media control commands (including "la suivante", "la précédante", and STT variants)
+	nextCmds := []string{"la suivante", "suivante", "passe à la suivante", "création suivante", "Pixel, passez la suite en.", "passe à la suite"}
+	for _, c := range nextCmds {
+		cmd, ok := detectMediaControlIntent(c)
+		if !ok || cmd != "next" {
+			t.Errorf("detectMediaControlIntent(%q) = (%q, %v), want (\"next\", true)", c, cmd, ok)
+		}
+	}
+
+	stopCmds := []string{"stop", "arrête la musique", "coupe le son", "coupe la musique", "Paraitre le flux de musique", "arrêt de la musique"}
+	for _, c := range stopCmds {
+		cmd, ok := detectMediaControlIntent(c)
+		if !ok || cmd != "stop" {
+			t.Errorf("detectMediaControlIntent(%q) = (%q, %v), want (\"stop\", true)", c, cmd, ok)
+		}
+	}
+
+	// Verify STT variants for KDJ from smartphone logs
+	sttKDJ := []string{"lance KDJ1985", "Lance-moi un mix de Kadidjé.", "Lance-moi un mix de K. Didier."}
+	for _, s := range sttKDJ {
+		if !detectKDJIntent(s) {
+			t.Errorf("detectKDJIntent(%q) = false, want true", s)
+		}
+	}
+
+	prevCmds := []string{"la précédante", "la précédente", "précédente", "précédante", "passe à la précédente", "création précédente"}
+	for _, c := range prevCmds {
+		cmd, ok := detectMediaControlIntent(c)
+		if !ok || cmd != "previous" {
+			t.Errorf("detectMediaControlIntent(%q) = (%q, %v), want (\"previous\", true)", c, cmd, ok)
+		}
+	}
+
+	// 4. Contextual keyword filtering while a KDJ session IS active + StepBackMusicTask navigation
+	t1 := sched.Enqueue("play_music", "🎛️ K DJ (@kdj8363) #1 : 90S PARTY MIX KDJ 01", "90S PARTY MIX KDJ 01", 0)
+	t1.SetStatus(scheduler.StatusCompleted)
+	t2 := sched.Enqueue("play_music", "🎛️ K DJ (@kdj8363) #2 : 80S PARTY MIX KDJ 01", "80S PARTY MIX KDJ 01", 0)
+	t2.SetStatus(scheduler.StatusRunning)
+	_ = sched.Enqueue("play_music", "🎛️ K DJ (@kdj8363) #3 : Top of the Clubs 04 (KDJ 2026)", "Top of the Clubs 04 (KDJ 2026)", 0)
+
+	if !agent.isKDJSessionActive() {
+		t.Fatalf("isKDJSessionActive() = false, want true when KDJ tasks are running/pending")
+	}
+
+	contextualKeywords := []string{
+		"année 1982",
+		"REMIX",
+		"Club haus",
+		"mot clé année 1982",
+		"mets du club house",
+	}
+	for _, kw := range contextualKeywords {
+		if !agent.detectKDJContextualIntent(kw) {
+			t.Errorf("detectKDJContextualIntent(%q) with active KDJ session = false, want true", kw)
+		}
+	}
+
+	// Ensure Billboard and local music still work even while KDJ is active
+	if agent.detectKDJContextualIntent("lance la radio billboard") {
+		t.Errorf("detectKDJContextualIntent(\"lance la radio billboard\") should be false even when KDJ is active")
+	}
+	if agent.detectKDJContextualIntent("mets de la musique du répertoire local") {
+		t.Errorf("detectKDJContextualIntent(\"mets de la musique du répertoire local\") should be false")
+	}
+
+	// 5. Verify StepBackMusicTask steps back from #2 to #1 and preserves #2 right after #1
+	prevTask, ok := sched.StepBackMusicTask()
+	if !ok || prevTask == nil {
+		t.Fatalf("StepBackMusicTask() failed, expected previous task #1")
+	}
+	if !strings.Contains(prevTask.Name, "90S PARTY MIX KDJ 01") {
+		t.Errorf("StepBackMusicTask() returned %q, expected #1 '90S PARTY MIX KDJ 01'", prevTask.Name)
+	}
+}
+
+func TestDetectTimeAndDateQueryIntent(t *testing.T) {
+	timeTests := []struct {
+		input string
+		want  bool
+	}{
+		// Non-current-time queries (MUST NOT trigger current time fast-path)
+		{"a quelle heure joue l'om ce soir à Marseille?", false},
+		{"à quelle heure joue l'om ce soir à Marseille?", false},
+		{"a quelle heure commence le match ?", false},
+		{"à quelle heure arrive le train de Paris ?", false},
+		{"vers quelle heure tu penses qu'il sera là ?", false},
+		{"jusqu'à quelle heure c'est ouvert ?", false},
+		{"c'est à quelle heure ?", false},
+		{"quelle heure est-il à Tokyo ?", false},
+		{"quelle heure est-il à New York ?", false},
+		{"l'heure du match", false},
+		{"l'heure de départ du vol", false},
+		{"combien d'heures de vol ?", false},
+		{"dans combien d'heures ?", false},
+		{"tout à l'heure on parlait de quoi ?", false},
+		{"je serai là dans une heure", false},
+		{"payer à l'heure", false},
+		{"changement d'heure", false},
+		{"heure d'été ou heure d'hiver ?", false},
+
+		// Valid current-time queries (MUST trigger current time fast-path)
+		{"quelle heure est-il ?", true},
+		{"quelle heure est il", true},
+		{"quelle heure il est", true},
+		{"il est quelle heure", true},
+		{"Pixel, tu as l'heure ?", true},
+		{"as-tu l'heure stp", true},
+		{"donne-moi l'heure", true},
+		{"dis-moi l'heure s'il te plaît", true},
+		{"c'est quoi l'heure ?", true},
+		{"l'heure qu'il est", true},
+		{"l'heure exacte", true},
+		{"l'heure actuelle", true},
+		{"l'heure stp", true},
+		{"l'heure", true},
+		{"quelle heure", true},
+		{"Pixel quelle heure", true},
+	}
+
+	for _, tt := range timeTests {
+		got := detectTimeQueryIntent(tt.input)
+		if got != tt.want {
+			t.Errorf("detectTimeQueryIntent(%q) = %v, want %v", tt.input, got, tt.want)
+		}
+	}
+
+	dateTests := []struct {
+		input string
+		want  bool
+	}{
+		// Non-current-date queries
+		{"quelle est la date de sortie du film Avatar ?", false},
+		{"la date de naissance de Napoléon", false},
+		{"la date du prochain match de l'om", false},
+		{"date limite d'inscription", false},
+		{"date de fin du contrat", false},
+
+		// Valid current-date queries
+		{"quel jour on est ?", true},
+		{"quel jour sommes-nous ?", true},
+		{"on est quel jour", true},
+		{"c'est quel jour aujourd'hui ?", true},
+		{"quelle est la date d'aujourd'hui ?", true},
+		{"c'est quoi la date", true},
+		{"on est quelle date", true},
+		{"la date du jour", true},
+		{"Pixel, quelle est la date ?", true},
+	}
+
+	for _, tt := range dateTests {
+		got := detectDateQueryIntent(tt.input)
+		if got != tt.want {
+			t.Errorf("detectDateQueryIntent(%q) = %v, want %v", tt.input, got, tt.want)
+		}
+	}
+}
+
+
 
 
 

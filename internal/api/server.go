@@ -822,12 +822,12 @@ func (s *Server) handleVoiceTranscribe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Créer un nom temporaire pour l'enregistrement audio dans /tmp
-	tempWebm := filepath.Join(os.TempDir(), fmt.Sprintf("mic_%d%s", time.Now().UnixNano(), ext))
+	tempWebm := filepath.Join(os.TempDir(), fmt.Sprintf("mic_in_%d%s", time.Now().UnixNano(), ext))
 	defer os.Remove(tempWebm)
 	out, err := os.Create(tempWebm)
 	if err != nil {
 		fmt.Printf("[Server] [Transcription] Erreur création fichier temp audio : %v\n", err)
-		http.Error(w, "Impossible de créer le fichier audio temporaire : "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Impossible de lire le fichier audio temporaire : "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer out.Close()
@@ -842,7 +842,7 @@ func (s *Server) handleVoiceTranscribe(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf("[Server] [Transcription] Audio enregistré dans : %s (taille : %d octets).\n", tempWebm, written)
 
 	// Transcoder en WAV mono 16kHz via ffmpeg
-	tempWav := filepath.Join(os.TempDir(), fmt.Sprintf("mic_%d.wav", time.Now().UnixNano()))
+	tempWav := filepath.Join(os.TempDir(), fmt.Sprintf("mic_out_%d.wav", time.Now().UnixNano()))
 	defer os.Remove(tempWav)
 
 	err = s.voiceMgr.ConvertWebMToWav(tempWebm, tempWav)
@@ -958,7 +958,11 @@ func (s *Server) handleLocalModels(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	// Try flm list -j first as fallback for flm backend
-	out, errCmd := exec.Command("/usr/local/bin/flm", "list", "-j").Output()
+	flmBin := "/usr/bin/flm"
+	if _, errStat := os.Stat(flmBin); errStat != nil {
+		flmBin = "/usr/local/bin/flm"
+	}
+	out, errCmd := exec.Command(flmBin, "list", "-j").Output()
 	if errCmd == nil {
 		var flmResp struct {
 			Models []struct {

@@ -93,6 +93,18 @@ type ServerMonitorSettings struct {
 	CheckIntervalMins int    `json:"check_interval_mins"`
 }
 
+type VisionSettings struct {
+	CameraEnabled bool `json:"camera_enabled"`
+}
+
+// VoiceBridgeSettings configures the vocal transition bridge used to mask tool/LLM latency.
+type VoiceBridgeSettings struct {
+	Enabled         bool `json:"enabled"`
+	ThresholdMs     int  `json:"threshold_ms"`
+	AdaptiveExtraMs int  `json:"adaptive_extra_ms"`
+	PreCacheAudio   bool `json:"pre_cache_audio"`
+}
+
 // CoreMemory represents the identity and deep knowledge about the interlocutor.
 type CoreMemory struct {
 	mu                    sync.RWMutex
@@ -105,6 +117,8 @@ type CoreMemory struct {
 	GmailSettings         GmailSettings              `json:"gmail_settings,omitempty"`
 	ServerMonitorSettings ServerMonitorSettings      `json:"server_monitor_settings,omitempty"`
 	LLMSettings           LLMSettings                `json:"llm_settings,omitempty"`
+	VisionSettings        VisionSettings             `json:"vision_settings"`
+	VoiceBridgeSettings   VoiceBridgeSettings        `json:"voice_bridge_settings"`
 	DynamicGoals          []DynamicGoal              `json:"dynamic_goals,omitempty"`
 }
 
@@ -188,6 +202,15 @@ Voici les comportements qui signalent que tu as oublié qui tu es. Ne les reprod
 			Email:             "",
 			AppPassword:       "",
 			CheckIntervalMins: 2,
+		},
+		VisionSettings: VisionSettings{
+			CameraEnabled: true,
+		},
+		VoiceBridgeSettings: VoiceBridgeSettings{
+			Enabled:         true,
+			ThresholdMs:     550,
+			AdaptiveExtraMs: 350,
+			PreCacheAudio:   true,
 		},
 	}
 	cm.Load()
@@ -553,6 +576,62 @@ func (cm *CoreMemory) GetServerMonitorSettings() ServerMonitorSettings {
 func (cm *CoreMemory) UpdateServerMonitorSettings(settings ServerMonitorSettings) {
 	cm.mu.Lock()
 	cm.ServerMonitorSettings = settings
+	cm.mu.Unlock()
+	cm.Save()
+}
+
+// IsCameraEnabled returns whether Pixel's webcam perception is enabled in settings.
+func (cm *CoreMemory) IsCameraEnabled() bool {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return cm.VisionSettings.CameraEnabled
+}
+
+// SetCameraEnabled toggles Pixel's camera setting, updates the volatile vision context immediately, and saves memory.
+func (cm *CoreMemory) SetCameraEnabled(enabled bool) {
+	cm.mu.Lock()
+	cm.VisionSettings.CameraEnabled = enabled
+	if cm.Profile.Volatile == nil {
+		cm.Profile.Volatile = make(map[string]string)
+	}
+	if enabled {
+		cm.Profile.Volatile["Dernière vision"] = "Caméra activée, en attente du prochain scan."
+	} else {
+		cm.Profile.Volatile["Dernière vision"] = "Caméra éteinte (désactivée dans la configuration)."
+	}
+	cm.mu.Unlock()
+	cm.Save()
+}
+
+// GetVoiceBridgeSettings returns the current vocal transition bridge settings,
+// honoring the PIXEL_VOICE_BRIDGE environment kill-switch if explicitly disabled.
+func (cm *CoreMemory) GetVoiceBridgeSettings() VoiceBridgeSettings {
+	cm.mu.RLock()
+	s := cm.VoiceBridgeSettings
+	cm.mu.RUnlock()
+
+	if s.ThresholdMs <= 0 {
+		s.ThresholdMs = 550
+	}
+	if s.AdaptiveExtraMs < 0 {
+		s.AdaptiveExtraMs = 350
+	}
+	if envVal := strings.ToLower(strings.TrimSpace(os.Getenv("PIXEL_VOICE_BRIDGE"))); envVal == "false" || envVal == "0" || envVal == "off" {
+		s.Enabled = false
+	}
+	return s
+}
+
+// UpdateVoiceBridgeSettings persists updated vocal transition bridge settings.
+func (cm *CoreMemory) UpdateVoiceBridgeSettings(settings VoiceBridgeSettings) {
+	if settings.ThresholdMs <= 0 {
+		settings.ThresholdMs = 550
+	}
+	if settings.AdaptiveExtraMs < 0 {
+		settings.AdaptiveExtraMs = 350
+	}
+	cm.mu.Lock()
+	cm.VoiceBridgeSettings = settings
 	cm.mu.Unlock()
 	cm.Save()
 }

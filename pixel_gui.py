@@ -206,6 +206,7 @@ class SSEReaderThread(QThread):
 
 class ChatStreamThread(QThread):
     token_received = pyqtSignal(str)
+    bridge_received = pyqtSignal(str)
     error_received = pyqtSignal(str)
     finished_stream = pyqtSignal()
     
@@ -243,6 +244,9 @@ class ChatStreamThread(QThread):
                             if "error" in payload:
                                 if self.running:
                                     self.error_received.emit(payload["error"])
+                            elif "bridge" in payload:
+                                if self.running and payload["bridge"]:
+                                    self.bridge_received.emit(payload["bridge"])
                             elif "chunk" in payload:
                                 if self.running:
                                     self.token_received.emit(payload["chunk"])
@@ -935,6 +939,7 @@ class MainWindow(QMainWindow):
         self.fetch_tasks()
         self.fetch_llm_settings()
         self.fetch_gmail_settings()
+        self.fetch_vision_settings()
         
         # Start a faster timer for Tasks (every 2s)
         self.tasks_timer = QTimer(self)
@@ -1104,9 +1109,21 @@ class MainWindow(QMainWindow):
         # Tab 3: Perceptions & Projet
         perc_tab = QWidget()
         perc_layout = QVBoxLayout(perc_tab)
-        
+
+        vision_header = QHBoxLayout()
         self.lbl_vision_title = QLabel("👁️ Perception Visuelle Locale (Webcam)")
         self.lbl_vision_title.setStyleSheet("font-weight: bold; color: #a78bfa; margin-bottom:4px;")
+        vision_header.addWidget(self.lbl_vision_title)
+        vision_header.addStretch()
+
+        self.lbl_camera_status = QLabel("● Actif")
+        self.lbl_camera_status.setStyleSheet("color: #10b981; font-weight: bold; margin-right: 8px;")
+        vision_header.addWidget(self.lbl_camera_status)
+
+        self.btn_toggle_camera = QPushButton("Éteindre la caméra")
+        self.btn_toggle_camera.clicked.connect(self.toggle_camera_from_perceptions)
+        vision_header.addWidget(self.btn_toggle_camera)
+
         self.txt_vision = QTextEdit()
         self.txt_vision.setReadOnly(True)
         
@@ -1130,7 +1147,7 @@ class MainWindow(QMainWindow):
         card_layout.addWidget(QLabel("Jalons du projet :"))
         card_layout.addWidget(self.txt_proj_milestones)
         
-        perc_layout.addWidget(self.lbl_vision_title)
+        perc_layout.addLayout(vision_header)
         perc_layout.addWidget(self.txt_vision)
         perc_layout.addWidget(self.lbl_proj_title)
         perc_layout.addWidget(self.proj_card)
@@ -1251,6 +1268,36 @@ class MainWindow(QMainWindow):
         v_lay.addLayout(stt_lay)
         
         config_layout.addWidget(voice_group)
+
+        # Camera Settings Block
+        camera_group = QFrame()
+        camera_group.setObjectName("survieBlock")
+        c_lay = QVBoxLayout(camera_group)
+        c_lay.setSpacing(8)
+        c_lay.addWidget(QLabel("📷 CAMÉRA & PERCEPTION VISUELLE"))
+
+        cam_row = QHBoxLayout()
+        self.chk_camera_enabled = QCheckBox("Activer la caméra de Pixel (capture webcam et vision)")
+        self.chk_camera_enabled.setChecked(True)
+        self.chk_camera_enabled.clicked.connect(lambda checked: self.save_vision_settings(checked, show_popup=False))
+        cam_row.addWidget(self.chk_camera_enabled)
+        cam_row.addStretch()
+
+        self.lbl_config_camera_state = QLabel("● Activée")
+        self.lbl_config_camera_state.setStyleSheet("color: #10b981; font-weight: bold;")
+        cam_row.addWidget(self.lbl_config_camera_state)
+        c_lay.addLayout(cam_row)
+
+        cam_hint = QLabel("Lorsque la caméra est éteinte, Pixel ne capture aucune image et n'interprète pas le noir.")
+        cam_hint.setWordWrap(True)
+        cam_hint.setStyleSheet("color: #9ca3af; font-size: 11px;")
+        c_lay.addWidget(cam_hint)
+
+        btn_save_camera = QPushButton("Enregistrer la configuration Caméra")
+        btn_save_camera.clicked.connect(lambda: self.save_vision_settings(self.chk_camera_enabled.isChecked(), show_popup=True))
+        c_lay.addWidget(btn_save_camera)
+
+        config_layout.addWidget(camera_group)
         
         # LLM Settings Block
         llm_group = QFrame()
@@ -2100,6 +2147,58 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Erreur Réseau", str(e))
 
+    def _apply_camera_ui_state(self, enabled: bool):
+        enabled = bool(enabled)
+        if hasattr(self, "chk_camera_enabled"):
+            self.chk_camera_enabled.setChecked(enabled)
+        if hasattr(self, "lbl_config_camera_state"):
+            if enabled:
+                self.lbl_config_camera_state.setText("● Activée")
+                self.lbl_config_camera_state.setStyleSheet("color: #10b981; font-weight: bold;")
+            else:
+                self.lbl_config_camera_state.setText("○ Éteinte")
+                self.lbl_config_camera_state.setStyleSheet("color: #f87171; font-weight: bold;")
+        if hasattr(self, "lbl_camera_status"):
+            if enabled:
+                self.lbl_camera_status.setText("● Actif")
+                self.lbl_camera_status.setStyleSheet("color: #10b981; font-weight: bold; margin-right: 8px;")
+            else:
+                self.lbl_camera_status.setText("○ Éteinte")
+                self.lbl_camera_status.setStyleSheet("color: #f87171; font-weight: bold; margin-right: 8px;")
+        if hasattr(self, "btn_toggle_camera"):
+            self.btn_toggle_camera.setText("Éteindre la caméra" if enabled else "Allumer la caméra")
+
+    def fetch_vision_settings(self):
+        try:
+            r = requests.get(f"{API_BASE}/api/vision_settings", timeout=2)
+            if r.status_code == 200:
+                data = r.json()
+                self._apply_camera_ui_state(data.get("camera_enabled", True))
+        except Exception as e:
+            print(f"[GUI] Erreur fetch vision settings : {e}")
+
+    def save_vision_settings(self, enabled: bool, show_popup: bool = True):
+        enabled = bool(enabled)
+        try:
+            r = requests.post(f"{API_BASE}/api/vision_settings", json={"camera_enabled": enabled}, timeout=5)
+            if r.status_code == 200:
+                self._apply_camera_ui_state(enabled)
+                if not enabled and hasattr(self, "txt_vision"):
+                    self.txt_vision.setPlainText("Caméra éteinte (désactivée dans la configuration).")
+                if show_popup:
+                    state_txt = "activée" if enabled else "éteinte"
+                    QMessageBox.information(self, "Succès", f"Caméra de Pixel {state_txt} !")
+            else:
+                QMessageBox.warning(self, "Erreur", f"Erreur de sauvegarde caméra : {r.text}")
+                self.fetch_vision_settings()
+        except Exception as e:
+            QMessageBox.critical(self, "Erreur Réseau", str(e))
+            self.fetch_vision_settings()
+
+    def toggle_camera_from_perceptions(self):
+        current = self.chk_camera_enabled.isChecked() if hasattr(self, "chk_camera_enabled") else True
+        self.save_vision_settings(not current, show_popup=False)
+
     # ── AUDIO EARCON & MUSIC HELPERS ──
     def is_music_request(self, text: str) -> bool:
         if not text:
@@ -2185,6 +2284,7 @@ class MainWindow(QMainWindow):
         self._safe_stop_thread("chat_thread", 1000)
         self.chat_thread = ChatStreamThread(msg, getattr(self, 'user_name', 'Marcelo'))
         self._track_thread(self.chat_thread)
+        self.chat_thread.bridge_received.connect(self.enqueue_bridge_phrase, Qt.ConnectionType.QueuedConnection)
         self.chat_thread.token_received.connect(self.handle_stream_chunk, Qt.ConnectionType.QueuedConnection)
         self.chat_thread.error_received.connect(self.handle_stream_error, Qt.ConnectionType.QueuedConnection)
         self.chat_thread.finished_stream.connect(self.handle_stream_finished, Qt.ConnectionType.QueuedConnection)
@@ -2404,6 +2504,11 @@ class MainWindow(QMainWindow):
         if message.startswith("VISION:"):
             desc = message[7:]
             self.txt_vision.setPlainText(desc)
+            lower_desc = desc.lower()
+            if "caméra éteinte" in lower_desc:
+                self._apply_camera_ui_state(False)
+            elif "caméra activée" in lower_desc:
+                self._apply_camera_ui_state(True)
         elif message.startswith("AUDIO_STREAM:"):
             # Flux audio interne vers smartphone Android : ne pas afficher dans le chat PC ni synthétiser
             return
@@ -2482,7 +2587,7 @@ class MainWindow(QMainWindow):
         self._track_thread(self.record_thread)
         self.record_thread.finished_signal.connect(self.handle_record_finished, Qt.ConnectionType.QueuedConnection)
         if not self.continuous_voice:
-            self.record_thread.speech_started_signal.connect(self.stop_speaking, Qt.ConnectionType.QueuedConnection)
+            self.record_thread.speech_started_signal.connect(self.handle_barge_in, Qt.ConnectionType.QueuedConnection)
         self.record_thread.start()
 
     def stop_microphone_recording(self):
@@ -2683,6 +2788,21 @@ class MainWindow(QMainWindow):
             self.was_music_paused_by_wake = False
         if self.voice_enabled:
             duck_active_mpv(True, 18)
+
+    def enqueue_bridge_phrase(self, phrase):
+        if not self.voice_enabled or getattr(self, "is_stream_finished", False) or not phrase:
+            return
+        # Ne pas injecter de transition si la vraie réponse a déjà commencé à parler ou est en file
+        if self.speech_queue or self.is_speaking_sentence or self.speech_buffer.strip():
+            return
+        cleaned = self._clean_tts_sentence(phrase)
+        if len(cleaned) > 1 and any(char.isalnum() for char in cleaned):
+            self.speech_queue.append(cleaned)
+            self._play_next_tts_sentence()
+
+    def handle_barge_in(self):
+        self.stop_speaking()
+        self._safe_stop_thread("chat_thread", 500)
 
     def feed_chunk(self, chunk):
         if not self.voice_enabled or getattr(self, "tts_thoughts_stopped", False):

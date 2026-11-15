@@ -17,6 +17,7 @@ import (
 	"github.com/marce555/pixel/internal/scheduler"
 	"github.com/marce555/pixel/internal/skills"
 	"github.com/marce555/pixel/internal/timeagent"
+	"github.com/marce555/pixel/internal/voice"
 )
 
 // CuriosityDomain represents a research field with academic databases and sample queries.
@@ -99,6 +100,7 @@ type CuriosityAgent struct {
 	skillManager  *skills.SkillManager
 	visionAgent   *VisionAgent
 	selfAwareness *SelfAwarenessAgent
+	voiceBridge   *voice.VoiceBridgeManager
 
 	mu          sync.Mutex
 	interpelled bool
@@ -136,6 +138,13 @@ func (c *CuriosityAgent) SetVisionAgent(va *VisionAgent) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.visionAgent = va
+}
+
+// SetVoiceBridge attaches the VoiceBridgeManager for asynchronous pool renewal during idle introspection.
+func (c *CuriosityAgent) SetVoiceBridge(vb *voice.VoiceBridgeManager) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.voiceBridge = vb
 }
 
 func NewCuriosityAgent(provider llm.Provider, coreMem *memory.CoreMemory, stm *memory.STM, ltm *memory.LTM, broadcaster EventBroadcaster, timeAgent *timeagent.TimeAgent, webAgent *WebAgent, thoughtStream *memory.ThoughtStream, sleepManager *SleepManager, taskScheduler *scheduler.Scheduler, thalamicGate *ThalamicGate) *CuriosityAgent {
@@ -201,6 +210,21 @@ func (c *CuriosityAgent) Start(ctx context.Context) {
 					// Inconscient : Pixel peut générer des pensées / recherches de fond pour nourrir son monde intérieur
 					// (Uniquement si l'utilisateur est réellement inactif depuis plus de 3 minutes, afin d'éviter un faux positif juste après que SleepManager vide la STM)
 					if idleDuration > 3*time.Minute && !c.sleepManager.IsBusy() && (c.scheduler == nil || !c.scheduler.HasActiveTasks()) {
+						c.mu.Lock()
+						vb := c.voiceBridge
+						c.mu.Unlock()
+						if vb != nil && c.llmProvider != nil {
+							bgCtx := ctx
+							if c.sleepManager != nil {
+								bgCtx = c.sleepManager.AcquireBackgroundContext()
+							}
+							vb.MaybeRenewAsync(bgCtx, func(genCtx context.Context, sysPrompt, usrPrompt string) (string, error) {
+								return c.llmProvider.Generate(genCtx, []llm.Message{
+									{Role: llm.RoleSystem, Content: sysPrompt},
+									{Role: llm.RoleUser, Content: usrPrompt},
+								})
+							})
+						}
 						if time.Since(c.lastThoughtTime) > cooldown {
 							bgCtx := ctx
 							if c.sleepManager != nil {
@@ -308,6 +332,11 @@ func (c *CuriosityAgent) Start(ctx context.Context) {
 }
 
 func (c *CuriosityAgent) checkPresenceWithCamera(ctx context.Context) bool {
+	if c.coreMemory != nil && !c.coreMemory.IsCameraEnabled() {
+		log.Println("[CuriosityAgent] Vérification caméra ignorée : caméra éteinte dans la configuration.")
+		return false
+	}
+
 	c.mu.Lock()
 	sm := c.skillManager
 	va := c.visionAgent

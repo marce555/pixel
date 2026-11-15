@@ -71,6 +71,8 @@ type Server struct {
 	superior         *agent.SuperiorAgent
 	coreMem          *memory.CoreMemory
 	stm              *memory.STM
+	stmMu            sync.Mutex
+	androidSTM       *memory.STM
 	sleepManager     *agent.SleepManager
 	profiler         *agent.ProfilingAgent
 	projectAgent     *agent.ProjectAgent
@@ -78,11 +80,41 @@ type Server struct {
 	EventHub         *EventHub
 	scheduler        *scheduler.Scheduler
 	voiceMgr         *voice.VoiceManager
+	voiceBridge      *voice.VoiceBridgeManager
 	adaptiveProvider *llm.AdaptiveProvider
 	publishProvider  *llm.AdaptiveProvider
 	reviewProvider   *llm.AdaptiveProvider
 	igpuBaseURL      string
 	igpuModel        string
+}
+
+func (s *Server) SetVoiceBridge(vb *voice.VoiceBridgeManager) {
+	s.voiceBridge = vb
+}
+
+// stmForDevice keeps short-term conversation buffers separate between PC and smartphone
+// clients so commands on one device do not hijack router context on the other.
+func (s *Server) stmForDevice(device string) *memory.STM {
+	clean := strings.ToLower(strings.TrimSpace(device))
+	if clean == "android" || clean == "mobile" || clean == "phone" {
+		s.stmMu.Lock()
+		defer s.stmMu.Unlock()
+		if s.androidSTM == nil {
+			s.androidSTM = memory.NewSTM(12)
+		}
+		return s.androidSTM
+	}
+	return s.stm
+}
+
+func (s *Server) getVoiceBridge() *voice.VoiceBridgeManager {
+	if s.voiceBridge != nil {
+		return s.voiceBridge
+	}
+	if s.superior != nil {
+		return s.superior.GetVoiceBridge()
+	}
+	return nil
 }
 
 func (s *Server) SetTaskProviders(publishProvider, reviewProvider *llm.AdaptiveProvider, igpuBaseURL, igpuModel string) {
@@ -155,6 +187,7 @@ func (s *Server) Start(port string) error {
 	mux.HandleFunc("/api/force_sleep", s.handleForceSleep)
 	mux.HandleFunc("/api/llm_settings", s.handleLLMSettings)
 	mux.HandleFunc("/api/gmail_settings", s.handleGmailSettings)
+	mux.HandleFunc("/api/vision_settings", s.handleVisionSettings)
 	mux.HandleFunc("/api/events", s.handleEvents)
 	mux.HandleFunc("/api/ltm_learnings", s.handleLTMLearnings)
 	mux.HandleFunc("/api/history", s.handleHistory)
@@ -173,6 +206,7 @@ func (s *Server) Start(port string) error {
 	// Local Voice Routes
 	mux.HandleFunc("/api/voice/transcribe", s.handleVoiceTranscribe)
 	mux.HandleFunc("/api/voice/speak", s.handleVoiceSpeak)
+	mux.HandleFunc("/api/voice_bridge_settings", s.handleVoiceBridgeSettings)
 
 	// Media Control Routes (Audio Ducking, Streaming)
 	mux.HandleFunc("/api/media/duck", s.handleMediaDuck)
@@ -366,8 +400,8 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	keepAliveTicker := time.NewTicker(15 * time.Second)
 	defer keepAliveTicker.Stop()
 
-	// Si le profil actif est actuellement Inconnu, lancer un scan d'identification visuelle d'ouverture
-	if s.superior.GetVisionAgent() != nil && s.coreMem.GetProfile().Static.Name == "Inconnu" {
+	// Si le profil actif est actuellement Inconnu et la caméra est activée, lancer un scan d'identification visuelle d'ouverture
+	if s.superior.GetVisionAgent() != nil && s.coreMem.IsCameraEnabled() && s.coreMem.GetProfile().Static.Name == "Inconnu" {
 		go func() {
 			// Petite pause pour laisser le canal SSE s'établir côté client
 			time.Sleep(1 * time.Second)
@@ -423,29 +457,32 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if s.superior != nil {
 		s.superior.SetActiveClient(clientDevice)
 	}
+	reqCtx := agent.WithClientDevice(r.Context(), clientDevice)
 
 	// Prioriser immédiatement le chat utilisateur en annulant les tâches de fond en cours (libère la GPU)
 	s.sleepManager.CancelBackgroundTasks()
 
+	activeSTM := s.stmForDevice(clientDevice)
+
 	// Si la mémoire STM est saturée, sauvegarder les messages pour les consolider après la génération de la réponse
 	var msgsToConsolidate []llm.Message
-	if s.stm.IsFull() {
+	if activeSTM.IsFull() {
 		fmt.Println("[Server] STM saturée avant nouveau message. La consolidation d'urgence sera lancée après la réponse...")
-		msgs := s.stm.GetMessages()
+		msgs := activeSTM.GetMessages()
 		// Consolider la première moitié des messages (les plus anciens)
 		// et garder la seconde moitié pour préserver le contexte de la conversation.
 		half := len(msgs) / 2
 		msgsToConsolidate = msgs[:half]
 		msgsToKeep := msgs[half:]
 
-		s.stm.Clear()
+		activeSTM.Clear()
 		for _, msg := range msgsToKeep {
-			s.stm.AddMessage(msg)
+			activeSTM.AddMessage(msg)
 		}
 	}
 
 	// Ajouter à la mémoire immédiate avec horodatage
-	s.stm.AddMessage(llm.Message{Role: llm.RoleUser, Content: req.Message, Timestamp: time.Now()})
+	activeSTM.AddMessage(llm.Message{Role: llm.RoleUser, Content: req.Message, Timestamp: time.Now()})
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -464,7 +501,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	outChan, errChan := s.superior.ProcessInputStream(r.Context(), req.Message, s.stm.GetMessages())
+	outChan, bridgeChan, errChan := s.superior.ProcessInputStreamWithBridge(reqCtx, req.Message, activeSTM.GetMessages())
 
 	var fullReply string
 	var inThinkBlock bool
@@ -472,6 +509,18 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	for {
 		select {
+		case evt, ok := <-bridgeChan:
+			if !ok {
+				bridgeChan = nil
+			} else if evt.Phrase != "" {
+				bridgeBytes, _ := json.Marshal(map[string]interface{}{
+					"bridge":   evt.Phrase,
+					"intent":   string(evt.Intent),
+					"is_micro": evt.IsMicro,
+				})
+				fmt.Fprintf(w, "data: %s\n\n", string(bridgeBytes))
+				flusher.Flush()
+			}
 		case chunk, ok := <-outChan:
 			if !ok {
 				outChan = nil
@@ -534,13 +583,13 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if outChan == nil && errChan == nil {
+		if outChan == nil && bridgeChan == nil && errChan == nil {
 			break
 		}
 	}
 
 	if fullReply != "" {
-		s.stm.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: fullReply, Timestamp: time.Now()})
+		activeSTM.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: fullReply, Timestamp: time.Now()})
 		// Indexation dynamique et tâches de fond lancées uniquement APRÈS l'envoi complet du flux pour éviter toute interférence
 		bgCtx := s.sleepManager.AcquireBackgroundContext()
 
@@ -884,6 +933,16 @@ func (s *Server) handleVoiceSpeak(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Servir immédiatement depuis le pré-cache audio si disponible (latence < 1ms)
+	if vb := s.getVoiceBridge(); vb != nil {
+		if cachedAudio, ok := vb.GetCachedAudio(text); ok {
+			w.Header().Set("Content-Type", "audio/wav")
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(cachedAudio)))
+			w.Write(cachedAudio)
+			return
+		}
+	}
+
 	// Synthétiser localement
 	audioBytes, err := s.voiceMgr.Synthesize(r.Context(), text)
 	if err != nil {
@@ -1176,6 +1235,89 @@ func (s *Server) handleGmailSettings(w http.ResponseWriter, r *http.Request) {
 		s.coreMem.UpdateGmailSettings(req)
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"status": "ok"}`))
+		return
+	}
+
+	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+}
+
+func (s *Server) handleVisionSettings(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(memory.VisionSettings{
+			CameraEnabled: s.coreMem.IsCameraEnabled(),
+		})
+		return
+	}
+
+	if r.Method == http.MethodPost {
+		var req memory.VisionSettings
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		s.coreMem.SetCameraEnabled(req.CameraEnabled)
+
+		statusMsg := "Caméra activée, en attente du prochain scan."
+		if !req.CameraEnabled {
+			statusMsg = "Caméra éteinte (désactivée dans la configuration)."
+		}
+		if s.EventHub != nil {
+			s.EventHub.Broadcast("VISION:" + statusMsg)
+		}
+
+		// Si l'utilisateur vient de rallumer la caméra, déclencher un scan asynchrone si VisionAgent est disponible
+		if req.CameraEnabled && s.superior != nil && s.superior.GetVisionAgent() != nil {
+			go func() {
+				s.superior.GetVisionAgent().ScanOnce(context.Background())
+			}()
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":         "ok",
+			"camera_enabled": req.CameraEnabled,
+		})
+		return
+	}
+
+	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+}
+
+func (s *Server) handleVoiceBridgeSettings(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		w.Header().Set("Content-Type", "application/json")
+		if s.coreMem != nil {
+			json.NewEncoder(w).Encode(s.coreMem.GetVoiceBridgeSettings())
+			return
+		}
+		enabled := false
+		if vb := s.getVoiceBridge(); vb != nil {
+			enabled = vb.IsEnabled()
+		}
+		json.NewEncoder(w).Encode(memory.VoiceBridgeSettings{Enabled: enabled, ThresholdMs: 550, AdaptiveExtraMs: 350, PreCacheAudio: true})
+		return
+	}
+
+	if r.Method == http.MethodPost {
+		var req memory.VoiceBridgeSettings
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if s.coreMem != nil {
+			s.coreMem.UpdateVoiceBridgeSettings(req)
+			req = s.coreMem.GetVoiceBridgeSettings()
+		}
+		if vb := s.getVoiceBridge(); vb != nil {
+			vb.UpdateConfig(req.Enabled, req.ThresholdMs, req.AdaptiveExtraMs, req.PreCacheAudio)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":   "ok",
+			"settings": req,
+		})
 		return
 	}
 

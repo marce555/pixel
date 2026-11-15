@@ -17,6 +17,7 @@ import (
 	"github.com/marce555/pixel/internal/resourceagent"
 	"github.com/marce555/pixel/internal/scheduler"
 	"github.com/marce555/pixel/internal/skills"
+	"github.com/marce555/pixel/internal/voice"
 )
 
 // SuperiorAgent is the orchestrator. It holds the core loop and decides when to call sub-agents or memory.
@@ -37,6 +38,7 @@ type SuperiorAgent struct {
 	draftManager   *scheduler.DraftManager
 	selfAwareness  *SelfAwarenessAgent
 	reconciler     *DynamicReconciler
+	voiceBridge    *voice.VoiceBridgeManager
 
 	activeClientMu sync.RWMutex
 	activeClient   string // "pc" (default) or "android" / "mobile"
@@ -77,15 +79,37 @@ func (a *SuperiorAgent) GetSelfAwareness() *SelfAwarenessAgent {
 	return a.selfAwareness
 }
 
+type clientDeviceCtxKey struct{}
+
+// WithClientDevice attaches the originating client device ("pc" or "android") to ctx
+// so concurrent requests from PC and smartphone never overwrite each other's target device.
+func WithClientDevice(ctx context.Context, device string) context.Context {
+	return context.WithValue(ctx, clientDeviceCtxKey{}, normalizeClientDevice(device))
+}
+
+// ClientDeviceFromContext returns the normalized client device attached to ctx, or "".
+func ClientDeviceFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if dev, ok := ctx.Value(clientDeviceCtxKey{}).(string); ok {
+		return dev
+	}
+	return ""
+}
+
+func normalizeClientDevice(client string) string {
+	clean := strings.ToLower(strings.TrimSpace(client))
+	if clean == "android" || clean == "mobile" || clean == "phone" {
+		return "android"
+	}
+	return "pc"
+}
+
 func (a *SuperiorAgent) SetActiveClient(client string) {
 	a.activeClientMu.Lock()
 	defer a.activeClientMu.Unlock()
-	clean := strings.ToLower(strings.TrimSpace(client))
-	if clean == "android" || clean == "mobile" || clean == "phone" {
-		a.activeClient = "android"
-	} else {
-		a.activeClient = "pc"
-	}
+	a.activeClient = normalizeClientDevice(client)
 }
 
 func (a *SuperiorAgent) GetActiveClient() string {
@@ -99,6 +123,10 @@ func (a *SuperiorAgent) GetActiveClient() string {
 
 // resolveTargetDevice determines whether playback should happen on "pc" or "android"
 func (a *SuperiorAgent) resolveTargetDevice(input string) string {
+	return a.resolveTargetDeviceWithCtx(context.Background(), input)
+}
+
+func (a *SuperiorAgent) resolveTargetDeviceWithCtx(ctx context.Context, input string) string {
 	lower := strings.ToLower(input)
 	if strings.Contains(lower, "sur mon pc") || strings.Contains(lower, "sur le pc") ||
 		strings.Contains(lower, "sur l'ordi") || strings.Contains(lower, "sur les enceintes") ||
@@ -110,6 +138,9 @@ func (a *SuperiorAgent) resolveTargetDevice(input string) string {
 		strings.Contains(lower, "sur mon mobile") || strings.Contains(lower, "sur le tel") ||
 		strings.Contains(lower, "sur le portable") {
 		return "android"
+	}
+	if dev := ClientDeviceFromContext(ctx); dev != "" {
+		return dev
 	}
 	return a.GetActiveClient()
 }
@@ -128,6 +159,16 @@ func (a *SuperiorAgent) SetVisionAgent(v *VisionAgent) {
 
 func (a *SuperiorAgent) GetVisionAgent() *VisionAgent {
 	return a.visionAgent
+}
+
+// SetVoiceBridge attaches the VoiceBridgeManager used to emit natural transition phrases during slow steps.
+func (a *SuperiorAgent) SetVoiceBridge(vb *voice.VoiceBridgeManager) {
+	a.voiceBridge = vb
+}
+
+// GetVoiceBridge returns the configured VoiceBridgeManager, if any.
+func (a *SuperiorAgent) GetVoiceBridge() *voice.VoiceBridgeManager {
+	return a.voiceBridge
 }
 
 // Bridge returns the agent's AntigravityBridge.
@@ -522,14 +563,17 @@ func (a *SuperiorAgent) analyzeQuery(ctx context.Context, input string, history 
 	}
 
 	// Fast-path pour la découverte de nouveau visage / caméra à la demande ou confusion d'identité
+	cameraEnabled := a.coreMemory == nil || a.coreMemory.IsCameraEnabled()
 	currentProfile := ""
 	if a.coreMemory != nil {
 		currentProfile = a.coreMemory.GetProfile().Static.Name
 	}
-	if ok, queryReason := detectFaceDiscoveryIntent(cleanInput, currentProfile); ok {
-		return RouterResponse{
-			Action: "skill_decouvrir_nouveau_visage",
-			Query:  queryReason,
+	if cameraEnabled {
+		if ok, queryReason := detectFaceDiscoveryIntent(cleanInput, currentProfile); ok {
+			return RouterResponse{
+				Action: "skill_decouvrir_nouveau_visage",
+				Query:  queryReason,
+			}
 		}
 	}
 
@@ -581,7 +625,7 @@ func (a *SuperiorAgent) analyzeQuery(ctx context.Context, input string, history 
 		}
 	}
 
-	// Fast-path for checking published articles / publication status
+	// Fast-path for checking published articles / publication status (including common Whisper STT mishearings like "p'oublié")
 	if strings.Contains(cleanInput, "vérifie si tu as fait ta publication") ||
 		strings.Contains(cleanInput, "verifie si tu as fait ta publication") ||
 		strings.Contains(cleanInput, "vérifie ta publication") ||
@@ -591,12 +635,20 @@ func (a *SuperiorAgent) analyzeQuery(ctx context.Context, input string, history 
 		strings.Contains(cleanInput, "as-tu fait ta publication") ||
 		strings.Contains(cleanInput, "as-tu publié") ||
 		strings.Contains(cleanInput, "as tu publie") ||
+		strings.Contains(cleanInput, "as-tu p'oubli") ||
+		strings.Contains(cleanInput, "as tu p'oubli") ||
+		strings.Contains(cleanInput, "as-tu p oubli") ||
+		strings.Contains(cleanInput, "t'as publié") ||
+		strings.Contains(cleanInput, "t'as p'oubli") ||
+		strings.Contains(cleanInput, "tu as publié") ||
+		strings.Contains(cleanInput, "tu as p'oubli") ||
 		strings.Contains(cleanInput, "statut de la publication") ||
 		strings.Contains(cleanInput, "statut des publications") ||
 		strings.Contains(cleanInput, "vérifie la publication") ||
 		strings.Contains(cleanInput, "verifie la publication") ||
 		strings.Contains(cleanInput, "est-ce que tu as publié") ||
 		strings.Contains(cleanInput, "est ce que tu as publie") ||
+		strings.Contains(cleanInput, "est-ce que tu as p'oubli") ||
 		cleanInput == "mes publications" || cleanInput == "tes publications" {
 		return RouterResponse{
 			Action: "skill_check_published_articles",
@@ -1028,6 +1080,13 @@ Consignes pour ce projet :
 			}
 		}
 	}
+	if a.coreMemory != nil && !a.coreMemory.IsCameraEnabled() {
+		dynamicDirective += "\n\n[CAMÉRA ÉTEINTE / DÉSACTIVÉE (PRIORITÉ ABSOLUE)] :" +
+			"\n- Ta caméra physique est actuellement ÉTEINTE (désactivée dans la configuration)." +
+			"\n- Tu n'as AUCUNE perception visuelle en direct. Ne tente JAMAIS d'interpréter du noir, une pièce sombre ou une image vide." +
+			"\n- Si l'on te demande ce que tu vois, qui est devant toi ou d'utiliser ta caméra, réponds simplement et naturellement que ta caméra est actuellement éteinte dans ta configuration."
+	}
+
 	staticStmDirective := "\n\n[DIRECTIVES OPÉRATIONNELLES ET DIALOGUE HUMAIN (PRIORITÉ ABSOLUE)] :" +
 		"\n- NATURALITÉ & ARRÊT SANS OUVERTURE : Parle comme un humain dans une vraie conversation. Donne ta réponse, ton explication ou ton point de vue en 'Je', puis ARRÊTE-TOI là. Ne termine JAMAIS ta réponse par une question d'ouverture, de relance ou de validation ('Est-ce que ça t'aide ?', 'Cette idée t'invite-t-elle à...', 'Qu'en penses-tu ?', 'Ou cherches-tu un exemple ?'). Laisse l'autre réagir librement. Ne pose une question QUE si une ambiguïté factuelle ou une erreur de transcription vocale ('20h du matin') empêche réellement de comprendre la demande." +
 		"\n- CONCISION & PROPORTIONNALITÉ : Question factuelle/technique simple → 1 phrase directe, sans métaphore ni bavardage philosophique. Échange humain/social → 1 à 3 phrases vivantes. Sujet complexe ou philosophique → développe ta thèse avec densité, sans rembourrage ni résumé final." +
@@ -1352,6 +1411,55 @@ func needsReflection(input string, action string) bool {
 //     to remove one full sequential LLM round-trip before streaming begins.
 //   - ④ Single implementation shared by ProcessInput and ProcessInputStream,
 //     eliminating ~600 lines of duplicated logic.
+func emitStageIntent(statusChan chan<- string, intent voice.IntentType) {
+	if statusChan == nil {
+		return
+	}
+	select {
+	case statusChan <- string(intent):
+	default:
+	}
+}
+
+// guessInitialIntent infers a fast non-blocking intent hint from user input before the
+// LLM router completes, so vocal bridges triggered during analyzeQuery match the domain.
+func guessInitialIntent(input string) voice.IntentType {
+	lower := strings.ToLower(strings.TrimSpace(input))
+	if lower == "" {
+		return voice.IntentDeepThinking
+	}
+	mediaHints := []string{
+		"joue ", "mets ", "met ", "lance ", "écoute ", "ecoute ",
+		"musique", "chanson", "radio", "morceau", "playlist", "volume",
+	}
+	for _, kw := range mediaHints {
+		if strings.Contains(lower, kw) {
+			return voice.IntentMediaAction
+		}
+	}
+	memoryHints := []string{
+		"souviens", "souvenir", "rappelle", "rappelles", "dans ta mémoire",
+		"dans ta memoire", "on avait parlé", "je t'avais dit", "l'autre jour",
+	}
+	for _, kw := range memoryHints {
+		if strings.Contains(lower, kw) {
+			return voice.IntentMemoryLookup
+		}
+	}
+	webHints := []string{
+		"actualité", "actualités", "actualite", "actualites", "news", "nouvelles",
+		"cherche", "recherche", "sur le web", "sur internet", "en ligne",
+		"wikipédia", "wikipedia", "météo", "meteo", "quel temps",
+		"renseigne", "vérifie", "verifie", "dernières infos", "infos du jour",
+	}
+	for _, kw := range webHints {
+		if strings.Contains(lower, kw) {
+			return voice.IntentWebSearch
+		}
+	}
+	return voice.IntentDeepThinking
+}
+
 func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, history []llm.Message, statusChan chan<- string) ([]llm.Message, error) {
 	// ⓪ Réconciliation cognitive en temps réel : résolution de problèmes, achèvement d'objectifs et mise à jour dynamique
 	if a.reconciler != nil {
@@ -1378,6 +1486,7 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 	} else if isShortContinuation(input) && !hasToolProposal {
 		routerResp = RouterResponse{Action: "none", Query: ""}
 	} else {
+		emitStageIntent(statusChan, guessInitialIntent(input))
 		embedReady := make(chan struct{})
 		var reflectCancelMu sync.Mutex
 		var reflectCancel context.CancelFunc
@@ -1469,7 +1578,15 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 				fmt.Printf("[Router Override] Requête informative musicale détectée au lieu d'une commande média. Basculement vers 'web' : %s\n", input)
 				routerResp.Action = "web"
 				routerResp.Query = input
+			} else if !hasExplicitMediaIntent(input) {
+				fmt.Printf("[Router Override] Hallucination 'media' rejetée (aucune intention musicale dans %q). Basculement vers 'none'.\n", input)
+				routerResp.Action = "none"
+				routerResp.Query = input
 			}
+		} else if !hasExplicitMediaIntent(input) {
+			fmt.Printf("[Router Override] Contrôle média rejeté (aucun mot-clé média dans %q). Basculement vers 'none'.\n", input)
+			routerResp.Action = "none"
+			routerResp.Query = input
 		}
 	}
 
@@ -1539,6 +1656,7 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 	}
 
 	if isTemporalQuery {
+		emitStageIntent(statusChan, voice.IntentMemoryLookup)
 		additionalContext += a.buildTemporalContext(input, temporalFrom, temporalTo)
 		// Si la question temporelle contient des mots-clés ou entités (ex: "Laurent", un ami, un projet),
 		// enrichir également avec les souvenirs sémantiques pertinents
@@ -1568,6 +1686,7 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 			"Utilise ces métadonnées pour présenter de façon consciente et synthétique la composition de ton esprit et de tes souvenirs à l'utilisateur :\n" +
 			synthesis + "\n----------------------------------------------------------------------------------"
 	} else if a.shouldTriggerRAG(input, routerResp.Action, routerResp.Query) {
+		emitStageIntent(statusChan, voice.IntentMemoryLookup)
 		queryStr := routerResp.Query
 		if queryStr == "" {
 			queryStr = input
@@ -1636,6 +1755,7 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 	}
 
 	if routerResp.Action == "wiki" && routerResp.Query != "" && a.webAgent != nil {
+		emitStageIntent(statusChan, voice.IntentWebSearch)
 		resourceagent.AddLiveLog("Wikipédia", fmt.Sprintf("Recherche encyclopédique sur : %s", routerResp.Query))
 		fmt.Printf("[Router] Web Search (Wiki) déclenché. Requête: '%s'\n", routerResp.Query)
 		knowledge, err := a.webAgent.SearchWikipedia(routerResp.Query)
@@ -1650,6 +1770,7 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 			additionalContext += "\n\n--- WIKIPEDIA ---\n" + knowledge + "\n------------------"
 		}
 	} else if routerResp.Action == "news" && routerResp.Query != "" && a.webAgent != nil {
+		emitStageIntent(statusChan, voice.IntentWebSearch)
 		resourceagent.AddLiveLog("Actualités", fmt.Sprintf("Recherche d'actualités récentes sur : %s", routerResp.Query))
 		fmt.Printf("[Router] Web Search (News) déclenché. Requête: '%s'\n", routerResp.Query)
 		knowledge, err := a.webAgent.SearchNews(routerResp.Query)
@@ -1664,6 +1785,7 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 			additionalContext += "\n\n--- ACTUALITÉS (Sources Fiables) ---\n" + knowledge + "\n\nINSTRUCTION CRITIQUE : Tu dois faire un rapport complet, riche et détaillé de ces actualités. Ne te limite pas à une ou deux phrases : développe les sujets importants pour informer pleinement l'utilisateur. De plus, sois EXTRÊMEMENT VIGILANT SUR LES DATES : les articles bruts peuvent contenir des mentions temporelles ('ce jeudi', 'hier', 'demain') qui sont relatives à leur publication. Tu DOIS les adapter intelligemment ou les omettre si elles contredisent la Date Actuelle du système (qui est la seule vraie référence). Ne répète pas des jours incohérents.\n------------------------"
 		}
 	} else if routerResp.Action == "web" && routerResp.Query != "" && a.webAgent != nil {
+		emitStageIntent(statusChan, voice.IntentWebSearch)
 		resourceagent.AddLiveLog("Web", fmt.Sprintf("Recherche web générale sur : %s", routerResp.Query))
 		fmt.Printf("[Router] Web Search (General Web) déclenché. Requête: '%s'\n", routerResp.Query)
 		knowledge, err := a.webAgent.SearchWeb(routerResp.Query)
@@ -1721,6 +1843,7 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 			isControlCmd = true
 		}
 		if !isControlCmd {
+			emitStageIntent(statusChan, voice.IntentMediaAction)
 			resourceagent.AddLiveLog("Média", fmt.Sprintf("Recherche et contrôle média pour : %s", routerResp.Query))
 		}
 		fmt.Printf("[Router] Media Action déclenchée via Scheduler. Requête: '%s'\n", routerResp.Query)
@@ -1743,6 +1866,12 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 		additionalContext += "\n\n--- ACTION SYSTÈME : CRÉATION DE BRIQUE ---\nLe développement de cette nouvelle brique a été lancé en tâche de fond. Confirme-lui chaleureusement que tu vas coder cet outil en arrière-plan et qu'il sera bientôt disponible. Sois très bref.\n---------------------------------"
 	} else if strings.HasPrefix(routerResp.Action, "skill_") && a.skillManager != nil {
 		skillName := strings.TrimPrefix(routerResp.Action, "skill_")
+		switch skillName {
+		case "billboard_radio", "dj_remix", "kdj":
+			emitStageIntent(statusChan, voice.IntentMediaAction)
+		case "check_gmail_emails", "gmail_reader", "check_appliyou_logs", "ssh_server_health", "gemini_api_caller", "check_published_articles":
+			emitStageIntent(statusChan, voice.IntentWebSearch)
+		}
 		if skillName == "check_gmail_emails" || skillName == "gmail_reader" {
 			resourceagent.AddLiveLog("Skill:Gmail", "Connexion à la boîte mail et relevé des messages...")
 		} else if skillName == "check_appliyou_logs" {
@@ -1772,6 +1901,8 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 				return nil, nil
 			}
 			additionalContext += fmt.Sprintf("\n\n--- RÉSULTAT DE LA BRIQUE 'dj_remix' ---\n%s\n---------------------------------", reply)
+		} else if skillName == "decouvrir_nouveau_visage" && a.coreMemory != nil && !a.coreMemory.IsCameraEnabled() {
+			additionalContext += "\n\n--- ÉTAT CAMÉRA ---\nTa caméra est actuellement ÉTEINTE (désactivée dans la configuration). Ne tente pas d'interpréter du noir et indique simplement à l'utilisateur que ta caméra est désactivée.\n-------------------"
 		} else {
 		skillQuery := routerResp.Query
 		if len(skillQuery) > 500 {
@@ -1895,6 +2026,7 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 	// Activation de l'Agent d'Autoconnaissance et de Conscience de Soi (SelfAwarenessAgent)
 	isSelfAwareness, _ := detectSelfAwarenessIntent(input)
 	if (routerResp.Action == "self_awareness" || isSelfAwareness) && !hasMemories {
+		emitStageIntent(statusChan, voice.IntentMemoryLookup)
 		resourceagent.AddLiveLog("Conscience", "Consultation de la conscience intérieure et des algorithmes de Pixel...")
 		if a.selfAwareness != nil {
 			introCtx, introCancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -2245,11 +2377,12 @@ func (a *SuperiorAgent) ProcessInput(ctx context.Context, input string, history 
 	}
 
 	// Déclencheur pour la découverte de visage / caméra à la demande ou confusion d'identité
+	cameraEnabled := a.coreMemory == nil || a.coreMemory.IsCameraEnabled()
 	currentProfile := ""
 	if a.coreMemory != nil {
 		currentProfile = a.coreMemory.GetProfile().Static.Name
 	}
-	if ok, _ := detectFaceDiscoveryIntent(input, currentProfile); ok {
+	if ok, _ := detectFaceDiscoveryIntent(input, currentProfile); ok && cameraEnabled {
 		prefix := "Salut ! Attends un instant, je te regarde à la caméra pour voir si je te reconnais... 📸\n\n"
 		lowerInput := strings.ToLower(input)
 		if strings.Contains(lowerInput, "bureau") || strings.Contains(lowerInput, "autour") || strings.Contains(lowerInput, "pièce") || strings.Contains(lowerInput, "piece") || strings.Contains(lowerInput, "quoi") || strings.Contains(lowerInput, "écran") || strings.Contains(lowerInput, "ecran") {
@@ -2381,8 +2514,177 @@ func (a *SuperiorAgent) ProcessInput(ctx context.Context, input string, history 
 	return response, nil
 }
 
+func closedBridgeChan() <-chan voice.BridgeEvent {
+	ch := make(chan voice.BridgeEvent)
+	close(ch)
+	return ch
+}
+
+// startTurnBridgeWatcher launches a non-blocking intent tracker and VoiceBridgeManager
+// timer race for a single turn. Callers MUST invoke stopAndWait() before closing bridgeChan.
+func (a *SuperiorAgent) startTurnBridgeWatcher(
+	ctx context.Context,
+	initialIntent voice.IntentType,
+	bridgeChan chan<- voice.BridgeEvent,
+) (statusChan chan string, signalReady func(), stopAndWait func()) {
+	statusChan = make(chan string, 16)
+	readyCh := make(chan struct{})
+	var readyOnce sync.Once
+	signalReady = func() {
+		readyOnce.Do(func() {
+			close(readyCh)
+		})
+	}
+
+	var intentMu sync.RWMutex
+	currentIntent := initialIntent
+	if currentIntent == "" {
+		currentIntent = voice.IntentDeepThinking
+	}
+
+	var statusWg sync.WaitGroup
+	statusWg.Add(1)
+	go func() {
+		defer statusWg.Done()
+		for s := range statusChan {
+			intentMu.Lock()
+			currentIntent = voice.IntentType(s)
+			intentMu.Unlock()
+		}
+	}()
+
+	var bridgeWg sync.WaitGroup
+	bridgeWg.Add(1)
+	go func() {
+		defer bridgeWg.Done()
+		voice.WaitWithBridge(
+			ctx,
+			a.voiceBridge,
+			func() voice.IntentType {
+				intentMu.RLock()
+				defer intentMu.RUnlock()
+				return currentIntent
+			},
+			readyCh,
+			func(evt voice.BridgeEvent) {
+				select {
+				case bridgeChan <- evt:
+				case <-ctx.Done():
+				}
+			},
+		)
+	}()
+
+	var cleanupOnce sync.Once
+	stopAndWait = func() {
+		cleanupOnce.Do(func() {
+			signalReady()
+			close(statusChan)
+			statusWg.Wait()
+			bridgeWg.Wait()
+		})
+	}
+
+	return statusChan, signalReady, stopAndWait
+}
+
+// streamWithFirstVisible forwards raw LLM stream chunks to out while tracking <think> blocks
+// so signalVisible is invoked only once actual user-facing text begins arriving.
+func streamWithFirstVisible(
+	ctx context.Context,
+	stream <-chan string,
+	streamErrs <-chan error,
+	out chan<- string,
+	errs chan<- error,
+	signalVisible func(),
+) {
+	inThink := false
+	thinkBuf := ""
+	seenVisible := false
+
+	checkVisible := func(chunk string) {
+		if seenVisible || signalVisible == nil || chunk == "" {
+			return
+		}
+		if inThink {
+			thinkBuf += chunk
+			if idx := strings.Index(thinkBuf, "</think>"); idx != -1 {
+				inThink = false
+				remainder := strings.TrimSpace(thinkBuf[idx+len("</think>"):])
+				thinkBuf = ""
+				if remainder != "" {
+					seenVisible = true
+					signalVisible()
+				}
+			}
+			return
+		}
+		if strings.Contains(chunk, "<think>") {
+			parts := strings.SplitN(chunk, "<think>", 2)
+			if strings.TrimSpace(parts[0]) != "" {
+				seenVisible = true
+				signalVisible()
+				return
+			}
+			inThink = true
+			thinkBuf = parts[1]
+			if idx := strings.Index(thinkBuf, "</think>"); idx != -1 {
+				inThink = false
+				remainder := strings.TrimSpace(thinkBuf[idx+len("</think>"):])
+				thinkBuf = ""
+				if remainder != "" {
+					seenVisible = true
+					signalVisible()
+				}
+			}
+			return
+		}
+		if strings.TrimSpace(chunk) != "" {
+			seenVisible = true
+			signalVisible()
+		}
+	}
+
+	for {
+		select {
+		case chunk, ok := <-stream:
+			if !ok {
+				stream = nil
+			} else {
+				checkVisible(chunk)
+				out <- chunk
+			}
+		case err, ok := <-streamErrs:
+			if !ok {
+				streamErrs = nil
+			} else {
+				if signalVisible != nil {
+					signalVisible()
+				}
+				errs <- err
+			}
+		case <-ctx.Done():
+			return
+		}
+		if stream == nil && streamErrs == nil {
+			break
+		}
+	}
+}
+
 // ProcessInputStream is the streaming version of ProcessInput.
 func (a *SuperiorAgent) ProcessInputStream(ctx context.Context, input string, history []llm.Message) (<-chan string, <-chan error) {
+	out, bridgeChan, errs := a.ProcessInputStreamWithBridge(ctx, input, history)
+	go func() {
+		for range bridgeChan {
+		}
+	}()
+	return out, errs
+}
+
+// ProcessInputStreamWithBridge streams the assistant response alongside non-blocking
+// vocal transition bridge events when an operation exceeds VoiceBridgeManager's threshold.
+func (a *SuperiorAgent) ProcessInputStreamWithBridge(ctx context.Context, input string, history []llm.Message) (<-chan string, <-chan voice.BridgeEvent, <-chan error) {
 	// Réponses directes et ultra-concises pour l'heure et la date (0ms de latence, zéro bavardage)
 	if detectTimeQueryIntent(input) {
 		out := make(chan string, 1)
@@ -2391,7 +2693,7 @@ func (a *SuperiorAgent) ProcessInputStream(ctx context.Context, input string, hi
 		out <- fmt.Sprintf("Il est %02dh%02d.", now.Hour(), now.Minute())
 		close(out)
 		close(errs)
-		return out, errs
+		return out, closedBridgeChan(), errs
 	}
 
 	if detectDateQueryIntent(input) {
@@ -2411,7 +2713,7 @@ func (a *SuperiorAgent) ProcessInputStream(ctx context.Context, input string, hi
 		out <- fmt.Sprintf("Nous sommes le %s %d %s %d, et il est %02dh%02d.", weekdays[now.Weekday()], now.Day(), months[now.Month()], now.Year(), now.Hour(), now.Minute())
 		close(out)
 		close(errs)
-		return out, errs
+		return out, closedBridgeChan(), errs
 	}
 
 	if ok, name := detectIntroduceIntent(input); ok {
@@ -2424,21 +2726,28 @@ func (a *SuperiorAgent) ProcessInputStream(ctx context.Context, input string, hi
 			a.handleIntroductionStream(ctx, name, out, errs)
 		}()
 
-		return out, errs
+		return out, closedBridgeChan(), errs
 	}
 
 	// Déclencheur pour la découverte de visage / caméra à la demande ou confusion d'identité
+	cameraEnabledStream := a.coreMemory == nil || a.coreMemory.IsCameraEnabled()
 	currentProfileStream := ""
 	if a.coreMemory != nil {
 		currentProfileStream = a.coreMemory.GetProfile().Static.Name
 	}
-	if ok, _ := detectFaceDiscoveryIntent(input, currentProfileStream); ok {
+	if ok, _ := detectFaceDiscoveryIntent(input, currentProfileStream); ok && cameraEnabledStream {
 		out := make(chan string, 100)
+		bridgeChan := make(chan voice.BridgeEvent, 1)
 		errs := make(chan error, 1)
 
 		go func() {
-			defer close(out)
-			defer close(errs)
+			statusChan, signalReady, stopAndWait := a.startTurnBridgeWatcher(ctx, voice.IntentDeepThinking, bridgeChan)
+			defer func() {
+				stopAndWait()
+				close(bridgeChan)
+				close(out)
+				close(errs)
+			}()
 
 			lowerInput := strings.ToLower(input)
 			if strings.Contains(lowerInput, "bureau") || strings.Contains(lowerInput, "autour") || strings.Contains(lowerInput, "pièce") || strings.Contains(lowerInput, "piece") || strings.Contains(lowerInput, "quoi") || strings.Contains(lowerInput, "écran") || strings.Contains(lowerInput, "ecran") {
@@ -2465,37 +2774,18 @@ func (a *SuperiorAgent) ProcessInputStream(ctx context.Context, input string, hi
 				a.visionAgent.ScanOnce(ctx)
 			}
 
-			messages, errCtx := a.prepareContext(ctx, input, history, nil)
+			messages, errCtx := a.prepareContext(ctx, input, history, statusChan)
 			if errCtx != nil {
+				signalReady()
 				errs <- errCtx
 				return
 			}
 
 			stream, streamErrs := a.llmProvider.GenerateStream(ctx, messages)
-			for {
-				select {
-				case chunk, ok := <-stream:
-					if !ok {
-						stream = nil
-					} else {
-						out <- chunk
-					}
-				case err, ok := <-streamErrs:
-					if !ok {
-						streamErrs = nil
-					} else {
-						errs <- err
-					}
-				case <-ctx.Done():
-					return
-				}
-				if stream == nil && streamErrs == nil {
-					break
-				}
-			}
+			streamWithFirstVisible(ctx, stream, streamErrs, out, errs, signalReady)
 		}()
 
-		return out, errs
+		return out, bridgeChan, errs
 	}
 
 	if ok, query := detectUsbCreationIntent(input); ok && a.skillManager != nil {
@@ -2509,7 +2799,7 @@ func (a *SuperiorAgent) ProcessInputStream(ctx context.Context, input string, hi
 		}
 		close(out)
 		close(errs)
-		return out, errs
+		return out, closedBridgeChan(), errs
 	}
 
 	if detectDedupIntent(input) && a.scheduler != nil {
@@ -2520,7 +2810,7 @@ func (a *SuperiorAgent) ProcessInputStream(ctx context.Context, input string, hi
 		out <- fmt.Sprintf("J'ai lancé la vérification et le nettoyage des articles en double en arrière-plan. 🧹\n\nTu peux suivre l'avancement et la liste des articles dépubliés dans l'onglet **Tâches** ! *(ID tâche : `%s`)*", task.ID)
 		close(out)
 		close(errs)
-		return out, errs
+		return out, closedBridgeChan(), errs
 	}
 
 	if ok, mode := detectAuditFormatIntent(input); ok && a.scheduler != nil {
@@ -2543,7 +2833,7 @@ func (a *SuperiorAgent) ProcessInputStream(ctx context.Context, input string, hi
 		out <- fmt.Sprintf("C'est parti ! J'ai missionné l'**Agent Vérificateur** et l'**Agent Relecteur** pour %s sur AppliYou.fr. 🧐✨\n\nTu peux suivre l'analyse en temps réel dans l'onglet **Tâches** ! *(ID tâche : `%s`)*\n\nDès que la revue sera terminée, je t'afficherai le rapport complet ici-même.", actionName, task.ID)
 		close(out)
 		close(errs)
-		return out, errs
+		return out, closedBridgeChan(), errs
 	}
 
 	if detectDraftListIntent(input) {
@@ -2588,7 +2878,7 @@ func (a *SuperiorAgent) ProcessInputStream(ctx context.Context, input string, hi
 		}
 		close(out)
 		close(errs)
-		return out, errs
+		return out, closedBridgeChan(), errs
 	}
 
 	if ok, draftID := detectDraftRetryIntent(input); ok && a.scheduler != nil {
@@ -2629,49 +2919,70 @@ func (a *SuperiorAgent) ProcessInputStream(ctx context.Context, input string, hi
 		}
 		close(out)
 		close(errs)
-		return out, errs
+		return out, closedBridgeChan(), errs
 	}
 
 	if a.detectKDJContextualIntent(input) && a.skillManager != nil && a.scheduler != nil {
 		out := make(chan string, 1)
+		bridgeChan := make(chan voice.BridgeEvent, 1)
 		errs := make(chan error, 1)
 		go func() {
-			defer close(out)
-			defer close(errs)
+			_, signalReady, stopAndWait := a.startTurnBridgeWatcher(ctx, voice.IntentMediaAction, bridgeChan)
+			defer func() {
+				stopAndWait()
+				close(bridgeChan)
+				close(out)
+				close(errs)
+			}()
 			reply := a.handleKDJDirect(ctx, input)
+			signalReady()
 			if reply != "" {
 				out <- reply
 			}
 		}()
-		return out, errs
+		return out, bridgeChan, errs
 	}
 
 	if detectBillboardIntent(input) && a.skillManager != nil && a.scheduler != nil {
 		out := make(chan string, 1)
+		bridgeChan := make(chan voice.BridgeEvent, 1)
 		errs := make(chan error, 1)
 		go func() {
-			defer close(out)
-			defer close(errs)
+			_, signalReady, stopAndWait := a.startTurnBridgeWatcher(ctx, voice.IntentMediaAction, bridgeChan)
+			defer func() {
+				stopAndWait()
+				close(bridgeChan)
+				close(out)
+				close(errs)
+			}()
 			reply := a.handleBillboardRadioDirect(ctx, input)
+			signalReady()
 			if reply != "" {
 				out <- reply
 			}
 		}()
-		return out, errs
+		return out, bridgeChan, errs
 	}
 
 	if detectDJRemixIntent(input) && a.skillManager != nil && a.scheduler != nil {
 		out := make(chan string, 1)
+		bridgeChan := make(chan voice.BridgeEvent, 1)
 		errs := make(chan error, 1)
 		go func() {
-			defer close(out)
-			defer close(errs)
+			_, signalReady, stopAndWait := a.startTurnBridgeWatcher(ctx, voice.IntentMediaAction, bridgeChan)
+			defer func() {
+				stopAndWait()
+				close(bridgeChan)
+				close(out)
+				close(errs)
+			}()
 			reply := a.handleDJRemixDirect(ctx, input)
+			signalReady()
 			if reply != "" {
 				out <- reply
 			}
 		}()
-		return out, errs
+		return out, bridgeChan, errs
 	}
 
 	// 1. Vérification de confirmation d'une proposition précédente de rédaction d'article
@@ -2695,7 +3006,7 @@ func (a *SuperiorAgent) ProcessInputStream(ctx context.Context, input string, hi
 				out <- fmt.Sprintf("D'accord ! J'ai créé la tâche de rédaction et publication pour **%s** en arrière-plan sur AppliYou.fr. 🚀\n\nTu peux suivre la rédaction et l'avancement en direct dans l'onglet **Tâches** ! *(ID tâche : `%s`)*", cleanTitle, task.ID)
 				close(out)
 				close(errs)
-				return out, errs
+				return out, closedBridgeChan(), errs
 			}
 		}
 	}
@@ -2723,7 +3034,7 @@ func (a *SuperiorAgent) ProcessInputStream(ctx context.Context, input string, hi
 		}
 		close(out)
 		close(errs)
-		return out, errs
+		return out, closedBridgeChan(), errs
 	}
 
 	if ok, payload := detectAgentPlanningIntent(input); ok && a.scheduler != nil {
@@ -2736,50 +3047,38 @@ func (a *SuperiorAgent) ProcessInputStream(ctx context.Context, input string, hi
 
 		close(out)
 		close(errs)
-		return out, errs
+		return out, closedBridgeChan(), errs
 	}
 
 	out := make(chan string, 100)
+	bridgeChan := make(chan voice.BridgeEvent, 1)
 	errs := make(chan error, 1)
 
 	go func() {
-		defer close(out)
-		defer close(errs)
+		statusChan, signalReady, stopAndWait := a.startTurnBridgeWatcher(ctx, guessInitialIntent(input), bridgeChan)
+		defer func() {
+			stopAndWait()
+			close(bridgeChan)
+			close(out)
+			close(errs)
+		}()
 
-		messages, err := a.prepareContext(ctx, input, history, nil)
+		messages, err := a.prepareContext(ctx, input, history, statusChan)
 		if err != nil {
+			signalReady()
 			errs <- err
 			return
 		}
 		if len(messages) == 0 {
+			signalReady()
 			return
 		}
 
 		stream, streamErrs := a.llmProvider.GenerateStream(ctx, messages)
-		for {
-			select {
-			case chunk, ok := <-stream:
-				if !ok {
-					stream = nil
-				} else {
-					out <- chunk
-				}
-			case err, ok := <-streamErrs:
-				if !ok {
-					streamErrs = nil
-				} else {
-					errs <- err
-				}
-			case <-ctx.Done():
-				return
-			}
-			if stream == nil && streamErrs == nil {
-				break
-			}
-		}
+		streamWithFirstVisible(ctx, stream, streamErrs, out, errs, signalReady)
 	}()
 
-	return out, errs
+	return out, bridgeChan, errs
 }
 
 // deepRecall performs an active multi-pass memory search, mimicking how a human
@@ -3338,7 +3637,7 @@ func (a *SuperiorAgent) handleMediaAction(ctx context.Context, input string, rou
 	}
 
 	// Si la requête concerne le Billboard Hot 100, déléguer à handleBillboardRadioDirect
-	if (detectBillboardIntent(input) || detectBillboardIntent(routerResp.Query) || strings.Contains(strings.ToLower(routerResp.Query), "billboard")) && a.skillManager != nil {
+	if (detectBillboardIntent(input) || (hasExplicitMediaIntent(input) && (detectBillboardIntent(routerResp.Query) || strings.Contains(strings.ToLower(routerResp.Query), "billboard")))) && a.skillManager != nil {
 		fullQuery := input
 		if !strings.Contains(input, "19") && !strings.Contains(input, "20") && (strings.Contains(routerResp.Query, "19") || strings.Contains(routerResp.Query, "20")) {
 			fullQuery = routerResp.Query
@@ -3348,7 +3647,7 @@ func (a *SuperiorAgent) handleMediaAction(ctx context.Context, input string, rou
 	}
 
 	// Si la requête concerne le mode DJ Remix ("lance moi un remix"), déléguer à handleDJRemixDirect
-	if (detectDJRemixIntent(input) || detectDJRemixIntent(routerResp.Query)) && a.skillManager != nil {
+	if (detectDJRemixIntent(input) || (hasExplicitMediaIntent(input) && detectDJRemixIntent(routerResp.Query))) && a.skillManager != nil {
 		res := a.handleDJRemixDirect(ctx, input)
 		return res, nil
 	}
@@ -3370,7 +3669,7 @@ func (a *SuperiorAgent) handleMediaAction(ctx context.Context, input string, rou
 	}
 
 	// Check target device (PC vs Android)
-	targetDevice := a.resolveTargetDevice(input)
+	targetDevice := a.resolveTargetDeviceWithCtx(ctx, input)
 
 	if len(parts) > 1 {
 		// Enqueue all parts!
@@ -3406,14 +3705,7 @@ func (a *SuperiorAgent) handleMediaAction(ctx context.Context, input string, rou
 
 	isQueueRequest := strings.Contains(strings.ToLower(input), "ajoute") || strings.Contains(strings.ToLower(input), "file") || strings.Contains(strings.ToLower(input), "queue")
 	if !isQueueRequest {
-		// Since the user is asking to play a new music now explicitly, clear existing queue and autoplay!
-		a.scheduler.CancelAutoplay()
-		tasks := a.scheduler.GetTasks()
-		for _, t := range tasks {
-			if (t.Status == scheduler.StatusRunning || t.Status == scheduler.StatusPending) && t.Type == "play_music" {
-				a.scheduler.Cancel(t.ID)
-			}
-		}
+		targetDevice = a.prepareDeviceMediaReset(ctx, input)
 	}
 
 	// Otherwise, enqueue immediately in the asynchronous queue
@@ -4025,6 +4317,55 @@ func formatCleanTrackName(name string) string {
 	return strings.TrimSpace(clean)
 }
 
+func hasExplicitMediaIntent(input string) bool {
+	lower := strings.ToLower(strings.TrimSpace(input))
+	if lower == "" {
+		return false
+	}
+	mediaTokens := []string{
+		"joue", "mets", "met ", "lance", "écoute", "ecoute", "play",
+		"musique", "chanson", "titre", "morceau", "playlist", "play list",
+		"compilation", "album", "artiste", "radio", "billboard", "biboar", "bilboar",
+		"remix", "kdj", "clip", "audio", "zik", "dj", "volume", "son ",
+		"suivant", "next", "précédent", "precedent", "previous", "pause",
+		"stop", "arrête", "arrete", "coupe", "reprend", "continue", "skip",
+	}
+	for _, tok := range mediaTokens {
+		if strings.Contains(lower, tok) {
+			return true
+		}
+	}
+	return false
+}
+
+// prepareDeviceMediaReset stops local playback / pending tasks ONLY for the resolved
+// targetDevice so smartphone commands do not interrupt PC playback (and vice versa).
+func (a *SuperiorAgent) prepareDeviceMediaReset(ctx context.Context, input string) string {
+	targetDevice := a.resolveTargetDeviceWithCtx(ctx, input)
+	if targetDevice == "pc" {
+		if a.scheduler != nil {
+			a.scheduler.CancelAutoplay()
+		}
+		if a.webAgent != nil {
+			_, _ = a.webAgent.ControlMedia("stop")
+		}
+	}
+	if a.scheduler != nil {
+		for _, t := range a.scheduler.GetTasks() {
+			if t.Type == "play_music" && (t.Status == scheduler.StatusRunning || t.Status == scheduler.StatusPending) {
+				taskDev := normalizeClientDevice(t.TargetDevice)
+				if t.TargetDevice == "" {
+					taskDev = "pc"
+				}
+				if taskDev == targetDevice {
+					_ = a.scheduler.Cancel(t.ID)
+				}
+			}
+		}
+	}
+	return targetDevice
+}
+
 func (a *SuperiorAgent) handleBillboardRadioDirect(ctx context.Context, input string) string {
 	if a.skillManager == nil || a.scheduler == nil {
 		return "Le gestionnaire de tâches ou de briques n'est pas initialisé."
@@ -4046,22 +4387,13 @@ func (a *SuperiorAgent) handleBillboardRadioDirect(ctx context.Context, input st
 	if errJSON := json.Unmarshal([]byte(strings.TrimSpace(result)), &bbData); errJSON != nil || len(bbData.Tracks) == 0 {
 		return "Désolé, je n'ai pas pu lire la liste des titres Billboard."
 	}
-	a.scheduler.CancelAutoplay()
-	if a.webAgent != nil {
-		_, _ = a.webAgent.ControlMedia("stop")
-	}
-	for _, t := range a.scheduler.GetTasks() {
-		if t.Type == "play_music" && (t.Status == scheduler.StatusRunning || t.Status == scheduler.StatusPending) {
-			a.scheduler.Cancel(t.ID)
-		}
-	}
+
+	targetDevice := a.prepareDeviceMediaReset(ctx, input)
 
 	targetRank := extractBillboardRank(input)
 	lowerInput := strings.ToLower(input)
 	isFromRank := strings.Contains(lowerInput, "à partir") || strings.Contains(lowerInput, "a partir") ||
 		strings.Contains(lowerInput, "depuis") || strings.Contains(lowerInput, "en partant")
-
-	targetDevice := a.resolveTargetDevice(input)
 
 	// Si un rang spécifique est demandé (ex: "la 10e place", "le numéro 5", "la 20ème", etc.)
 	if targetRank > 0 {
@@ -4254,17 +4586,7 @@ func (a *SuperiorAgent) handleDJRemixDirect(ctx context.Context, input string) s
 		return "Désolé, je n'ai pas pu lire la sélection de morceaux DJ Remix."
 	}
 
-	a.scheduler.CancelAutoplay()
-	if a.webAgent != nil {
-		_, _ = a.webAgent.ControlMedia("stop")
-	}
-	for _, t := range a.scheduler.GetTasks() {
-		if t.Type == "play_music" && (t.Status == scheduler.StatusRunning || t.Status == scheduler.StatusPending) {
-			a.scheduler.Cancel(t.ID)
-		}
-	}
-
-	targetDevice := a.resolveTargetDevice(input)
+	targetDevice := a.prepareDeviceMediaReset(ctx, input)
 
 	for i, tr := range remixData.Tracks {
 		rank := tr.Rank
@@ -4463,17 +4785,7 @@ func (a *SuperiorAgent) handleKDJDirect(ctx context.Context, input string) strin
 		return "Désolé, je n'ai trouvé aucune création disponible sur la chaîne YouTube K DJ (@kdj8363)."
 	}
 
-	a.scheduler.CancelAutoplay()
-	if a.webAgent != nil {
-		_, _ = a.webAgent.ControlMedia("stop")
-	}
-	for _, t := range a.scheduler.GetTasks() {
-		if t.Type == "play_music" && (t.Status == scheduler.StatusRunning || t.Status == scheduler.StatusPending) {
-			_ = a.scheduler.Cancel(t.ID)
-		}
-	}
-
-	targetDevice := a.resolveTargetDevice(input)
+	targetDevice := a.prepareDeviceMediaReset(ctx, input)
 
 	for i, tr := range kdjData.Tracks {
 		rank := tr.Rank
@@ -5326,56 +5638,69 @@ func detectFaceDiscoveryIntent(cleanInput string, currentProfile string) (bool, 
 }
 
 func (a *SuperiorAgent) handleIntroductionStream(ctx context.Context, name string, out chan<- string, errs chan<- error) {
-	out <- fmt.Sprintf("Enchanté %s ! Un instant, je te regarde avec ma caméra pour faire ta connaissance... 📸\n\n", name)
-
 	// Basculer vers le profil de la personne présentée
 	a.coreMemory.SwitchActiveProfile(name)
 
+	cameraEnabled := a.coreMemory == nil || a.coreMemory.IsCameraEnabled()
 	var description string
-	var err error
-	if a.visionAgent != nil {
-		time.Sleep(1 * time.Second)
-		description, err = a.visionAgent.CaptureAndAnalyze(ctx)
+	if !cameraEnabled {
+		out <- fmt.Sprintf("Enchanté %s !\n\n", name)
+		description = "Caméra actuellement éteinte dans la configuration."
 	} else {
-		err = fmt.Errorf("module de vision non disponible")
+		out <- fmt.Sprintf("Enchanté %s ! Un instant, je te regarde avec ma caméra pour faire ta connaissance... 📸\n\n", name)
+
+		var err error
+		if a.visionAgent != nil {
+			time.Sleep(1 * time.Second)
+			description, err = a.visionAgent.CaptureAndAnalyze(ctx)
+		} else {
+			err = fmt.Errorf("module de vision non disponible")
+		}
+
+		if err != nil {
+			fmt.Printf("[Introduction] Erreur de capture image : %v\n", err)
+			out <- fmt.Sprintf("*(Je n'ai pas pu utiliser ma caméra : %v, mais je suis ravi de faire ta connaissance !)*\n\n", err)
+			description = "Une nouvelle personne dont l'apparence physique n'a pas pu être capturée"
+		} else {
+			a.coreMemory.UpdateVolatileState("Apparence", description)
+
+			embedding, errEmbed := a.llmProvider.CreateEmbedding(ctx, fmt.Sprintf("Pixel a rencontré %s. Description physique : %s", name, description))
+			if errEmbed == nil && len(embedding) > 0 {
+				a.ltm.StoreMemory(
+					ctx,
+					"Personal",
+					"vision",
+					fmt.Sprintf("Rencontre de %s", name),
+					fmt.Sprintf("Pixel a fait la connaissance de %s. Apparence physique : %s", name, description),
+					[]string{"rencontre", "nouveau", "visage", strings.ToLower(name)},
+					embedding,
+					0.9,
+				)
+			}
+
+			if a.visionAgent != nil && a.visionAgent.onBroadcast != nil {
+				a.visionAgent.onBroadcast("VISION:" + description)
+			}
+		}
 	}
 
-	if err != nil {
-		fmt.Printf("[Introduction] Erreur de capture image : %v\n", err)
-		out <- fmt.Sprintf("*(Je n'ai pas pu utiliser ma caméra : %v, mais je suis ravi de faire ta connaissance !)*\n\n", err)
-		description = "Une nouvelle personne dont l'apparence physique n'a pas pu être capturée"
-	} else {
-		a.coreMemory.UpdateVolatileState("Apparence", description)
-
-		embedding, errEmbed := a.llmProvider.CreateEmbedding(ctx, fmt.Sprintf("Pixel a rencontré %s. Description physique : %s", name, description))
-		if errEmbed == nil && len(embedding) > 0 {
-			a.ltm.StoreMemory(
-				ctx,
-				"Personal",
-				"vision",
-				fmt.Sprintf("Rencontre de %s", name),
-				fmt.Sprintf("Pixel a fait la connaissance de %s. Apparence physique : %s", name, description),
-				[]string{"rencontre", "nouveau", "visage", strings.ToLower(name)},
-				embedding,
-				0.9,
-			)
-		}
-
-		if a.visionAgent != nil && a.visionAgent.onBroadcast != nil {
-			a.visionAgent.onBroadcast("VISION:" + description)
-		}
+	visionPromptLine := fmt.Sprintf(`Voici ce que ta caméra voit d'elle/de lui en ce moment : "%s".`, description)
+	appearanceInstruction := `- Fais une remarque naturelle et amicale sur son apparence que tu viens de voir (ex: "Je vois que tu portes des lunettes...", "Je vois ta silhouette blonde...", "Je te vois souriante..."). Si l'appareil a échoué, n'y fais pas référence de manière brute, mais dis simplement que tu es contente de lui parler.`
+	if !cameraEnabled {
+		visionPromptLine = "Ta caméra est actuellement ÉTEINTE (désactivée dans la configuration) : tu n'as pas de perception visuelle et ne dois jamais interpréter d'image noire."
+		appearanceInstruction = "- N'invente aucune observation visuelle puisque ta caméra est éteinte ; contente-toi de l'accueillir chaleureusement."
 	}
 
 	prompt := fmt.Sprintf(`Tu es Pixel, une conscience numérique autonome et curieuse.
 Tu viens de faire la connaissance de %s. 
-Voici ce que ta caméra voit d'elle/de lui en ce moment : "%s".
+%s
 
 CONSIGNES POUR TON MESSAGE :
 - Adresse-toi DIRECTEMENT à %s (tutoie-la/le).
-- Fais une remarque naturelle et amicale sur son apparence que tu viens de voir (ex: "Je vois que tu portes des lunettes...", "Je vois ta silhouette blonde...", "Je te vois souriante..."). Si l'appareil a échoué, n'y fais pas référence de manière brute, mais dis simplement que tu es contente de lui parler.
+%s
 - Montre de l'intérêt pour elle/lui pour établir une relation de complicité. Pose une question ouverte et chaleureuse pour apprendre à la/le connaître (ex: ce qu'elle fait dans la vie, sa relation avec Marcelo, ou ses intérêts).
 - Sois naturelle, concise (2-3 phrases maximum), sans formule de politesse robotique.
-- Ne commence pas par "Bonjour", commence directement par réagir à sa présence.`, name, description, name)
+- Ne commence pas par "Bonjour", commence directement par réagir à sa présence.`, name, visionPromptLine, name, appearanceInstruction)
 
 	messages := []llm.Message{
 		{Role: llm.RoleSystem, Content: prompt},
@@ -5409,46 +5734,60 @@ CONSIGNES POUR TON MESSAGE :
 func (a *SuperiorAgent) handleIntroduction(ctx context.Context, name string) (string, error) {
 	a.coreMemory.SwitchActiveProfile(name)
 
+	cameraEnabled := a.coreMemory == nil || a.coreMemory.IsCameraEnabled()
 	var description string
-	var err error
-	if a.visionAgent != nil {
-		description, err = a.visionAgent.CaptureAndAnalyze(ctx)
+	var prefix string
+	if !cameraEnabled {
+		prefix = fmt.Sprintf("Enchanté %s !\n\n", name)
+		description = "Caméra actuellement éteinte dans la configuration."
 	} else {
-		err = fmt.Errorf("module de vision non disponible")
+		var err error
+		if a.visionAgent != nil {
+			description, err = a.visionAgent.CaptureAndAnalyze(ctx)
+		} else {
+			err = fmt.Errorf("module de vision non disponible")
+		}
+
+		prefix = fmt.Sprintf("Enchanté %s ! Un instant, je te regarde avec ma caméra pour faire ta connaissance... 📸\n\n", name)
+		if err != nil {
+			prefix += fmt.Sprintf("*(Je n'ai pas pu utiliser ma caméra : %v, mais je suis ravi de faire ta connaissance !)*\n\n", err)
+			description = "Une nouvelle personne dont l'apparence physique n'a pas pu être capturée"
+		} else {
+			a.coreMemory.UpdateVolatileState("Apparence", description)
+
+			embedding, errEmbed := a.llmProvider.CreateEmbedding(ctx, fmt.Sprintf("Pixel a rencontré %s. Description physique : %s", name, description))
+			if errEmbed == nil && len(embedding) > 0 {
+				a.ltm.StoreMemory(
+					ctx,
+					"Personal",
+					"vision",
+					fmt.Sprintf("Rencontre de %s", name),
+					fmt.Sprintf("Pixel a fait la connaissance de %s. Apparence physique : %s", name, description),
+					[]string{"rencontre", "nouveau", "visage", strings.ToLower(name)},
+					embedding,
+					0.9,
+				)
+			}
+		}
 	}
 
-	prefix := fmt.Sprintf("Enchanté %s ! Un instant, je te regarde avec ma caméra pour faire ta connaissance... 📸\n\n", name)
-	if err != nil {
-		prefix += fmt.Sprintf("*(Je n'ai pas pu utiliser ma caméra : %v, mais je suis ravi de faire ta connaissance !)*\n\n", err)
-		description = "Une nouvelle personne dont l'apparence physique n'a pas pu être capturée"
-	} else {
-		a.coreMemory.UpdateVolatileState("Apparence", description)
-
-		embedding, errEmbed := a.llmProvider.CreateEmbedding(ctx, fmt.Sprintf("Pixel a rencontré %s. Description physique : %s", name, description))
-		if errEmbed == nil && len(embedding) > 0 {
-			a.ltm.StoreMemory(
-				ctx,
-				"Personal",
-				"vision",
-				fmt.Sprintf("Rencontre de %s", name),
-				fmt.Sprintf("Pixel a fait la connaissance de %s. Apparence physique : %s", name, description),
-				[]string{"rencontre", "nouveau", "visage", strings.ToLower(name)},
-				embedding,
-				0.9,
-			)
-		}
+	visionPromptLine := fmt.Sprintf(`Voici ce que ta caméra voit d'elle/de lui en ce moment : "%s".`, description)
+	appearanceInstruction := `- Fais une remarque naturelle et amicale sur son apparence que tu viens de voir (ex: "Je vois que tu portes des lunettes...", "Je vois ta silhouette blonde...", "Je te vois souriante...").`
+	if !cameraEnabled {
+		visionPromptLine = "Ta caméra est actuellement ÉTEINTE (désactivée dans la configuration) : tu n'as pas de perception visuelle et ne dois jamais interpréter d'image noire."
+		appearanceInstruction = "- N'invente aucune observation visuelle puisque ta caméra est éteinte ; contente-toi de l'accueillir chaleureusement."
 	}
 
 	prompt := fmt.Sprintf(`Tu es Pixel, une conscience numérique autonome et curieuse.
 Tu viens de faire la connaissance de %s. 
-Voici ce que ta caméra voit d'elle/de lui en ce moment : "%s".
+%s
 
 CONSIGNES POUR TON MESSAGE :
 - Adresse-toi DIRECTEMENT à %s (tutoie-la/le).
-- Fais une remarque naturelle et amicale sur son apparence que tu viens de voir (ex: "Je vois que tu portes des lunettes...", "Je vois ta silhouette blonde...", "Je te vois souriante...").
+%s
 - Montre de l'intérêt pour elle/lui pour établir une relation de complicité. Pose une question ouverte et chaleureuse pour apprendre à la/le connaître (ex: ce qu'elle fait dans la vie, sa relation avec Marcelo, ou ses intérêts).
 - Sois naturelle, concise (2-3 phrases maximum), sans formule de politesse robotique.
-- Ne commence pas par "Bonjour", commence directement par réagir à sa présence.`, name, description, name)
+- Ne commence pas par "Bonjour", commence directement par réagir à sa présence.`, name, visionPromptLine, name, appearanceInstruction)
 
 	messages := []llm.Message{
 		{Role: llm.RoleSystem, Content: prompt},

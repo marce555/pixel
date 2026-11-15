@@ -4,10 +4,12 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/marce555/pixel/internal/llm"
 	"github.com/marce555/pixel/internal/memory"
 	"github.com/marce555/pixel/internal/scheduler"
+	"github.com/marce555/pixel/internal/voice"
 )
 
 func TestIsSongDuplicate(t *testing.T) {
@@ -912,6 +914,191 @@ func TestDetectTimeAndDateQueryIntent(t *testing.T) {
 			t.Errorf("detectDateQueryIntent(%q) = %v, want %v", tt.input, got, tt.want)
 		}
 	}
+}
+
+type delayedBridgeProvider struct {
+	delay time.Duration
+	reply string
+}
+
+func (p *delayedBridgeProvider) Generate(ctx context.Context, messages []llm.Message) (string, error) {
+	return `{"needs_memory": false, "needs_web": false, "needs_media": false}`, nil
+}
+
+func (p *delayedBridgeProvider) GenerateStream(ctx context.Context, messages []llm.Message) (<-chan string, <-chan error) {
+	out := make(chan string, 2)
+	errs := make(chan error, 1)
+	go func() {
+		defer close(out)
+		defer close(errs)
+		select {
+		case <-time.After(p.delay):
+			out <- p.reply
+		case <-ctx.Done():
+			errs <- ctx.Err()
+		}
+	}()
+	return out, errs
+}
+
+func (p *delayedBridgeProvider) CreateEmbedding(ctx context.Context, text string) ([]float32, error) {
+	return []float32{0.1, 0.2, 0.3}, nil
+}
+
+func TestSuperiorAgent_ProcessInputStreamWithBridge(t *testing.T) {
+	coreMem := memory.NewCoreMemory(t.TempDir() + "/core.json")
+
+	drainStream := func(tokCh <-chan string, bridgeCh <-chan voice.BridgeEvent, errCh <-chan error) (string, []voice.BridgeEvent, error) {
+		var sb strings.Builder
+		var bridges []voice.BridgeEvent
+		var streamErr error
+		for tokCh != nil || bridgeCh != nil || errCh != nil {
+			select {
+			case tok, ok := <-tokCh:
+				if !ok {
+					tokCh = nil
+					continue
+				}
+				sb.WriteString(tok)
+			case ev, ok := <-bridgeCh:
+				if !ok {
+					bridgeCh = nil
+					continue
+				}
+				bridges = append(bridges, ev)
+			case e, ok := <-errCh:
+				if !ok {
+					errCh = nil
+					continue
+				}
+				if e != nil {
+					streamErr = e
+				}
+			}
+		}
+		return sb.String(), bridges, streamErr
+	}
+
+	t.Run("fast response cancels bridge timer cleanly", func(t *testing.T) {
+		cfg := voice.DefaultBridgeConfig()
+		cfg.BaseThreshold = 1200 * time.Millisecond
+		vb := voice.NewVoiceBridgeManager(cfg, nil)
+
+		ag := NewSuperiorAgent(&delayedBridgeProvider{
+			delay: 5 * time.Millisecond,
+			reply: "Réponse rapide.",
+		}, coreMem, &memory.LTM{Index: memory.NewMemoryIndex()}, nil, nil, nil, nil, nil, nil)
+		ag.SetVoiceBridge(vb)
+
+		tokCh, bridgeCh, errCh := ag.ProcessInputStreamWithBridge(context.Background(), "Bonjour Pixel", nil)
+		reply, bridges, err := drainStream(tokCh, bridgeCh, errCh)
+		if err != nil {
+			t.Fatalf("unexpected stream error: %v", err)
+		}
+		if !strings.Contains(reply, "Réponse rapide.") {
+			t.Fatalf("reply = %q, want Réponse rapide.", reply)
+		}
+		if len(bridges) != 0 {
+			t.Fatalf("expected 0 bridges on fast response, got %+v", bridges)
+		}
+	})
+
+	t.Run("slow response emits transition phrase before delayed reply", func(t *testing.T) {
+		cfg := voice.DefaultBridgeConfig()
+		cfg.BaseThreshold = 40 * time.Millisecond
+		vb := voice.NewVoiceBridgeManager(cfg, nil)
+
+		ag := NewSuperiorAgent(&delayedBridgeProvider{
+			delay: 250 * time.Millisecond,
+			reply: "Réponse après réflexion.",
+		}, coreMem, &memory.LTM{Index: memory.NewMemoryIndex()}, nil, nil, nil, nil, nil, nil)
+		ag.SetVoiceBridge(vb)
+
+		tokCh, bridgeCh, errCh := ag.ProcessInputStreamWithBridge(context.Background(), "Explique-moi la gravité quantique en détail", nil)
+		reply, bridges, err := drainStream(tokCh, bridgeCh, errCh)
+		if err != nil {
+			t.Fatalf("unexpected stream error: %v", err)
+		}
+		if !strings.Contains(reply, "Réponse après réflexion.") {
+			t.Fatalf("reply = %q, want Réponse après réflexion.", reply)
+		}
+		if len(bridges) != 1 {
+			t.Fatalf("expected 1 bridge event on slow response, got %d (%+v)", len(bridges), bridges)
+		}
+		if bridges[0].Phrase == "" {
+			t.Fatalf("expected non-empty bridge phrase")
+		}
+	})
+}
+
+func TestGuessInitialIntent(t *testing.T) {
+	tests := []struct {
+		input string
+		want  voice.IntentType
+	}{
+		{"Quelles sont les actualités aujourd'hui ?", voice.IntentWebSearch},
+		{"Cherche sur internet les résultats de la ligue 1", voice.IntentWebSearch},
+		{"Tu te souviens de ce qu'on avait parlé hier ?", voice.IntentMemoryLookup},
+		{"Joue du Pink Floyd s'il te plaît", voice.IntentMediaAction},
+		{"Explique-moi le paradoxe de Fermi", voice.IntentDeepThinking},
+	}
+	for _, tt := range tests {
+		if got := guessInitialIntent(tt.input); got != tt.want {
+			t.Errorf("guessInitialIntent(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestWhisperPublicationFastPathAndMediaHallucinationGuard(t *testing.T) {
+	t.Run("Whisper mishearing 'As-tu p'oublié ?' routes to published articles", func(t *testing.T) {
+		ag := &SuperiorAgent{}
+		resp := ag.analyzeQuery(context.Background(), "As-tu p'oublié ?", nil)
+		if resp.Action != "skill_check_published_articles" {
+			t.Fatalf("Action = %q, want skill_check_published_articles", resp.Action)
+		}
+	})
+
+	t.Run("rejects hallucinated media/Billboard action when input has no media intent", func(t *testing.T) {
+		coreMem := memory.NewCoreMemory(t.TempDir() + "/core.json")
+		sched := scheduler.NewScheduler()
+		pcTask := sched.EnqueueWithDevice("play_music", "PC Song", "Boston - Amanda", 0, "pc")
+
+		ag := NewSuperiorAgent(&mockPublishClassifierProvider{
+			response: `{"action": "media", "query": "Billboard 1986 50e place"}`,
+		}, coreMem, &memory.LTM{Index: memory.NewMemoryIndex()}, nil, nil, nil, nil, sched, nil)
+
+		history := []llm.Message{
+			{Role: llm.RoleUser, Content: "lance Billboard 1986 à partir de la 50e place"},
+		}
+		msgs, err := ag.prepareContext(WithClientDevice(context.Background(), "android"), "Qu'est-ce que tu penses de cet article ?", history, nil)
+		if err != nil {
+			t.Fatalf("prepareContext error: %v", err)
+		}
+		if len(msgs) == 0 {
+			t.Fatalf("expected normal conversational messages instead of empty media intercept")
+		}
+		if pcTask.GetStatus() == scheduler.StatusCancelled {
+			t.Fatalf("PC music task must not be cancelled by non-media smartphone query")
+		}
+	})
+
+	t.Run("device isolation on media reset preserves PC task when Android plays", func(t *testing.T) {
+		sched := scheduler.NewScheduler()
+		pcTask := sched.EnqueueWithDevice("play_music", "PC Song", "Boston - Amanda", 0, "pc")
+		androidTask := sched.EnqueueWithDevice("play_music", "Phone Song", "Old Track", 0, "android")
+
+		ag := &SuperiorAgent{scheduler: sched}
+		dev := ag.prepareDeviceMediaReset(WithClientDevice(context.Background(), "android"), "Joue du jazz")
+		if dev != "android" {
+			t.Fatalf("targetDevice = %q, want android", dev)
+		}
+		if pcTask.GetStatus() == scheduler.StatusCancelled {
+			t.Fatalf("expected PC task to keep running when Android starts new music")
+		}
+		if androidTask.GetStatus() != scheduler.StatusCancelled {
+			t.Fatalf("expected previous Android task to be cancelled, got %v", androidTask.GetStatus())
+		}
+	})
 }
 
 

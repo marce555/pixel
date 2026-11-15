@@ -119,7 +119,10 @@
                                         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" style="color: #60a5fa;"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
                                         Flux Webcam :
                                     </span>
-                                    <span class="vision-live-indicator" style="background: rgba(16,185,129,0.15); border: 1px solid rgba(16,185,129,0.3); color: #10b981; padding: 2px 8px; border-radius: 12px; font-weight: 600; font-size: 0.85em; display: flex; align-items: center; gap: 4px; animation: pulseGlow 1.8s infinite alternate;">● Actif</span>
+                                    <div style="display: flex; align-items: center; gap: 8px;">
+                                        <span id="vision-live-indicator" class="vision-live-indicator" style="background: rgba(16,185,129,0.15); border: 1px solid rgba(16,185,129,0.3); color: #10b981; padding: 2px 8px; border-radius: 12px; font-weight: 600; font-size: 0.85em; display: flex; align-items: center; gap: 4px; animation: pulseGlow 1.8s infinite alternate;">● Actif</span>
+                                        <button id="vision-toggle-btn" type="button" title="Allumer ou éteindre la caméra" style="background: rgba(255,255,255,0.08); border: 1px solid var(--glass-border); color: var(--text-main); padding: 2px 8px; border-radius: 10px; font-size: 0.85em; cursor: pointer;">Éteindre</button>
+                                    </div>
                                 </div>
                                 <p id="vision-desc" style="font-style: italic; background: rgba(0, 0, 0, 0.2); padding: 12px; border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.05); margin-top: 10px; line-height: 1.5em; color: #a7f3d0; font-family: inherit;">
                                     En attente du premier instantané visuel de la webcam...
@@ -387,6 +390,20 @@
                                     <input type="password" id="llm-cloud-key" placeholder="Coller la clé API Cloud ici…" style="width:100%; background:rgba(0,0,0,0.4); border:1px solid rgba(251,191,36,0.3); padding:8px 10px; border-radius:7px; color:var(--text-main); font-family:inherit; font-size:0.9em; outline:none;">
                                 </div>
 
+                                <!-- ── CAMÉRA & PERCEPTION VISUELLE ── -->
+                                <div style="background:rgba(16,185,129,0.06); border:1px solid rgba(16,185,129,0.22); border-radius:10px; padding:12px;">
+                                    <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+                                        <div>
+                                            <div style="color:#6ee7b7; font-size:0.8em; text-transform:uppercase; letter-spacing:0.5px; font-weight:600;">📷 Caméra de Pixel</div>
+                                            <div id="config-camera-hint" style="color:var(--text-muted); font-size:0.78em; margin-top:3px;">Active la capture webcam et l'analyse visuelle. Quand elle est éteinte, Pixel ne capture rien et n'interprète pas le noir.</div>
+                                        </div>
+                                        <label style="display:flex; align-items:center; gap:8px; cursor:pointer; user-select:none; white-space:nowrap; font-size:0.88em; font-weight:600; color:var(--text-main);">
+                                            <input type="checkbox" id="camera-enabled-checkbox" checked style="width:16px; height:16px; accent-color:#10b981; cursor:pointer;">
+                                            <span id="camera-enabled-label">Activée</span>
+                                        </label>
+                                    </div>
+                                </div>
+
                                 <!-- ── BOUTON SAVE ── -->
                                 <button id="save-llm-btn" style="background: var(--primary); color: white; border: none; padding: 10px; border-radius: 8px; font-weight: 600; cursor: pointer; transition: all 0.2s; width: 100%;">Enregistrer la Configuration</button>
                             </div>
@@ -437,6 +454,6 @@
         console.log('[Pixel] Moteur STT activé → Navigateur Web (Google Speech API)');
       })();
     </script>
-    <script src="app.js?v=14"></script>
+    <script src="app.js?v=15"></script>
 </body>
 </html>

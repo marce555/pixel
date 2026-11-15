@@ -129,6 +129,27 @@ func main() {
 		taskScheduler.SetVoiceSpeaker(voiceMgr)
 	}
 
+	vbSettings := coreMem.GetVoiceBridgeSettings()
+	vbCfg := voice.DefaultBridgeConfig()
+	vbCfg.Enabled = vbSettings.Enabled
+	vbCfg.BaseThreshold = time.Duration(vbSettings.ThresholdMs) * time.Millisecond
+	vbCfg.AdaptiveExtra = time.Duration(vbSettings.AdaptiveExtraMs) * time.Millisecond
+	vbCfg.PreCacheAudio = vbSettings.PreCacheAudio
+	var voiceSynth voice.AudioSynthesizer
+	if voiceMgr != nil {
+		voiceSynth = voiceMgr
+	}
+	voiceBridge := voice.NewVoiceBridgeManager(vbCfg, voiceSynth)
+	if vbCfg.Enabled && vbCfg.PreCacheAudio && voiceSynth != nil {
+		go func() {
+			select {
+			case <-time.After(8 * time.Second):
+				voiceBridge.PreCachePool(ctx)
+			case <-ctx.Done():
+			}
+		}()
+	}
+
 	webResearcher := agent.NewWebResearcherAgent(igpuProvider, webAgent)
 	sysadminAgent := agent.NewSysadminAgent(igpuProvider)
 
@@ -200,6 +221,7 @@ func main() {
 	superior.SetBackgroundProvider(npuProvider)
 	superior.SetDraftManager(draftManager)
 	superior.SetSelfAwareness(selfAwareness)
+	superior.SetVoiceBridge(voiceBridge)
 
 	sleepManager.SetSelfAwareness(selfAwareness)
 
@@ -209,6 +231,7 @@ func main() {
 	curiosityAgent := agent.NewCuriosityAgent(igpuProvider, coreMem, stm, ltm, eventHub, timeAgent, webAgent, thoughtStream, sleepManager, taskScheduler, thalamicGate)
 	curiosityAgent.SetSkillManager(skillManager)
 	curiosityAgent.SetSelfAwareness(selfAwareness)
+	curiosityAgent.SetVoiceBridge(voiceBridge)
 
 	// 7. Init VisionAgent (dGPU multimodal) and start background sensory vision loop
 	visionAgent := agent.NewVisionAgent(provider, coreMem, ltm, stm, thoughtStream, func(msg string) {
@@ -231,6 +254,7 @@ func main() {
 	fmt.Println("Le Cerveau de Pixel tourne. Lancement de l'interface graphique...")
 	webServer := api.NewServer(superior, coreMem, stm, sleepManager, profiler, projectAgent, projectManager, eventHub, taskScheduler, adaptiveProvider)
 	webServer.SetTaskProviders(publishProvider, reviewProvider, igpuBaseURL, igpuModel)
+	webServer.SetVoiceBridge(voiceBridge)
 	port := strings.TrimSpace(os.Getenv("PIXEL_PORT"))
 	if port == "" {
 		port = "8080"

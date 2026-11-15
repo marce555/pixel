@@ -49,6 +49,7 @@ document.addEventListener('DOMContentLoaded', () => {
     fetchActiveProject();
     fetchTasks();
     fetchLLMSettings();
+    fetchVisionSettings();
 
     // Rafraichir toutes les 10 secondes pour voir l'évolution
     setInterval(() => {
@@ -120,6 +121,11 @@ document.addEventListener('DOMContentLoaded', () => {
                             visionDescEl.style.transition = 'opacity 0.5s ease';
                             visionDescEl.style.opacity = '1';
                         }, 50);
+                    }
+                    if (desc.toLowerCase().includes("caméra éteinte")) {
+                        applyCameraUIState(false);
+                    } else if (desc.toLowerCase().includes("caméra activée")) {
+                        applyCameraUIState(true);
                     }
                 } else if (data.proactive_message.startsWith("AUDIO_STREAM:")) {
                     // Événement interne pour le streaming audio vers l'application Android : ne pas afficher dans le chat web
@@ -294,11 +300,17 @@ document.addEventListener('DOMContentLoaded', () => {
         // Ajouter l'indicateur de chargement
         const loadingId = appendLoading();
 
+        const chatAbortController = new AbortController();
+        if (window.voiceController) {
+            window.voiceController.setActiveChatAbortController(chatAbortController);
+        }
+
         try {
             const response = await fetch('/api/chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ message: text, sender: currentUserName })
+                body: JSON.stringify({ message: text, sender: currentUserName }),
+                signal: chatAbortController.signal
             });
 
             removeLoading(loadingId);
@@ -340,6 +352,11 @@ document.addEventListener('DOMContentLoaded', () => {
                             const data = JSON.parse(dataStr);
                             if (data.error) {
                                 bubbleDiv.textContent += "\nErreur système: " + data.error;
+                            } else if (data.bridge) {
+                                // Intention vocale de transition (non ajoutée à la bulle ni à la mémoire)
+                                if (window.voiceController) {
+                                    window.voiceController.enqueueBridge(data.bridge);
+                                }
                             } else if (data.chunk) {
                                 accumulatedText += data.chunk;
                                 bubbleDiv.innerHTML = formatResponse(accumulatedText);
@@ -1198,6 +1215,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 });
                 const data = await res.json();
                 if (data.status === 'ok') {
+                    const camCheckbox = document.getElementById('camera-enabled-checkbox');
+                    if (camCheckbox) {
+                        await saveVisionSettings(camCheckbox.checked, false);
+                    }
                     window.showToast("✅ Configuration Multi-LLM & 1min.AI sauvegardée !", "info");
                     fetchLLMSettings();
                 } else {
@@ -1207,6 +1228,93 @@ document.addEventListener('DOMContentLoaded', () => {
                 console.error(err);
                 window.showToast("Erreur réseau", "error");
             }
+        });
+    }
+
+    let currentCameraEnabled = true;
+
+    function applyCameraUIState(enabled) {
+        currentCameraEnabled = Boolean(enabled);
+        const checkbox = document.getElementById('camera-enabled-checkbox');
+        const label = document.getElementById('camera-enabled-label');
+        const indicator = document.getElementById('vision-live-indicator');
+        const toggleBtn = document.getElementById('vision-toggle-btn');
+
+        if (checkbox) {
+            checkbox.checked = currentCameraEnabled;
+        }
+        if (label) {
+            label.textContent = currentCameraEnabled ? 'Activée' : 'Éteinte';
+            label.style.color = currentCameraEnabled ? '#6ee7b7' : '#fca5a5';
+        }
+        if (indicator) {
+            if (currentCameraEnabled) {
+                indicator.textContent = '● Actif';
+                indicator.style.background = 'rgba(16,185,129,0.15)';
+                indicator.style.borderColor = 'rgba(16,185,129,0.3)';
+                indicator.style.color = '#10b981';
+                indicator.style.animation = 'pulseGlow 1.8s infinite alternate';
+            } else {
+                indicator.textContent = '○ Éteinte';
+                indicator.style.background = 'rgba(239,68,68,0.15)';
+                indicator.style.borderColor = 'rgba(239,68,68,0.3)';
+                indicator.style.color = '#fca5a5';
+                indicator.style.animation = 'none';
+            }
+        }
+        if (toggleBtn) {
+            toggleBtn.textContent = currentCameraEnabled ? 'Éteindre' : 'Allumer';
+        }
+    }
+
+    async function fetchVisionSettings() {
+        try {
+            const res = await fetch('/api/vision_settings');
+            if (!res.ok) return;
+            const data = await res.json();
+            applyCameraUIState(data.camera_enabled !== false);
+        } catch (err) {
+            console.error('Erreur fetchVisionSettings:', err);
+        }
+    }
+
+    async function saveVisionSettings(enabled, notify = true) {
+        try {
+            const res = await fetch('/api/vision_settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ camera_enabled: Boolean(enabled) })
+            });
+            if (!res.ok) {
+                if (notify) window.showToast("Erreur lors de la mise à jour de la caméra", "error");
+                return;
+            }
+            const data = await res.json();
+            applyCameraUIState(data.camera_enabled);
+            const visionDescEl = document.getElementById('vision-desc');
+            if (visionDescEl && !data.camera_enabled) {
+                visionDescEl.textContent = 'Caméra éteinte (désactivée dans la configuration).';
+            }
+            if (notify) {
+                window.showToast(data.camera_enabled ? "📷 Caméra activée" : "📷 Caméra éteinte", "info");
+            }
+        } catch (err) {
+            console.error(err);
+            if (notify) window.showToast("Erreur réseau", "error");
+        }
+    }
+
+    const camCheckboxEl = document.getElementById('camera-enabled-checkbox');
+    if (camCheckboxEl) {
+        camCheckboxEl.addEventListener('change', () => {
+            saveVisionSettings(camCheckboxEl.checked, true);
+        });
+    }
+
+    const visionToggleBtnEl = document.getElementById('vision-toggle-btn');
+    if (visionToggleBtnEl) {
+        visionToggleBtnEl.addEventListener('click', () => {
+            saveVisionSettings(!currentCameraEnabled, true);
         });
     }
 });
@@ -2061,6 +2169,23 @@ class VoiceController {
         }
     }
 
+    setActiveChatAbortController(controller) {
+        this.activeChatAbortController = controller;
+    }
+
+    enqueueBridge(phrase) {
+        if (!this.isTtsEnabled || this.isStreamFinished || !phrase) return;
+        // Ne pas injecter de transition si la vraie réponse a déjà commencé à parler ou est en file
+        if (this.speechQueue.length > 0 || this.isSpeakingSentence || this.speechBuffer.trim().length > 0) {
+            return;
+        }
+        const cleaned = this.cleanTtsSentence(phrase);
+        if (cleaned.length > 1) {
+            this.speechQueue.push(cleaned);
+            this._playNext();
+        }
+    }
+
     feedChunk(chunk) {
         if (!this.isTtsEnabled || this.ttsSummaryApplied) return;
         this.speechBuffer += chunk;
@@ -2152,6 +2277,10 @@ class VoiceController {
     }
 
     stopSpeaking() {
+        if (this.activeChatAbortController) {
+            try { this.activeChatAbortController.abort(); } catch(e) {}
+            this.activeChatAbortController = null;
+        }
         if (this.currentAudio) {
             try { this.currentAudio.pause(); } catch(e) {}
             this.currentAudio = null;

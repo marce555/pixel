@@ -31,3 +31,36 @@ func TestNewCoreMemoryMigratesStaleQuestionPolicy(t *testing.T) {
 		t.Fatalf("expected migrated strict natural-stop rule in reloaded persona")
 	}
 }
+
+func TestVisionSettingsDefaultAndPersistence(t *testing.T) {
+	filePath := t.TempDir() + "/core_memory.json"
+
+	// Legacy JSON without vision_settings should default to CameraEnabled == true.
+	if err := os.WriteFile(filePath, []byte(`{"agent_persona":"test"}`), 0644); err != nil {
+		t.Fatalf("failed to write seed file: %v", err)
+	}
+
+	cm := NewCoreMemory(filePath)
+	if !cm.IsCameraEnabled() {
+		t.Fatalf("expected CameraEnabled default true when absent from legacy JSON")
+	}
+
+	cm.SetCameraEnabled(false)
+	if cm.IsCameraEnabled() {
+		t.Fatalf("expected IsCameraEnabled() == false immediately after SetCameraEnabled(false)")
+	}
+	if !strings.Contains(strings.ToLower(cm.GetProfile().Volatile["Dernière vision"]), "caméra éteinte") {
+		t.Fatalf("expected Dernière vision volatile note when disabled, got %q", cm.GetProfile().Volatile["Dernière vision"])
+	}
+
+	reloaded := NewCoreMemory(filePath)
+	if reloaded.IsCameraEnabled() {
+		t.Fatalf("expected CameraEnabled == false to survive JSON reload")
+	}
+
+	reloaded.SetCameraEnabled(true)
+	reloaded2 := NewCoreMemory(filePath)
+	if !reloaded2.IsCameraEnabled() {
+		t.Fatalf("expected CameraEnabled == true after re-enabling")
+	}
+}

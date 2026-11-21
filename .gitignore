@@ -45,8 +45,10 @@ certs/
 *.onnx
 *.onnx.json
 bin/piper/
+bin/speaker/
 bin/whisper.cpp/
 bin/yt-dlp
+skills/openaudio_dj_mix/venv/
 
 # Temporary Dumps, Images & Screenshots
 *.png

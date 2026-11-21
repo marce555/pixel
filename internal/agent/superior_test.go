@@ -1101,6 +1101,117 @@ func TestWhisperPublicationFastPathAndMediaHallucinationGuard(t *testing.T) {
 	})
 }
 
+func TestSuperiorAgent_ScheduledResearchRespectsOriginDevice(t *testing.T) {
+	t.Run("agent_task via ProcessInputStreamWithBridge inherits requesting device", func(t *testing.T) {
+		coreMem := memory.NewCoreMemory(t.TempDir() + "/core.json")
+		sched := scheduler.NewScheduler()
+		ag := NewSuperiorAgent(&mockPublishClassifierProvider{response: "ok"}, coreMem, &memory.LTM{Index: memory.NewMemoryIndex()}, nil, nil, nil, nil, sched, nil)
+
+		outAndroid, _, errsAndroid := ag.ProcessInputStreamWithBridge(WithClientDevice(context.Background(), "android"), "Fais une recherche approfondie sur la fusion nucléaire", nil)
+		for range outAndroid {
+		}
+		for err := range errsAndroid {
+			t.Fatalf("android stream error: %v", err)
+		}
+
+		outPC, _, errsPC := ag.ProcessInputStreamWithBridge(WithClientDevice(context.Background(), "pc"), "Fais une recherche approfondie sur la matière noire", nil)
+		for range outPC {
+		}
+		for err := range errsPC {
+			t.Fatalf("pc stream error: %v", err)
+		}
+
+		tasks := sched.GetTasks()
+		if len(tasks) != 2 {
+			t.Fatalf("expected 2 scheduled tasks, got %d", len(tasks))
+		}
+		if tasks[0].Type != "agent_task" || tasks[0].TargetDevice != "android" {
+			t.Fatalf("task[0] = (%q, %q), want (agent_task, android)", tasks[0].Type, tasks[0].TargetDevice)
+		}
+		if tasks[1].Type != "agent_task" || tasks[1].TargetDevice != "pc" {
+			t.Fatalf("task[1] = (%q, %q), want (agent_task, pc)", tasks[1].Type, tasks[1].TargetDevice)
+		}
+	})
+
+	t.Run("research_task via router inherits requesting device", func(t *testing.T) {
+		coreMem := memory.NewCoreMemory(t.TempDir() + "/core.json")
+		sched := scheduler.NewScheduler()
+		ag := NewSuperiorAgent(&mockPublishClassifierProvider{
+			response: `{"action": "research", "query": "neuroplasticité novembre 2026"}`,
+		}, coreMem, &memory.LTM{Index: memory.NewMemoryIndex()}, NewWebAgent(), nil, nil, nil, sched, nil)
+
+		if _, err := ag.prepareContext(WithClientDevice(context.Background(), "android"), "Creuse le sujet de la neuroplasticité", nil, nil); err != nil {
+			t.Fatalf("prepareContext android error: %v", err)
+		}
+		if _, err := ag.prepareContext(WithClientDevice(context.Background(), "pc"), "Creuse le sujet des trous noirs", nil, nil); err != nil {
+			t.Fatalf("prepareContext pc error: %v", err)
+		}
+
+		tasks := sched.GetTasks()
+		if len(tasks) != 2 {
+			t.Fatalf("expected 2 research_task items, got %d", len(tasks))
+		}
+		if tasks[0].Type != "research_task" || tasks[0].TargetDevice != "android" {
+			t.Fatalf("task[0] = (%q, %q), want (research_task, android)", tasks[0].Type, tasks[0].TargetDevice)
+		}
+		if tasks[1].Type != "research_task" || tasks[1].TargetDevice != "pc" {
+			t.Fatalf("task[1] = (%q, %q), want (research_task, pc)", tasks[1].Type, tasks[1].TargetDevice)
+		}
+	})
+}
+
+func TestDetectOpenAudioMixIntent(t *testing.T) {
+	shouldMatch := []string{
+		"lance un mix avec discoteque-80s",
+		"Lance un mix avec 125 BPM best 80's",
+		"lance un mix avec Hits-Remix",
+		"lance-moi un mix avec REMIX-80",
+		"lance Concierto Discoteque Hits-Remix",
+		"lance concierto discotheque avec discoteque-80s",
+		"lance un mix",
+		"lance-moi un mix",
+		"fais un mix",
+		"mets un mix openaudio",
+	}
+	for _, q := range shouldMatch {
+		if !detectOpenAudioMixIntent(q) {
+			t.Errorf("detectOpenAudioMixIntent(%q) = false, want true", q)
+		}
+		if detectDJRemixIntent(q) {
+			t.Errorf("detectDJRemixIntent(%q) = true, must not hijack local OpenAudio mix", q)
+		}
+	}
+
+	shouldNotMatch := []string{
+		"lance moi un remix de Fine Young Cannibals",
+		"lance moi kdj année 1982",
+		"lance billboard 1986",
+		"arrête la musique",
+		"comment fonctionne un mix dj ?",
+		"c'est quoi concierto discoteque ?",
+	}
+	for _, q := range shouldNotMatch {
+		if detectOpenAudioMixIntent(q) {
+			t.Errorf("detectOpenAudioMixIntent(%q) = true, want false", q)
+		}
+	}
+
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"https://88.190.169.40:38443", "http://88.190.169.40:38080"},
+		{"https://192.168.1.50:8443", "http://192.168.1.50:8080"},
+		{"http://192.168.1.50:8080", "http://192.168.1.50:8080"},
+		{"https://pixel.example.com", "https://pixel.example.com"},
+	}
+	for _, tc := range cases {
+		if got := mediaMixStreamBaseURL(tc.in); got != tc.want {
+			t.Errorf("mediaMixStreamBaseURL(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 
 
 

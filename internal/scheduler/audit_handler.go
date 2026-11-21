@@ -421,7 +421,7 @@ func NewAuditAndFixArticlesHandlerWithBibliographicAuditor(broadcaster EventBroa
 					rejectMsg := fmt.Sprintf("🛑 Article \"%s\" REJETÉ par le vérificateur factuel : %s (Réinjection sur AppliYou annulée)", revTitle, result.FactCheck.Summary)
 					task.AppendLog("  " + rejectMsg)
 					if broadcaster != nil {
-						broadcaster.Broadcast("⚠️ " + rejectMsg)
+						BroadcastForTask(broadcaster, task, "⚠️ "+rejectMsg)
 					}
 					issues = append(issues, rejectMsg)
 					result.Issues = issues
@@ -782,11 +782,9 @@ func NewAuditAndFixArticlesHandlerWithBibliographicAuditor(broadcaster EventBroa
 
 		report := sb.String()
 		if broadcaster != nil {
-			broadcaster.Broadcast(report)
+			BroadcastForTask(broadcaster, task, report)
 		}
-		if stm != nil {
-			stm.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: report})
-		}
+		AddMessageForTask(stm, task, llm.Message{Role: llm.RoleAssistant, Content: report})
 
 		return nil
 	}

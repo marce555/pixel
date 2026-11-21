@@ -134,21 +134,14 @@ func main() {
 	vbCfg.Enabled = vbSettings.Enabled
 	vbCfg.BaseThreshold = time.Duration(vbSettings.ThresholdMs) * time.Millisecond
 	vbCfg.AdaptiveExtra = time.Duration(vbSettings.AdaptiveExtraMs) * time.Millisecond
-	vbCfg.PreCacheAudio = vbSettings.PreCacheAudio
+	vbCfg.PreCacheAudio = false
 	var voiceSynth voice.AudioSynthesizer
 	if voiceMgr != nil {
 		voiceSynth = voiceMgr
 	}
 	voiceBridge := voice.NewVoiceBridgeManager(vbCfg, voiceSynth)
-	if vbCfg.Enabled && vbCfg.PreCacheAudio && voiceSynth != nil {
-		go func() {
-			select {
-			case <-time.After(8 * time.Second):
-				voiceBridge.PreCachePool(ctx)
-			case <-ctx.Done():
-			}
-		}()
-	}
+	_ = os.MkdirAll("sounds", 0755)
+	_ = os.WriteFile("sounds/thinking_alert.wav", voice.BuildThinkingAlertWAV(), 0644)
 
 	webResearcher := agent.NewWebResearcherAgent(igpuProvider, webAgent)
 	sysadminAgent := agent.NewSysadminAgent(igpuProvider)
@@ -196,7 +189,7 @@ func main() {
 	)
 
 	skillManager := skills.NewSkillManager(codeProvider, "skills")
-	taskScheduler.RegisterHandler("build_skill", skills.NewBuildSkillHandler(skillManager, eventHub.Broadcast))
+	taskScheduler.RegisterHandler("build_skill", skills.NewBuildSkillHandlerWithBroadcaster(skillManager, eventHub))
 
 	taskScheduler.Start(ctx)
 
@@ -250,11 +243,22 @@ func main() {
 	serverMonitorAgent := agent.NewServerMonitorAgent(npuProvider, coreMem, stm, ltm, thoughtStream, eventHub, skillManager)
 	serverMonitorAgent.Start(ctx)
 
+	speakerVerifier := voice.NewSpeakerVerifier("pixel_speaker_profile.json", "bin", "internal/voice/speaker_worker.py", "http://127.0.0.1:8090")
+	go func() {
+		if err := speakerVerifier.EnsureWorker(ctx); err != nil {
+			fmt.Printf("[SpeakerVerifier] Worker ONNX inactif (mode dégradé sans signature vocale) : %v\n", err)
+		} else {
+			fmt.Println("[SpeakerVerifier] Micro-service ONNX de signature vocale prêt sur 127.0.0.1:8090.")
+		}
+	}()
+
 	// 8. Démarrage de l'Interface Web locale
 	fmt.Println("Le Cerveau de Pixel tourne. Lancement de l'interface graphique...")
 	webServer := api.NewServer(superior, coreMem, stm, sleepManager, profiler, projectAgent, projectManager, eventHub, taskScheduler, adaptiveProvider)
 	webServer.SetTaskProviders(publishProvider, reviewProvider, igpuBaseURL, igpuModel)
+	webServer.SetNPUProvider(npuProvider)
 	webServer.SetVoiceBridge(voiceBridge)
+	webServer.SetSpeakerVerifier(speakerVerifier)
 	port := strings.TrimSpace(os.Getenv("PIXEL_PORT"))
 	if port == "" {
 		port = "8080"

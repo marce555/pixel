@@ -20,7 +20,9 @@ CHANNEL_URL = "https://www.youtube.com/@kdj8363"
 CHANNEL_VIDEOS_URL = "https://www.youtube.com/@kdj8363/videos"
 CHANNEL_SEARCH_URL = "https://www.youtube.com/@kdj8363/search?query="
 CACHE_FILE = "/tmp/pixel_kdj_catalog.json"
+HISTORY_FILE = "/tmp/pixel_kdj_history.json"
 CACHE_TTL_SECONDS = 6 * 3600  # 6 heures
+MAX_HISTORY_PER_KEYWORD = 20
 
 # Catalogue de secours authentique issu de https://www.youtube.com/@kdj8363
 FALLBACK_CATALOG = [
@@ -78,7 +80,7 @@ def format_video_entry(entry: dict) -> dict:
     }
 
 
-def fetch_channel_catalog(max_videos: int = 200) -> list:
+def fetch_channel_catalog(max_videos: int = 300) -> list:
     # 1. Vérifier le cache local
     if os.path.exists(CACHE_FILE):
         try:
@@ -237,11 +239,19 @@ def extract_keyword(raw_query: str) -> tuple:
     if "club haus" in norm or "clubhaus" in norm or "club house" in norm or "clubhouse" in norm:
         return ("Club House", "club house")
 
-    # Cas 2 : Année précise (ex: "année 1982", "1982")
+    # Cas 2 : Année précise (ex: "année 1982", "1983", "kdj hits 1983", "kdj 1983 au hasard")
     year_match = re.search(r"\b(19\d{2}|20\d{2})\b", norm)
-    if year_match and ("annee" in norm or norm == year_match.group(1)):
+    if year_match:
         year = year_match.group(1)
-        return (f"année {year}", year)
+        year_fillers = {
+            "annee", "annees", "au", "hasard", "aleatoire", "aleatoirement",
+            "mix", "hits", "hit", "retro", "titre", "titres", "morceau",
+            "morceaux", "chanson", "chansons", "son", "sons", "selection",
+            "de", "du", "des", "la", "le", "les", "en", "pour", "avec", "sur",
+        }
+        remaining = [t for t in norm.split() if t != year and t not in year_fillers]
+        if "annee" in norm or "annees" in norm or not remaining:
+            return (f"année {year}", year)
 
     # Cas 3 : REMIX
     if norm in {"remix", "remixes", "re mix"}:
@@ -297,25 +307,92 @@ def filter_catalog_by_keyword(catalog: list, display_kw: str, search_kw: str) ->
     return combined
 
 
-def select_creations(raw_query: str, max_tracks: int = 25) -> tuple:
+def _track_key(item: dict) -> str:
+    return (item.get("id") or item.get("url") or "").strip()
+
+
+def _load_history(history_file: str = HISTORY_FILE) -> dict:
+    if not history_file or not os.path.exists(history_file):
+        return {}
+    try:
+        with open(history_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def _save_history(history: dict, history_file: str = HISTORY_FILE) -> None:
+    if not history_file:
+        return
+    try:
+        with open(history_file, "w", encoding="utf-8") as f:
+            json.dump(history, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _pick_random_avoiding_repeats(candidates: list, norm_kw: str, max_tracks: int, history_file: str = HISTORY_FILE) -> list:
+    if not candidates:
+        return []
+
+    history = _load_history(history_file)
+    hist_key = norm_kw or "__all__"
+    recent = [k for k in history.get(hist_key, []) if isinstance(k, str) and k]
+
+    recent_set = set(recent)
+    fresh = [item for item in candidates if _track_key(item) not in recent_set]
+    stale = [item for item in candidates if _track_key(item) in recent_set]
+
+    if fresh:
+        random.shuffle(fresh)
+        random.shuffle(stale)
+        ordered = (fresh + stale)[:max_tracks]
+        chosen_key = _track_key(ordered[0])
+        if chosen_key:
+            recent.append(chosen_key)
+            if len(recent) > MAX_HISTORY_PER_KEYWORD:
+                recent = recent[-MAX_HISTORY_PER_KEYWORD:]
+            history[hist_key] = recent
+            _save_history(history, history_file)
+        return ordered
+
+    # Tous les titres correspondants ont déjà été joués récemment :
+    # exclure au moins le tout dernier joué pour éviter la répétition immédiate.
+    last_key = recent[-1] if recent else ""
+    non_immediate = [item for item in candidates if _track_key(item) != last_key]
+    immediate = [item for item in candidates if _track_key(item) == last_key]
+    random.shuffle(non_immediate)
+    ordered = (non_immediate + immediate)[:max_tracks]
+    chosen_key = _track_key(ordered[0])
+    if chosen_key:
+        history[hist_key] = [last_key, chosen_key] if last_key and last_key != chosen_key else [chosen_key]
+        _save_history(history, history_file)
+    return ordered
+
+
+def select_creations(raw_query: str, max_tracks: int = 25, history_file: str = HISTORY_FILE) -> tuple:
     display_kw, search_kw = extract_keyword(raw_query)
-    catalog = fetch_channel_catalog(max_videos=200)
+    catalog = fetch_channel_catalog(max_videos=300)
 
     if search_kw:
-        # 1. Recherche directe sur la chaîne YouTube @kdj8363 (cherche dans les titres ET descriptions/tracklists)
-        channel_search_results = search_channel_by_keyword(search_kw, max_results=max_tracks)
-        # 2. Filtrage sur le catalogue local de la chaîne @kdj8363
+        norm_kw = normalize_text(search_kw)
+        is_year_query = bool(re.fullmatch(r"(19|20)\d{2}", norm_kw))
+
+        # 1. Recherche directe en direct sur la chaîne YouTube @kdj8363 (titres + descriptions/tracklists)
+        channel_search_results = search_channel_by_keyword(search_kw, max_results=35)
+        # 2. Filtrage sur le catalogue complet en cache de la chaîne @kdj8363
         catalog_matches = filter_catalog_by_keyword(catalog, display_kw, search_kw)
 
-        # Prioriser les titres contenant directement le mot-clé, puis les résultats de recherche chaîne (descriptions/tracklists), puis le reste
-        norm_kw = normalize_text(search_kw)
         kw_tokens = [t for t in norm_kw.split() if len(t) >= 2]
-
         direct_title_hits = []
-        other_hits = []
+        channel_or_exact_hits = []
+        decade_fallback_hits = []
         seen_urls = set()
 
-        for item in channel_search_results + catalog_matches:
+        for item in channel_search_results:
             u = item.get("url")
             if not u or u in seen_urls:
                 continue
@@ -324,12 +401,42 @@ def select_creations(raw_query: str, max_tracks: int = 25) -> tuple:
             if norm_kw in nt or (kw_tokens and all(t in nt for t in kw_tokens)):
                 direct_title_hits.append(item)
             else:
-                other_hits.append(item)
+                channel_or_exact_hits.append(item)
 
-        selected = (direct_title_hits + other_hits)[:max_tracks]
-        if not selected:
-            # Aucun résultat spécifique trouvé : proposer une sélection variée du catalogue KDJ
-            selected = list(catalog[:max_tracks])
+        for item in catalog_matches:
+            u = item.get("url")
+            if not u or u in seen_urls:
+                continue
+            seen_urls.add(u)
+            nt = normalize_text(item.get("title", ""))
+            if norm_kw in nt or (kw_tokens and all(t in nt for t in kw_tokens)):
+                direct_title_hits.append(item)
+            elif is_year_query:
+                # Pour une année précise (ex: 1983), garder les matches génériques de décennie
+                # ("80s", "retro", "classix") uniquement en dernier repli si la recherche
+                # directe sur la chaîne @kdj8363 n'a rien renvoyé.
+                decade_fallback_hits.append(item)
+            else:
+                channel_or_exact_hits.append(item)
+
+        # Pour une année (ex: 1983), réunir tous les résultats qui correspondent réellement à l'année
+        # (titres explicites + descriptions/tracklists retournées par @kdj8363/search) et tirer au hasard
+        # sans répéter le titre précédent.
+        if is_year_query:
+            year_pool = direct_title_hits + channel_or_exact_hits
+            if not year_pool:
+                year_pool = decade_fallback_hits
+            if not year_pool:
+                year_pool = list(catalog)
+            selected = _pick_random_avoiding_repeats(year_pool, norm_kw, max_tracks, history_file=history_file)
+            return display_kw, selected
+
+        random.shuffle(direct_title_hits)
+        random.shuffle(channel_or_exact_hits)
+        pool = direct_title_hits + channel_or_exact_hits
+        if not pool:
+            pool = list(catalog)
+        selected = _pick_random_avoiding_repeats(pool, norm_kw, max_tracks, history_file=history_file)
         return display_kw, selected
 
     # Sans mot-clé spécifique : proposer un panorama riche des créations KDJ

@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -98,6 +101,25 @@ func ClientDeviceFromContext(ctx context.Context) string {
 	return ""
 }
 
+type requestBaseURLCtxKey struct{}
+
+// WithRequestBaseURL attaches the HTTP origin (scheme://host) of the incoming request to ctx
+// so local generated audio mixes can be streamed cleanly back to remote smartphone clients.
+func WithRequestBaseURL(ctx context.Context, baseURL string) context.Context {
+	return context.WithValue(ctx, requestBaseURLCtxKey{}, strings.TrimRight(strings.TrimSpace(baseURL), "/"))
+}
+
+// RequestBaseURLFromContext returns the HTTP origin attached to ctx, or "".
+func RequestBaseURLFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if u, ok := ctx.Value(requestBaseURLCtxKey{}).(string); ok {
+		return u
+	}
+	return ""
+}
+
 func normalizeClientDevice(client string) string {
 	clean := strings.ToLower(strings.TrimSpace(client))
 	if clean == "android" || clean == "mobile" || clean == "phone" {
@@ -139,6 +161,15 @@ func (a *SuperiorAgent) resolveTargetDeviceWithCtx(ctx context.Context, input st
 		strings.Contains(lower, "sur le portable") {
 		return "android"
 	}
+	if dev := ClientDeviceFromContext(ctx); dev != "" {
+		return dev
+	}
+	return a.GetActiveClient()
+}
+
+// resolveOriginDevice returns the originating client device ("pc" or "android") for the current turn,
+// so scheduled tasks and their responses stay strictly scoped to the requesting device.
+func (a *SuperiorAgent) resolveOriginDevice(ctx context.Context) string {
 	if dev := ClientDeviceFromContext(ctx); dev != "" {
 		return dev
 	}
@@ -700,6 +731,14 @@ func (a *SuperiorAgent) analyzeQuery(ctx context.Context, input string, history 
 	// Fast-path for media controls to bypass NPU (instant, robust, offline-safe)
 	if controlCmd, ok := detectMediaControlIntent(cleanInput); ok {
 		return RouterResponse{Action: "media", Query: controlCmd}
+	}
+
+	// Fast-path for local OpenAudio Pro DJ Mix ("lance un mix avec <dossier>" or "lance un mix")
+	if detectOpenAudioMixIntent(input) {
+		return RouterResponse{
+			Action: "skill_openaudio_dj_mix",
+			Query:  input,
+		}
 	}
 
 	// Fast-path for KDJ YouTube channel (@kdj8363 : "lance moi kdj", "lance kdj année 1982", "kdj remix", "kdj club haus")
@@ -1811,13 +1850,15 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 	} else if routerResp.Action == "research" && routerResp.Query != "" && a.scheduler != nil {
 		resourceagent.AddLiveLog("Recherche", fmt.Sprintf("Lancement de recherche web approfondie en arrière-plan : %s", routerResp.Query))
 		fmt.Printf("[Router] Web Research (Asynchronous) déclenché. Requête: '%s'\n", routerResp.Query)
-		a.scheduler.Enqueue("research_task", "Recherche web profonde : "+routerResp.Query, routerResp.Query, 0)
+		targetDevice := a.resolveOriginDevice(ctx)
+		a.scheduler.EnqueueWithDevice("research_task", "Recherche web profonde : "+routerResp.Query, routerResp.Query, 0, targetDevice)
 		a.scheduler.TriggerDispatch() // Force immediate start
 		additionalContext += fmt.Sprintf("\n\n--- INSTRUCTION STRICTE (INVESTIGATION EN COURS) ---\nTu viens de lancer de toi-même une recherche approfondie en arrière-plan sur : \"%s\" pour prolonger votre réflexion commune.\nTu n'as pas encore les résultats.\nTa réponse DOIT se limiter à une très courte phrase enthousiaste et naturelle à la première personne ('Je') confirmant que tu creuses cette piste et que tu reviens vers lui dès que tu as croisé les sources (ex: 'Ça rejoint exactement ce que je pressentais : je fouille les publications là-dessus et je te dis ce que j\\'en tire dans un instant.'). Ne refuse jamais de chercher et n'anticipe pas encore les résultats.\n------------------------------", routerResp.Query)
 	} else if routerResp.Action == "sysadmin" && routerResp.Query != "" && a.scheduler != nil {
 		resourceagent.AddLiveLog("SSH", fmt.Sprintf("Connexion distante et analyse serveur pour : %s", routerResp.Query))
 		fmt.Printf("[Router] Sysadmin Diagnosis (Asynchronous) déclenché. Requête: '%s'\n", routerResp.Query)
-		a.scheduler.Enqueue("sysadmin", "Diagnostic serveur : "+routerResp.Query, routerResp.Query, 0)
+		targetDevice := a.resolveOriginDevice(ctx)
+		a.scheduler.EnqueueWithDevice("sysadmin", "Diagnostic serveur : "+routerResp.Query, routerResp.Query, 0, targetDevice)
 		a.scheduler.TriggerDispatch()
 		additionalContext += "\n\n--- INSTRUCTION STRICTE DE JEU DE RÔLE ---\nLe système backend est déjà en train de se connecter au serveur en ton nom. TU ES CELLE QUI SE CONNECTE. Dans ta réponse courte, TU DOIS annoncer fièrement et à la première personne (Je) que TU es en train de te connecter au serveur pour l'analyser. Ne mentionne absolument aucun sous-agent, ni aucune tâche d'arrière-plan. Agis comme une administratrice système confiante et autonome. (Exemple de réponse attendue : 'Je me connecte immédiatement au serveur pour fouiller les logs, laisse-moi quelques instants !'). Sois brève.\n------------------------------"
 	} else if routerResp.Action == "media" && routerResp.Query != "" && a.webAgent != nil {
@@ -1861,7 +1902,8 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 	} else if routerResp.Action == "build_skill" && routerResp.Query != "" && a.skillManager != nil && a.scheduler != nil {
 		resourceagent.AddLiveLog("MetaAgent", fmt.Sprintf("Lancement du développement de la nouvelle brique : %s", routerResp.Query))
 		fmt.Printf("[Router] Construction de brique demandée. Objectif: '%s'\n", routerResp.Query)
-		a.scheduler.Enqueue("build_skill", "Création de la brique: "+routerResp.Query, routerResp.Query, 0)
+		targetDevice := a.resolveOriginDevice(ctx)
+		a.scheduler.EnqueueWithDevice("build_skill", "Création de la brique: "+routerResp.Query, routerResp.Query, 0, targetDevice)
 		a.scheduler.TriggerDispatch()
 		additionalContext += "\n\n--- ACTION SYSTÈME : CRÉATION DE BRIQUE ---\nLe développement de cette nouvelle brique a été lancé en tâche de fond. Confirme-lui chaleureusement que tu vas coder cet outil en arrière-plan et qu'il sera bientôt disponible. Sois très bref.\n---------------------------------"
 	} else if strings.HasPrefix(routerResp.Action, "skill_") && a.skillManager != nil {
@@ -1889,7 +1931,13 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 		} else {
 			resourceagent.AddLiveLog(fmt.Sprintf("Skill:%s", skillName), fmt.Sprintf("Exécution de la brique '%s'...", skillName))
 		}
-		if skillName == "kdj" && a.scheduler != nil {
+		if skillName == "openaudio_dj_mix" && a.scheduler != nil {
+			reply := a.handleOpenAudioMixDirect(ctx, routerResp.Query)
+			if reply == "" {
+				return nil, nil
+			}
+			additionalContext += fmt.Sprintf("\n\n--- RÉSULTAT DE LA BRIQUE 'openaudio_dj_mix' ---\n%s\n---------------------------------", reply)
+		} else if skillName == "kdj" && a.scheduler != nil {
 			reply := a.handleKDJDirect(ctx, routerResp.Query)
 			if reply == "" {
 				return nil, nil
@@ -1946,6 +1994,7 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 					isFromRank := strings.Contains(lowerInput, "à partir") || strings.Contains(lowerInput, "a partir") ||
 						strings.Contains(lowerInput, "depuis") || strings.Contains(lowerInput, "en partant")
 
+					targetDevice := a.resolveTargetDeviceWithCtx(ctx, skillQuery)
 					if targetRank > 0 {
 						var targetIndex int = -1
 						for i := range bbData.Tracks {
@@ -1961,7 +2010,7 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 						if targetIndex >= 0 {
 							targetTrack := bbData.Tracks[targetIndex]
 							taskLabel := fmt.Sprintf("📻 %s #%d : %s", bbData.Label, targetTrack.Rank, targetTrack.Query)
-							t := a.scheduler.Enqueue("play_music", taskLabel, targetTrack.Query, 0)
+							t := a.scheduler.EnqueueWithDevice("play_music", taskLabel, targetTrack.Query, 0, targetDevice)
 							if t != nil {
 								t.SetAnnouncement(formatBillboardAnnouncement(targetTrack.Rank, targetTrack.Title, targetTrack.Artist, bbData.Label))
 							}
@@ -1974,7 +2023,7 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 								for i := range remaining {
 									tr := remaining[i]
 									tl := fmt.Sprintf("📻 %s #%d : %s", bbData.Label, tr.Rank, tr.Query)
-									subT := a.scheduler.Enqueue("play_music", tl, tr.Query, 0)
+									subT := a.scheduler.EnqueueWithDevice("play_music", tl, tr.Query, 0, targetDevice)
 									if subT != nil {
 										subT.SetAnnouncement(formatBillboardAnnouncement(tr.Rank, tr.Title, tr.Artist, bbData.Label))
 									}
@@ -1990,7 +2039,7 @@ func (a *SuperiorAgent) prepareContext(ctx context.Context, input string, histor
 						}
 						for _, tr := range tracksToQueue {
 							taskLabel := fmt.Sprintf("📻 %s #%d : %s", bbData.Label, tr.Rank, tr.Query)
-							t := a.scheduler.Enqueue("play_music", taskLabel, tr.Query, 0)
+							t := a.scheduler.EnqueueWithDevice("play_music", taskLabel, tr.Query, 0, targetDevice)
 							if t != nil {
 								t.SetAnnouncement(formatBillboardAnnouncement(tr.Rank, tr.Title, tr.Artist, bbData.Label))
 							}
@@ -2435,9 +2484,14 @@ func (a *SuperiorAgent) ProcessInput(ctx context.Context, input string, history 
 	}
 
 	if detectDedupIntent(input) && a.scheduler != nil {
-		task := a.scheduler.Enqueue("depublish_duplicates", "Dépublication et nettoyage des doublons d'articles", "cleanup", 0)
+		targetDevice := a.resolveOriginDevice(ctx)
+		task := a.scheduler.EnqueueWithDevice("depublish_duplicates", "Dépublication et nettoyage des doublons d'articles", "cleanup", 0, targetDevice)
 		a.scheduler.TriggerDispatch()
 		return fmt.Sprintf("J'ai lancé la vérification et le nettoyage des articles en double en arrière-plan. 🧹\n\nTu peux suivre l'avancement et la liste des articles dépubliés dans l'onglet **Tâches** ! *(ID tâche : `%s`)*", task.ID), nil
+	}
+
+	if detectOpenAudioMixIntent(input) && a.skillManager != nil && a.scheduler != nil {
+		return a.handleOpenAudioMixDirect(ctx, input), nil
 	}
 
 	if a.detectKDJContextualIntent(input) && a.skillManager != nil && a.scheduler != nil {
@@ -2465,7 +2519,8 @@ func (a *SuperiorAgent) ProcessInput(ctx context.Context, input string, history 
 					"category": "Technologies",
 				}
 				payloadBytes, _ := json.Marshal(payloadMap)
-				task := a.scheduler.Enqueue("publish_article", "Publication d'article : "+cleanTitle, string(payloadBytes), 0)
+				targetDevice := a.resolveOriginDevice(ctx)
+				task := a.scheduler.EnqueueWithDevice("publish_article", "Publication d'article : "+cleanTitle, string(payloadBytes), 0, targetDevice)
 				a.scheduler.TriggerDispatch()
 				return fmt.Sprintf("D'accord ! J'ai créé la tâche de rédaction et publication pour **%s** en arrière-plan sur AppliYou.fr. 🚀\n\nTu peux suivre la rédaction et l'avancement en direct dans l'onglet **Tâches** ! *(ID tâche : `%s`)*", cleanTitle, task.ID), nil
 			}
@@ -2488,13 +2543,16 @@ func (a *SuperiorAgent) ProcessInput(ctx context.Context, input string, history 
 			"category": "Technologies",
 		}
 		payloadBytes, _ := json.Marshal(payloadMap)
-		task := a.scheduler.Enqueue("publish_article", "Publication d'article : "+cleanTitle, string(payloadBytes), 0)
+		targetDevice := a.resolveOriginDevice(ctx)
+		task := a.scheduler.EnqueueWithDevice("publish_article", "Publication d'article : "+cleanTitle, string(payloadBytes), 0, targetDevice)
 		a.scheduler.TriggerDispatch()
 		return fmt.Sprintf("D'accord ! J'ai créé la tâche de rédaction et publication pour **%s** en arrière-plan sur AppliYou.fr. 🚀\n\nTu peux suivre la rédaction et l'avancement en direct dans l'onglet **Tâches** ! *(ID tâche : `%s`)*", cleanTitle, task.ID), nil
 	}
 
 	if ok, payload := detectAgentPlanningIntent(input); ok && a.scheduler != nil {
-		task := a.scheduler.Enqueue("agent_task", fmt.Sprintf("Mission Agent : %s", payload), payload, 0)
+		targetDevice := a.resolveOriginDevice(ctx)
+		task := a.scheduler.EnqueueWithDevice("agent_task", fmt.Sprintf("Mission Agent : %s", payload), payload, 0, targetDevice)
+		a.scheduler.TriggerDispatch()
 		return fmt.Sprintf("C'est une excellente idée ! Comme c'est un travail complexe qui demande de la recherche et de la réflexion, je viens de lancer un agent autonome en arrière-plan pour s'en occuper. 🕵️‍♂️\n\nTu peux suivre sa progression étape par étape dans l'onglet **Tâches** (Planification, Recherche en direct, Synthèse...). Dès que tout sera prêt, je t'afficherai le rapport complet ici-même ! ✈️\n\n*(ID de la tâche d'arrière-plan : `%s`)*", task.ID), nil
 	}
 
@@ -2803,7 +2861,8 @@ func (a *SuperiorAgent) ProcessInputStreamWithBridge(ctx context.Context, input 
 	}
 
 	if detectDedupIntent(input) && a.scheduler != nil {
-		task := a.scheduler.Enqueue("depublish_duplicates", "Dépublication et nettoyage des doublons d'articles", "cleanup", 0)
+		targetDevice := a.resolveOriginDevice(ctx)
+		task := a.scheduler.EnqueueWithDevice("depublish_duplicates", "Dépublication et nettoyage des doublons d'articles", "cleanup", 0, targetDevice)
 		a.scheduler.TriggerDispatch()
 		out := make(chan string, 1)
 		errs := make(chan error, 1)
@@ -2826,7 +2885,8 @@ func (a *SuperiorAgent) ProcessInputStreamWithBridge(ctx context.Context, input 
 			desc = fmt.Sprintf("Audit et vérification factuelle de l'article : %s", mode)
 			actionName = fmt.Sprintf("l'audit, le contrôle factuel et la révision de \"%s\"", mode)
 		}
-		task := a.scheduler.Enqueue("audit_and_fix_articles", desc, mode, 0)
+		targetDevice := a.resolveOriginDevice(ctx)
+		task := a.scheduler.EnqueueWithDevice("audit_and_fix_articles", desc, mode, 0, targetDevice)
 		a.scheduler.TriggerDispatch()
 		out := make(chan string, 1)
 		errs := make(chan error, 1)
@@ -2913,13 +2973,35 @@ func (a *SuperiorAgent) ProcessInputStreamWithBridge(ctx context.Context, input 
 				DraftID: targetDraft.ID,
 			}
 			payloadBytes, _ := json.Marshal(retryPayload)
-			task := a.scheduler.Enqueue("publish_article", "Relance publication : "+targetDraft.Title, string(payloadBytes), 0)
+			targetDevice := a.resolveOriginDevice(ctx)
+			task := a.scheduler.EnqueueWithDevice("publish_article", "Relance publication : "+targetDraft.Title, string(payloadBytes), 0, targetDevice)
 			a.scheduler.TriggerDispatch()
 			out <- fmt.Sprintf("C'est parti ! J'ai relancé la publication pour le brouillon **%s** (ID: `%s`) en arrière-plan sans avoir à régénérer le texte ! 🚀\n\nTu peux suivre l'avancement dans l'onglet **Tâches** (ID: `%s`).", targetDraft.Title, targetDraft.ID, task.ID)
 		}
 		close(out)
 		close(errs)
 		return out, closedBridgeChan(), errs
+	}
+
+	if detectOpenAudioMixIntent(input) && a.skillManager != nil && a.scheduler != nil {
+		out := make(chan string, 1)
+		bridgeChan := make(chan voice.BridgeEvent, 1)
+		errs := make(chan error, 1)
+		go func() {
+			_, signalReady, stopAndWait := a.startTurnBridgeWatcher(ctx, voice.IntentMediaAction, bridgeChan)
+			defer func() {
+				stopAndWait()
+				close(bridgeChan)
+				close(out)
+				close(errs)
+			}()
+			reply := a.handleOpenAudioMixDirect(ctx, input)
+			signalReady()
+			if reply != "" {
+				out <- reply
+			}
+		}()
+		return out, bridgeChan, errs
 	}
 
 	if a.detectKDJContextualIntent(input) && a.skillManager != nil && a.scheduler != nil {
@@ -2998,7 +3080,8 @@ func (a *SuperiorAgent) ProcessInputStreamWithBridge(ctx context.Context, input 
 					"category": "Technologies",
 				}
 				payloadBytes, _ := json.Marshal(payloadMap)
-				task := a.scheduler.Enqueue("publish_article", "Publication d'article : "+cleanTitle, string(payloadBytes), 0)
+				targetDevice := a.resolveOriginDevice(ctx)
+				task := a.scheduler.EnqueueWithDevice("publish_article", "Publication d'article : "+cleanTitle, string(payloadBytes), 0, targetDevice)
 				a.scheduler.TriggerDispatch()
 
 				out := make(chan string, 1)
@@ -3028,7 +3111,8 @@ func (a *SuperiorAgent) ProcessInputStreamWithBridge(ctx context.Context, input 
 				"category": "Technologies",
 			}
 			payloadBytes, _ := json.Marshal(payloadMap)
-			task := a.scheduler.Enqueue("publish_article", "Publication d'article : "+cleanTitle, string(payloadBytes), 0)
+			targetDevice := a.resolveOriginDevice(ctx)
+			task := a.scheduler.EnqueueWithDevice("publish_article", "Publication d'article : "+cleanTitle, string(payloadBytes), 0, targetDevice)
 			a.scheduler.TriggerDispatch()
 			out <- fmt.Sprintf("D'accord ! J'ai créé la tâche de rédaction et publication pour **%s** en arrière-plan sur AppliYou.fr. 🚀\n\nTu peux suivre la rédaction et l'avancement en direct dans l'onglet **Tâches** ! *(ID tâche : `%s`)*", cleanTitle, task.ID)
 		}
@@ -3038,7 +3122,9 @@ func (a *SuperiorAgent) ProcessInputStreamWithBridge(ctx context.Context, input 
 	}
 
 	if ok, payload := detectAgentPlanningIntent(input); ok && a.scheduler != nil {
-		task := a.scheduler.Enqueue("agent_task", fmt.Sprintf("Mission Agent : %s", payload), payload, 0)
+		targetDevice := a.resolveOriginDevice(ctx)
+		task := a.scheduler.EnqueueWithDevice("agent_task", fmt.Sprintf("Mission Agent : %s", payload), payload, 0, targetDevice)
+		a.scheduler.TriggerDispatch()
 
 		out := make(chan string, 1)
 		errs := make(chan error, 1)
@@ -3628,6 +3714,12 @@ func (a *SuperiorAgent) handleMediaAction(ctx context.Context, input string, rou
 			return "J'ai coupé la musique. 🎵", nil
 		}
 		return res, err
+	}
+
+	// Si la requête concerne un mix DJ local OpenAudio ("lance un mix avec ...", "lance un mix"), déléguer à handleOpenAudioMixDirect
+	if detectOpenAudioMixIntent(input) && a.skillManager != nil {
+		res := a.handleOpenAudioMixDirect(ctx, input)
+		return res, nil
 	}
 
 	// Si la requête concerne KDJ (@kdj8363), déléguer à handleKDJDirect
@@ -4494,9 +4586,197 @@ func formatBillboardAnnouncement(rank int, title, artist, label string) string {
 	}
 }
 
+var reOpenAudioMixLaunch = regexp.MustCompile(`\b(?:lance(?:r|s)?|mets?|met|fais?|fai|joue(?:r|s)?|genere(?:r)?|cree(?:r)?)\s+(?:moi\s+)?un\s+mix\b`)
+
+// detectOpenAudioMixIntent detects requests for a local OpenAudio Pro DJ mix
+// (e.g. "lance un mix avec discoteque-80s", "lance un mix", "fais un mix openaudio").
+func detectOpenAudioMixIntent(input string) bool {
+	clean := normalizeFrench(input)
+	if clean == "" {
+		return false
+	}
+
+	if _, isCtrl := detectMediaControlIntent(input); isCtrl {
+		return false
+	}
+	if strings.Contains(clean, "kdj") || strings.Contains(clean, "k dj") ||
+		strings.Contains(clean, "billboard") || strings.Contains(clean, "youtube") ||
+		strings.Contains(clean, "telecharge") || strings.Contains(clean, "download") {
+		return false
+	}
+
+	// Exclude informative questions unless starting with an explicit launch verb
+	infoPrefixes := []string{
+		"est ce", "existe", "qui a", "qui est", "qui sont", "quel est", "quelle est",
+		"combien", "pourquoi", "comment", "c est quoi", "qu est ce", "parle moi", "dis moi", "explique",
+	}
+	playPrefixes := []string{
+		"lance", "lances", "joue", "joues", "mets", "met", "fais", "fai", "genere", "cree",
+		"pixel lance", "pixel mets", "pixel fais", "pixel joue",
+	}
+	startsWithPlay := false
+	for _, pp := range playPrefixes {
+		if strings.HasPrefix(clean, pp+" ") || clean == pp {
+			startsWithPlay = true
+			break
+		}
+	}
+	if !startsWithPlay {
+		for _, ip := range infoPrefixes {
+			if strings.Contains(clean, ip) {
+				return false
+			}
+		}
+	}
+
+	if strings.Contains(clean, "un mix avec") || strings.Contains(clean, "mix openaudio") || strings.Contains(clean, "mix open audio") ||
+		strings.Contains(clean, "concierto discoteque") || strings.Contains(clean, "concierto discotheque") {
+		return true
+	}
+	if reOpenAudioMixLaunch.MatchString(clean) {
+		return true
+	}
+	return false
+}
+
+func (a *SuperiorAgent) handleOpenAudioMixDirect(ctx context.Context, input string) string {
+	if a.skillManager == nil || a.scheduler == nil {
+		return "Le gestionnaire de tâches ou de briques n'est pas initialisé."
+	}
+
+	targetDevice := a.prepareDeviceMediaReset(ctx, input)
+	skillArg := "--json "
+	if targetDevice == "android" {
+		skillArg += "--android "
+	}
+	skillArg += input
+
+	result, err := a.skillManager.ExecuteSkill(ctx, "openaudio_dj_mix", skillArg)
+	if err != nil {
+		return fmt.Sprintf("Désolé, je n'ai pas pu préparer le mix OpenAudio : %v", err)
+	}
+
+	var mixData struct {
+		Status       string  `json:"status"`
+		Error        string  `json:"error"`
+		Mode         string  `json:"mode"`
+		FolderLabel  string  `json:"folder_label"`
+		SessionID    string  `json:"session_id"`
+		SessionDir   string  `json:"session_dir"`
+		MixToken     string  `json:"mix_token"`
+		FirstChunk   string  `json:"first_chunk"`
+		AnchorBPM    float64 `json:"anchor_bpm"`
+		TrackCount   int     `json:"track_count"`
+		Announcement string  `json:"announcement"`
+		Tracks       []struct {
+			Index   int     `json:"index"`
+			Title   string  `json:"title"`
+			Artist  string  `json:"artist"`
+			BPM     float64 `json:"bpm"`
+			Camelot string  `json:"camelot"`
+		} `json:"tracks"`
+	}
+
+	jsonPayload := strings.TrimSpace(result)
+	if idx := strings.Index(jsonPayload, "{"); idx > 0 {
+		jsonPayload = jsonPayload[idx:]
+	}
+
+	if errJSON := json.Unmarshal([]byte(jsonPayload), &mixData); errJSON != nil || mixData.Status != "ok" || mixData.FirstChunk == "" {
+		if mixData.Error != "" {
+			return mixData.Error
+		}
+		return "Désolé, je n'ai pas pu générer le mix OpenAudio."
+	}
+
+	label := fmt.Sprintf("🎧 Mix OpenAudio (%s · ~%.0f BPM)", mixData.FolderLabel, mixData.AnchorBPM)
+	if mixData.Mode == "concierto_discoteque" {
+		label = fmt.Sprintf("🎙️ Concierto Discoteque (%s · ~%.0f BPM)", mixData.FolderLabel, mixData.AnchorBPM)
+	}
+	if targetDevice == "android" {
+		baseURL := RequestBaseURLFromContext(ctx)
+		if baseURL == "" {
+			baseURL = "http://127.0.0.1:8080"
+		}
+		streamBaseURL := mediaMixStreamBaseURL(baseURL)
+		maxParts := mixData.TrackCount
+		if maxParts > 6 {
+			maxParts = 6
+		}
+		for i := 0; i < maxParts; i++ {
+			fileName := fmt.Sprintf("part_%03d.mp3", i)
+			localChunk := filepath.Join(mixData.SessionDir, fileName)
+			streamURL := fmt.Sprintf("%s/api/media/mix?session=%s&file=%s&sig=%s",
+				streamBaseURL,
+				url.QueryEscape(mixData.SessionID),
+				url.QueryEscape(fileName),
+				url.QueryEscape(mixData.MixToken),
+			)
+			partLabel := label
+			if i < len(mixData.Tracks) {
+				tr := mixData.Tracks[i]
+				partLabel = fmt.Sprintf("🎧 Mix OpenAudio #%d : %s (%.0f BPM · %s)", tr.Index, tr.Title, tr.BPM, tr.Camelot)
+			}
+			t := a.scheduler.EnqueueWithDevice("play_music", partLabel, "openaudio_mix:"+localChunk, 0, targetDevice)
+			if t != nil {
+				t.ResolvedURL = streamURL
+				t.ResolvedTitle = partLabel
+				t.IsDirect = true
+				if i == 0 && mixData.Announcement != "" {
+					t.SetAnnouncement(mixData.Announcement)
+				}
+			}
+		}
+	} else {
+		t := a.scheduler.EnqueueWithDevice("play_music", label, "openaudio_mix:"+mixData.SessionDir, 0, targetDevice)
+		if t != nil {
+			t.ResolvedURL = mixData.FirstChunk
+			t.ResolvedTitle = label
+			t.IsDirect = true
+			if mixData.Announcement != "" {
+				t.SetAnnouncement(mixData.Announcement)
+			}
+		}
+	}
+
+	a.scheduler.TriggerDispatch()
+	return ""
+}
+
+// mediaMixStreamBaseURL maps self-signed HTTPS Pixel ports (:38443 / :8443) to
+// their companion HTTP endpoints (:38080 / :8080) when generating /api/media/mix URLs.
+// Android MediaPlayer rejects self-signed TLS certs, whereas /api/media/mix is already
+// authorized by an unguessable 24-byte per-session signature token (sig=...).
+func mediaMixStreamBaseURL(baseURL string) string {
+	trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if trimmed == "" {
+		return "http://127.0.0.1:8080"
+	}
+	u, err := url.Parse(trimmed)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return trimmed
+	}
+	host, port, errSplit := net.SplitHostPort(u.Host)
+	if errSplit != nil {
+		return trimmed
+	}
+	switch port {
+	case "38443":
+		u.Scheme = "http"
+		u.Host = net.JoinHostPort(host, "38080")
+	case "8443":
+		u.Scheme = "http"
+		u.Host = net.JoinHostPort(host, "8080")
+	}
+	return strings.TrimRight(u.String(), "/")
+}
+
 // detectDJRemixIntent detects when the user wants to launch revisited "Remix" tracks on YouTube in DJ mode
 // (e.g. "lance moi un remix", "lance-moi un remix", "mets un remix", "lance moi un remix de Fine Young Cannibals").
 func detectDJRemixIntent(input string) bool {
+	if detectOpenAudioMixIntent(input) {
+		return false
+	}
 	clean := normalizeFrench(input)
 	if clean == "" {
 		return false
@@ -4705,6 +4985,9 @@ var reKDJYearFilter = regexp.MustCompile(`\b(19\d{2}|20\d{2})\b`)
 // or a follow-up keyword refinement ("année 1982", "REMIX", "Club haus") while a KDJ session is active,
 // without blocking any other music playback modes.
 func (a *SuperiorAgent) detectKDJContextualIntent(input string) bool {
+	if detectOpenAudioMixIntent(input) {
+		return false
+	}
 	if detectKDJIntent(input) {
 		return true
 	}
@@ -5493,7 +5776,8 @@ func (a *SuperiorAgent) generateAndScheduleArticle(ctx context.Context, rawTopic
 		}
 	}
 
-	task := a.scheduler.Enqueue("publish_article", "Publication utilisateur : "+title, string(payloadBytes), 0)
+	targetDevice := a.resolveOriginDevice(ctx)
+	task := a.scheduler.EnqueueWithDevice("publish_article", "Publication utilisateur : "+title, string(payloadBytes), 0, targetDevice)
 	fmt.Printf("[SuperiorAgent] Tâche de publication planifiée avec succès (ID: %s)\n", task.ID)
 
 	// Mettre à jour la date de publication pour aujourd'hui dans la mémoire volatile pour le CuriosityAgent

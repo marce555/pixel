@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image/jpeg"
 	"io"
@@ -19,6 +20,9 @@ import (
 	"github.com/marce555/pixel/internal/llm"
 	"github.com/marce555/pixel/internal/memory"
 )
+
+// ErrCameraDisabled is returned when a camera scan is requested while the camera is turned off in settings.
+var ErrCameraDisabled = errors.New("caméra désactivée dans la configuration")
 
 type VisionAgent struct {
 	provider               llm.Provider
@@ -69,7 +73,15 @@ func (va *VisionAgent) Start(ctx context.Context) {
 		// Wait a few seconds to let other components start up and check if chat is active
 		time.Sleep(5 * time.Second)
 		lastActStart := va.stm.GetLastActivity()
-		if time.Since(lastActStart) < 2*time.Minute {
+		if va.coreMemory != nil && !va.coreMemory.IsCameraEnabled() {
+			log.Println("[VisionAgent] Premier scan ignoré : caméra éteinte dans la configuration.")
+			msg := "Caméra éteinte (désactivée dans la configuration)."
+			va.coreMemory.UpdateVolatileState("Dernière vision", msg)
+			if va.onBroadcast != nil {
+				va.onBroadcast("VISION:" + msg)
+			}
+			va.firstScanDone = true
+		} else if time.Since(lastActStart) < 2*time.Minute {
 			log.Println("[VisionAgent] Premier scan ignoré car une conversation est déjà active au démarrage.")
 			va.firstScanDone = true
 		} else {
@@ -89,6 +101,12 @@ func (va *VisionAgent) Start(ctx context.Context) {
 				return
 			case <-ticker.C:
 				// Avoid system overload by checking dynamic suspension conditions
+
+				// 0. Suspension if camera is disabled in settings
+				if va.coreMemory != nil && !va.coreMemory.IsCameraEnabled() {
+					log.Println("[VisionAgent] Scan périodique ignoré : caméra éteinte dans la configuration.")
+					continue
+				}
 
 				// 1. Suspension if active chat is in progress (preserve NPU loaded model for 5 minutes of inactivity)
 				lastAct := va.stm.GetLastActivity()
@@ -133,6 +151,9 @@ func (va *VisionAgent) Start(ctx context.Context) {
 
 // CaptureAndAnalyze captures a frame from /dev/video0 using ffmpeg and sends it to FastFlowLM.
 func (va *VisionAgent) CaptureAndAnalyze(ctx context.Context) (string, error) {
+	if va.coreMemory != nil && !va.coreMemory.IsCameraEnabled() {
+		return "", ErrCameraDisabled
+	}
 	va.cameraMu.Lock()
 	defer va.cameraMu.Unlock()
 
@@ -779,6 +800,16 @@ Ne mets aucun autre mot ni ponctuation dans ta réponse.`, description, knownPeo
 // ScanOnce triggers a single manual visual scan, analyzes it, and processes the perception.
 // Since it's on-demand (e.g. from user chat or opening), we pass isBackground = false to suppress proactive greetings.
 func (va *VisionAgent) ScanOnce(ctx context.Context) (string, error) {
+	if va.coreMemory != nil && !va.coreMemory.IsCameraEnabled() {
+		log.Println("[VisionAgent] Scan à la demande ignoré : caméra éteinte dans la configuration.")
+		msg := "Caméra éteinte (désactivée dans la configuration)."
+		va.coreMemory.UpdateVolatileState("Dernière vision", msg)
+		if va.onBroadcast != nil {
+			va.onBroadcast("VISION:" + msg)
+		}
+		return "", ErrCameraDisabled
+	}
+
 	va.stateMu.Lock()
 	va.lastManualScan = time.Now()
 	va.stateMu.Unlock()
@@ -797,6 +828,11 @@ func (va *VisionAgent) ScanOnce(ctx context.Context) (string, error) {
 // ScanOnceOnOpening triggers a single manual visual scan when the interface is opened.
 // It includes a 30 seconds cooldown to avoid triggering multiple camera scans if the user reloads the browser tab.
 func (va *VisionAgent) ScanOnceOnOpening(ctx context.Context) (string, error) {
+	if va.coreMemory != nil && !va.coreMemory.IsCameraEnabled() {
+		log.Println("[VisionAgent] Scan d'ouverture ignoré : caméra éteinte dans la configuration.")
+		return "", ErrCameraDisabled
+	}
+
 	va.stateMu.Lock()
 	if time.Since(va.lastManualScan) < 30*time.Second {
 		va.stateMu.Unlock()

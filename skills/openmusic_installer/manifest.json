@@ -1,0 +1,5 @@
+{
+  "name": "openmusic_installer",
+  "description": "Installe l'application OpenMusic sur le système.",
+  "router_instructions": "Utilise cette action si l'utilisateur demande d'installer OpenMusic. Mets 'openmusic' dans query."
+}

@@ -42,10 +42,12 @@ type Task struct {
 	TargetDevice    string     `json:"target_device,omitempty"` // "pc" (default, mpv PipeWire) or "android" / "mobile" (streamed to smartphone)
 
 	// Private fields for execution control
-	mu         sync.Mutex
-	cancelFunc context.CancelFunc
-	cmd        *exec.Cmd
-	ReleaseSem func() `json:"-"`
+	mu                 sync.Mutex
+	cancelFunc         context.CancelFunc
+	cmd                *exec.Cmd
+	ReleaseSem         func() `json:"-"`
+	broadcasted        bool
+	failureBroadcasted bool
 }
 
 func (t *Task) AppendLog(msg string) {
@@ -142,6 +144,40 @@ func (t *Task) IsAnnounced() bool {
 	return t.Announced
 }
 
+func (t *Task) MarkBroadcasted() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.broadcasted = true
+}
+
+func (t *Task) WasBroadcasted() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.broadcasted
+}
+
+func (t *Task) MarkFailureBroadcasted() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.failureBroadcasted = true
+	t.broadcasted = true
+}
+
+func (t *Task) WasFailureBroadcasted() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.failureBroadcasted
+}
+
+// NormalizeDevice normalizes a client device identifier to "android" or "pc".
+func NormalizeDevice(device string) string {
+	clean := strings.ToLower(strings.TrimSpace(device))
+	if clean == "android" || clean == "mobile" || clean == "phone" || clean == "web-mobile" {
+		return "android"
+	}
+	return "pc"
+}
+
 // VoiceSpeaker enables synthesizing and playing spoken announcements.
 type VoiceSpeaker interface {
 	SynthesizeToFile(ctx context.Context, text string, destWav string) error
@@ -157,8 +193,9 @@ type Scheduler struct {
 	ctx         context.Context
 	Broadcaster EventBroadcaster
 
-	// Serializer for music playing to avoid overlapping audio
-	musicSem chan struct{}
+	// Per-device serializers for music playing so PC and Android audio never block each other
+	musicSem        chan struct{}
+	androidMusicSem chan struct{}
 
 	// Sync for mobile/android audio streaming
 	streamSyncMu   sync.Mutex
@@ -194,11 +231,19 @@ func (s *Scheduler) SetBroadcaster(b EventBroadcaster) {
 
 func NewScheduler() *Scheduler {
 	return &Scheduler{
-		tasks:          make([]*Task, 0),
-		handlers:       make(map[string]TaskHandler),
-		musicSem:       make(chan struct{}, 1),
-		streamSyncDone: make(map[string]chan struct{}),
+		tasks:           make([]*Task, 0),
+		handlers:        make(map[string]TaskHandler),
+		musicSem:        make(chan struct{}, 1),
+		androidMusicSem: make(chan struct{}, 1),
+		streamSyncDone:  make(map[string]chan struct{}),
 	}
+}
+
+func (s *Scheduler) semForDevice(device string) chan struct{} {
+	if NormalizeDevice(device) == "android" {
+		return s.androidMusicSem
+	}
+	return s.musicSem
 }
 
 // RegisterStreamWait creates and registers a channel that unblocks when a mobile stream finishes.
@@ -299,9 +344,7 @@ func (s *Scheduler) EnqueueWithDevice(taskType string, name string, payload stri
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if targetDevice == "" {
-		targetDevice = "pc"
-	}
+	targetDevice = NormalizeDevice(targetDevice)
 
 	task := &Task{
 		ID:           uuid.New().String(),
@@ -437,11 +480,12 @@ func (s *Scheduler) dispatchTasks(ctx context.Context) {
 				continue
 			}
 
-			// Special serialization for music playing tasks: acquire musicSem in strict FIFO order
+			// Special serialization for music playing tasks: acquire device musicSem in strict FIFO order
 			// before transitioning to StatusRunning so queued tracks stay Pending until their turn.
 			if task.Type == "play_music" {
+				devSem := s.semForDevice(task.TargetDevice)
 				select {
-				case s.musicSem <- struct{}{}:
+				case devSem <- struct{}{}:
 					// Audio channel acquired in strict FIFO order
 				default:
 					if !strings.Contains(task.GetLog(), "Attente de libération du canal audio") {
@@ -468,16 +512,17 @@ func (s *Scheduler) dispatchTasks(ctx context.Context) {
 func (s *Scheduler) runTask(taskCtx context.Context, cancel context.CancelFunc, task *Task, handler TaskHandler) {
 	defer cancel()
 
-	// Special serialization for music playing tasks (musicSem was acquired in dispatchTasks)
+	// Special serialization for music playing tasks (device sem was acquired in dispatchTasks)
 	if task.Type == "play_music" {
 		var semReleased bool
 		var semMu sync.Mutex
+		devSem := s.semForDevice(task.TargetDevice)
 
 		task.ReleaseSem = func() {
 			semMu.Lock()
 			defer semMu.Unlock()
 			if !semReleased {
-				<-s.musicSem
+				<-devSem
 				semReleased = true
 				task.AppendLog("Canal audio libéré pour l'enchaînement direct du titre suivant.")
 				go s.TriggerDispatch()
@@ -508,14 +553,16 @@ func (s *Scheduler) runTask(taskCtx context.Context, cancel context.CancelFunc, 
 			task.Status = StatusFailed
 			task.Error = err.Error()
 			task.Log += fmt.Sprintf("[%s] Échec de l'exécution : %v\n", task.FinishedAt.Format("15:04:05"), err)
-			if b != nil {
-				b.Broadcast(fmt.Sprintf("❌ **Échec de la tâche** (*%s*) : %v", task.Name, err))
+			if b != nil && !task.failureBroadcasted {
+				task.failureBroadcasted = true
+				broadcastToDevice(b, task.TargetDevice, fmt.Sprintf("❌ **Échec de la tâche** (*%s*) : %v", task.Name, err))
 			}
 		} else {
 			task.Status = StatusCompleted
 			task.Log += fmt.Sprintf("[%s] Exécution terminée avec succès.\n", task.FinishedAt.Format("15:04:05"))
-			if b != nil && task.Type != "play_music" && task.Type != "research_task" {
-				b.Broadcast(fmt.Sprintf("✅ **Tâche terminée avec succès** : %s 🚀", task.Name))
+			if b != nil && task.Type != "play_music" && task.Type != "research_task" && !task.broadcasted {
+				task.broadcasted = true
+				broadcastToDevice(b, task.TargetDevice, fmt.Sprintf("✅ **Tâche terminée avec succès** : %s 🚀", task.Name))
 			}
 		}
 	}
@@ -532,18 +579,20 @@ func (s *Scheduler) TriggerDispatch() {
 	s.dispatchTasks(globalCtx)
 }
 
-// GetNextPendingMusicTask returns the next pending or waiting play_music task after currentTaskID.
+// GetNextPendingMusicTask returns the next pending or waiting play_music task on the same device after currentTaskID.
 func (s *Scheduler) GetNextPendingMusicTask(currentTaskID string) *Task {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	foundCurrent := false
+	currentDevice := ""
 	for _, t := range s.tasks {
 		if t.ID == currentTaskID {
 			foundCurrent = true
+			currentDevice = NormalizeDevice(t.TargetDevice)
 			continue
 		}
-		if foundCurrent && t.Type == "play_music" && (t.Status == StatusPending || t.Status == StatusRunning) && t.ResolvedURL == "" {
+		if foundCurrent && t.Type == "play_music" && NormalizeDevice(t.TargetDevice) == currentDevice && (t.Status == StatusPending || t.Status == StatusRunning) && t.ResolvedURL == "" {
 			return t
 		}
 	}

@@ -1,0 +1,5 @@
+{
+  "name": "openaudio_dj_mix",
+  "description": "Analyse le rythme (BPM), la grille rythmique, la tonalité harmonique (roue de Camelot) et l'énergie des pistes audio locales dans ~/Musique avec OpenAudio (librosa, Mixxx DB, FFmpeg Rubberband), puis génère et enchaîne un véritable mix DJ sans coupure.",
+  "router_instructions": "Utilise cette action si l'utilisateur demande de lancer, créer ou jouer un mix DJ local avec un répertoire de ~/Musique (ex: 'lance un mix avec discoteque-80s', 'lance Concierto Discoteque Hits-Remix en commençant par Celebration') ou un mix aléatoire adapté au rythme sans préciser de dossier (ex: 'lance un mix', 'fais un mix'). Mets la requête complète dans query."
+}

@@ -133,11 +133,9 @@ func NewDepublishDuplicatesHandler(broadcaster EventBroadcaster, stm STMWriter, 
 			task.AppendLog("✅ Analyse terminée : Aucun article en double n'a été détecté.")
 			msg := "✅ **[Vérification Articles]** Aucun article en double n'a été trouvé. Tous les articles sont uniques."
 			if broadcaster != nil {
-				broadcaster.Broadcast(msg)
+				BroadcastForTask(broadcaster, task, msg)
 			}
-			if stm != nil {
-				stm.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: msg})
-			}
+			AddMessageForTask(stm, task, llm.Message{Role: llm.RoleAssistant, Content: msg})
 			return nil
 		}
 
@@ -219,11 +217,9 @@ func NewDepublishDuplicatesHandler(broadcaster EventBroadcaster, stm STMWriter, 
 		task.AppendLog(summaryMsg)
 
 		if broadcaster != nil {
-			broadcaster.Broadcast(summaryMsg)
+			BroadcastForTask(broadcaster, task, summaryMsg)
 		}
-		if stm != nil {
-			stm.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: summaryMsg})
-		}
+		AddMessageForTask(stm, task, llm.Message{Role: llm.RoleAssistant, Content: summaryMsg})
 
 		return nil
 	}

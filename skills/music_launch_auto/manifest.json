@@ -1,0 +1,5 @@
+{
+  "name": "music_launch_auto",
+  "description": "Lance une session de remix ou mix local détectée par les mots-clés 'OpenMusic', 'remix' ou 'mix local'.",
+  "router_instructions": "Utilise cette action si l'utilisateur demande un remix ou un mix local. Mets la requête complète dans query."
+}

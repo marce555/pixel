@@ -1,0 +1,5 @@
+{
+  "name": "appliyou_article_builder",
+  "description": "Génère, valide et publie un article sur AppliYou.fr basé sur une requête utilisateur.",
+  "router_instructions": "Utilise cette action si l'utilisateur demande de rédiger, préparer ou publier un article sur AppliYou.fr. Mets la requête complète dans query."
+}

@@ -109,6 +109,49 @@ def ensure_acknowledged_sound():
             wf.writeframes(data)
     return sound_path
 
+def ensure_thinking_sound():
+    """Génère une alerte sonore moderne et discrète (earcon cristallin) indiquant la construction de la réponse."""
+    sounds_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sounds")
+    os.makedirs(sounds_dir, exist_ok=True)
+    sound_path = os.path.join(sounds_dir, "thinking_alert.wav")
+    if not os.path.exists(sound_path) or os.path.getsize(sound_path) < 1000:
+        sample_rate = 44100
+        duration = 0.42
+        num_samples = int(sample_rate * duration)
+        two_pi = 2.0 * math.pi
+        master_gain = 0.28
+        samples = []
+        for i in range(num_samples):
+            t = i / sample_rate
+            sample = 0.0
+            if t < 0.28:
+                att = 0.5 * (1.0 - math.cos(math.pi * t / 0.012)) if t < 0.012 else 1.0
+                env = att * math.exp(-t * 11.5)
+                p1 = (0.74 * math.sin(two_pi * 659.25 * t) +
+                      0.12 * math.sin(two_pi * 329.63 * t) +
+                      0.14 * math.sin(two_pi * 1318.51 * t) * math.exp(-t * 10.5))
+                sample += p1 * env
+            if t >= 0.09:
+                t2 = t - 0.09
+                att = 0.5 * (1.0 - math.cos(math.pi * t2 / 0.014)) if t2 < 0.014 else 1.0
+                env = att * math.exp(-t2 * 9.0)
+                p2 = (0.80 * math.sin(two_pi * 987.77 * t2) +
+                      0.14 * math.sin(two_pi * 1479.98 * t2) * math.exp(-t2 * 5.0) +
+                      0.06 * math.sin(two_pi * 1975.53 * t2) * math.exp(-t2 * 15.0))
+                sample += p2 * env
+            if t > duration - 0.025:
+                rem = max(0.0, (duration - t) / 0.025)
+                sample *= 0.5 * (1.0 - math.cos(math.pi * rem))
+            val = max(-1.0, min(1.0, sample * master_gain))
+            samples.append(int(round(val * 32767.0)))
+        with wave.open(sound_path, "w") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sample_rate)
+            data = struct.pack(f"<{len(samples)}h", *samples)
+            wf.writeframes(data)
+    return sound_path
+
 # Single-instance enforcement to prevent audio device contention (parec)
 def ensure_single_instance():
     """Garantit qu'une seule instance de l'interface GUI s'exécute. Si une ancienne instance est bloquée en arrière-plan, la remplace proprement."""
@@ -187,7 +230,12 @@ class SSEReaderThread(QThread):
         while self.running:
             try:
                 # SSE request using stream=True and no timeout (long-lived)
-                self.response = requests.get(f"{API_BASE}/api/events", stream=True, timeout=None)
+                self.response = requests.get(
+                    f"{API_BASE}/api/events",
+                    headers={"X-Pixel-Device": "pc"},
+                    stream=True,
+                    timeout=None
+                )
                 for line in self.response.iter_lines():
                     if not self.running:
                         break
@@ -229,7 +277,8 @@ class ChatStreamThread(QThread):
         try:
             self.response = requests.post(
                 f"{API_BASE}/api/chat", 
-                json={"message": self.message, "sender": self.sender}, 
+                json={"message": self.message, "sender": self.sender, "device": "pc"}, 
+                headers={"X-Pixel-Device": "pc"},
                 stream=True, 
                 timeout=(10, None)
             )
@@ -244,9 +293,9 @@ class ChatStreamThread(QThread):
                             if "error" in payload:
                                 if self.running:
                                     self.error_received.emit(payload["error"])
-                            elif "bridge" in payload:
-                                if self.running and payload["bridge"]:
-                                    self.bridge_received.emit(payload["bridge"])
+                            elif payload.get("bridge_alert") or payload.get("bridge"):
+                                if self.running:
+                                    self.bridge_received.emit(payload.get("sound_url") or "thinking_alert")
                             elif "chunk" in payload:
                                 if self.running:
                                     self.token_received.emit(payload["chunk"])
@@ -278,12 +327,13 @@ class SleepThread(QThread):
             self.finished_signal.emit()
 
 class TranscribeThread(QThread):
-    finished_signal = pyqtSignal(str)
+    finished_signal = pyqtSignal(str, dict)
     
-    def __init__(self, wav_path, engine="browser"):
+    def __init__(self, wav_path, engine="browser", force_speaker_verify=False):
         super().__init__()
         self.wav_path = wav_path
         self.engine = engine
+        self.force_speaker_verify = force_speaker_verify
         self.running = True
         
     def stop(self):
@@ -318,9 +368,10 @@ class TranscribeThread(QThread):
 
     def run(self):
         text = ""
+        meta = {}
         
-        # 1. Moteur Navigateur Web (Google Speech API - par défaut)
-        if self.engine == "browser" and self.running:
+        # 1. Moteur Navigateur Web (Google Speech API - contourné si Phase 2 active car la vérification ONNX tourne côté serveur)
+        if self.engine == "browser" and not self.force_speaker_verify and self.running:
             try:
                 text = self._transcribe_google_speech(self.wav_path)
                 if text:
@@ -329,15 +380,28 @@ class TranscribeThread(QThread):
                 print(f"[GUI] Erreur Google Speech, fallback vers Whisper : {e}")
                 text = ""
 
-        # 2. Fallback ou mode Whisper local
+        # 2. Fallback ou mode Whisper local (+ signature vocale ONNX + porte d'adresse)
         if not text and self.running:
             try:
                 with open(self.wav_path, 'rb') as f:
                     files = {'file': ('mic.wav', f, 'audio/wav')}
-                    r = requests.post(f"{API_BASE}/api/voice/transcribe", files=files, timeout=15)
+                    r = requests.post(
+                        f"{API_BASE}/api/voice/transcribe",
+                        files=files,
+                        headers={"X-Pixel-Device": "pc"},
+                        timeout=15
+                    )
                     if r.status_code == 200:
                         data = r.json()
+                        meta = data
                         text = data.get("text", "").strip()
+                        if data.get("speaker_available"):
+                            print(
+                                f"[GUI] Signature vocale : owner={data.get('is_owner')} "
+                                f"score={data.get('speaker_score', 0):.3f} mode={data.get('speaker_mode')} "
+                                f"reason={data.get('speaker_reason')} intent={data.get('address_intent')} "
+                                f"accept={data.get('should_accept')}"
+                            )
                         # Filter Whisper hallucinations
                         if len(text) < 3 or re.search(r'^(.{10,50})\1{2,}', text):
                             text = ""
@@ -350,7 +414,73 @@ class TranscribeThread(QThread):
         except Exception: pass
             
         if self.running:
-            self.finished_signal.emit(text)
+            self.finished_signal.emit(text, meta)
+
+class SpeakerEnrollThread(QThread):
+    finished_signal = pyqtSignal(bool, str, dict)
+
+    def __init__(self, phrase: str, duration_sec: float = 3.5):
+        super().__init__()
+        self.phrase = phrase
+        self.duration_sec = duration_sec
+
+    def run(self):
+        import wave
+        wav_path = os.path.join(tempfile.gettempdir(), f"pixel_enroll_{int(time.time()*1000)}.wav")
+        proc = None
+        try:
+            target_bytes = int(16000 * 2 * self.duration_sec)
+            proc = subprocess.Popen(
+                ["parec", "-d", "@DEFAULT_SOURCE@", "--channels=1", "--rate=16000", "--format=s16le", "--latency-msec=50"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL
+            )
+            pcm = bytearray()
+            while len(pcm) < target_bytes:
+                chunk = proc.stdout.read(min(4096, target_bytes - len(pcm)))
+                if not chunk:
+                    break
+                pcm.extend(chunk)
+            proc.terminate()
+            try:
+                proc.wait(timeout=1)
+            except Exception:
+                proc.kill()
+
+            if len(pcm) < 16000 * 2 * 0.8:
+                self.finished_signal.emit(False, "Audio capturé trop court (< 0,8s).", {})
+                return
+
+            with wave.open(wav_path, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(16000)
+                wf.writeframes(bytes(pcm))
+
+            with open(wav_path, "rb") as f:
+                r = requests.post(
+                    f"{API_BASE}/api/voice/speaker/enroll",
+                    files={"file": ("enroll.wav", f, "audio/wav")},
+                    data={"device": "pc-gui", "phrase": self.phrase},
+                    timeout=15
+                )
+            if r.status_code == 200:
+                self.finished_signal.emit(True, "", r.json())
+            else:
+                self.finished_signal.emit(False, r.text.strip() or f"HTTP {r.status_code}", {})
+        except Exception as e:
+            if proc is not None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+            self.finished_signal.emit(False, str(e), {})
+        finally:
+            try:
+                if os.path.exists(wav_path):
+                    os.unlink(wav_path)
+            except Exception:
+                pass
 
 class TTSDownloadThread(QThread):
     finished_signal = pyqtSignal(str) # Emits local_wav_path
@@ -755,6 +885,7 @@ class MainWindow(QMainWindow):
         self.voice_rate = 1.0
         self.voice_pitch = 1.0
         self.continuous_voice = True
+        self.handsfree_no_wake = False
         self.voice_enabled = True
         self.stt_engine = "browser"
         self.chat_failed = False
@@ -771,6 +902,13 @@ class MainWindow(QMainWindow):
         if os.path.exists(self.ack_sound_path):
             self.ack_sound.setSource(QUrl.fromLocalFile(self.ack_sound_path))
             self.ack_sound.setVolume(0.7)
+
+        # Discreet modern earcon indicating response construction is in progress
+        self.thinking_sound_path = ensure_thinking_sound()
+        self.thinking_sound = QSoundEffect(self)
+        if os.path.exists(self.thinking_sound_path):
+            self.thinking_sound.setSource(QUrl.fromLocalFile(self.thinking_sound_path))
+            self.thinking_sound.setVolume(0.45)
         
         # Wake word state for hands-free dialogue
         self.is_wake_active = False
@@ -940,6 +1078,7 @@ class MainWindow(QMainWindow):
         self.fetch_llm_settings()
         self.fetch_gmail_settings()
         self.fetch_vision_settings()
+        self.fetch_speaker_profile()
         
         # Start a faster timer for Tasks (every 2s)
         self.tasks_timer = QTimer(self)
@@ -1268,6 +1407,79 @@ class MainWindow(QMainWindow):
         v_lay.addLayout(stt_lay)
         
         config_layout.addWidget(voice_group)
+
+        # Speaker Signature Block (Phase 1)
+        speaker_group = QFrame()
+        speaker_group.setObjectName("survieBlock")
+        sp_lay = QVBoxLayout(speaker_group)
+        sp_lay.setSpacing(8)
+
+        sp_head = QHBoxLayout()
+        sp_head.addWidget(QLabel("🎙️ SIGNATURE VOCALE (PHASES 1 & 2 — CALIBRATION & SANS MOT-CLÉ)"))
+        sp_head.addStretch()
+        self.lbl_speaker_status = QLabel("Chargement…")
+        self.lbl_speaker_status.setStyleSheet("color: #9ca3af; font-weight: bold;")
+        sp_head.addWidget(self.lbl_speaker_status)
+        sp_lay.addLayout(sp_head)
+
+        self._speaker_prompts = [
+            "Bonjour Pixel, vérifie les actualités et mes messages du matin.",
+            "Lance une session de musique ou cherche un mix de 1983.",
+            "Rappelle-moi ce que nous avions prévu pour ce week-end.",
+            "Quel temps fait-il aujourd'hui et quelle heure est-il ?",
+            "Fais une recherche rapide sur le web et résume-moi l'essentiel.",
+            "Peux-tu baisser un peu le volume et mettre la suite en attente ?"
+        ]
+        self._speaker_prompt_idx = 0
+        self.is_enrolling_speaker = False
+        self.speaker_enroll_thread = None
+
+        self.lbl_speaker_prompt = QLabel(f"Phrase suggérée : « {self._speaker_prompts[0]} »")
+        self.lbl_speaker_prompt.setWordWrap(True)
+        self.lbl_speaker_prompt.setStyleSheet("color: #e5e7eb; background: rgba(0,0,0,0.28); padding: 8px; border-radius: 6px;")
+        sp_lay.addWidget(self.lbl_speaker_prompt)
+
+        sp_btns = QHBoxLayout()
+        self.btn_speaker_enroll = QPushButton("🎙️ Enregistrer un échantillon (3,5s)")
+        self.btn_speaker_enroll.clicked.connect(self.start_speaker_enrollment)
+        sp_btns.addWidget(self.btn_speaker_enroll)
+        btn_speaker_clear = QPushButton("Réinitialiser")
+        btn_speaker_clear.clicked.connect(self.clear_speaker_profile)
+        sp_btns.addWidget(btn_speaker_clear)
+        sp_lay.addLayout(sp_btns)
+
+        sp_thresh_lay = QHBoxLayout()
+        sp_thresh_lay.addWidget(QLabel("Seuil de similarité :"))
+        self.slider_speaker_thresh = QSlider(Qt.Orientation.Horizontal)
+        self.slider_speaker_thresh.setRange(40, 85)
+        self.slider_speaker_thresh.setValue(60)
+        self.lbl_speaker_thresh_val = QLabel("0.60")
+        self.lbl_speaker_thresh_val.setStyleSheet("color: #60a5fa; font-weight: bold;")
+        self.slider_speaker_thresh.valueChanged.connect(lambda v: self.lbl_speaker_thresh_val.setText(f"{v/100:.2f}"))
+        self.slider_speaker_thresh.sliderReleased.connect(lambda: self.save_speaker_settings(threshold=self.slider_speaker_thresh.value() / 100.0))
+        sp_thresh_lay.addWidget(self.slider_speaker_thresh)
+        sp_thresh_lay.addWidget(self.lbl_speaker_thresh_val)
+        sp_lay.addLayout(sp_thresh_lay)
+
+        self.chk_speaker_nowake = QCheckBox("Activer la commande vocale SANS mot-clé « Pixel » (via ma signature vocale)")
+        self.chk_speaker_nowake.setChecked(False)
+        self.chk_speaker_nowake.setStyleSheet("color: #93c5fd; font-weight: bold;")
+        self.chk_speaker_nowake.clicked.connect(
+            lambda checked: self.save_speaker_settings(handsfree_no_wake=checked, observe_only=(not checked))
+        )
+        sp_lay.addWidget(self.chk_speaker_nowake)
+
+        self.chk_speaker_observe = QCheckBox("Mode observation uniquement (Phase 1 : mesure les scores sans bloquer)")
+        self.chk_speaker_observe.setChecked(True)
+        self.chk_speaker_observe.clicked.connect(lambda checked: self.save_speaker_settings(observe_only=checked))
+        sp_lay.addWidget(self.chk_speaker_observe)
+
+        self.lbl_speaker_last = QLabel("Aucune mesure vocale récente.")
+        self.lbl_speaker_last.setWordWrap(True)
+        self.lbl_speaker_last.setStyleSheet("color: #9ca3af; font-size: 11px;")
+        sp_lay.addWidget(self.lbl_speaker_last)
+
+        config_layout.addWidget(speaker_group)
 
         # Camera Settings Block
         camera_group = QFrame()
@@ -1847,7 +2059,7 @@ class MainWindow(QMainWindow):
 
     def fetch_chat_history(self):
         try:
-            r = requests.get(f"{API_BASE}/api/history", timeout=2)
+            r = requests.get(f"{API_BASE}/api/history", headers={"X-Pixel-Device": "pc"}, timeout=2)
             if r.status_code == 200:
                 messages = r.json()
                 self.chat_history_cache = []
@@ -2198,6 +2410,147 @@ class MainWindow(QMainWindow):
     def toggle_camera_from_perceptions(self):
         current = self.chk_camera_enabled.isChecked() if hasattr(self, "chk_camera_enabled") else True
         self.save_vision_settings(not current, show_popup=False)
+
+    # ── SPEAKER SIGNATURE (PHASES 1 & 2) ──
+    def _passive_mic_placeholder(self) -> str:
+        if getattr(self, "handsfree_no_wake", False):
+            return "Parlez librement à Pixel (Signature vocale active)."
+        return "Dites « Pixel » pour activer l'écoute."
+
+    def _sync_handsfree_nowake(self, enabled: bool):
+        self.handsfree_no_wake = bool(enabled)
+        if hasattr(self, "chk_speaker_nowake"):
+            self.chk_speaker_nowake.blockSignals(True)
+            self.chk_speaker_nowake.setChecked(self.handsfree_no_wake)
+            self.chk_speaker_nowake.blockSignals(False)
+        if hasattr(self, "input_field") and self.continuous_voice and not getattr(self, "is_wake_active", False):
+            cur = self.input_field.placeholderText()
+            if cur in (
+                "Dites « Pixel » pour activer l'écoute.",
+                "Parlez librement à Pixel (Signature vocale active).",
+                "",
+            ):
+                self.input_field.setPlaceholderText(self._passive_mic_placeholder())
+
+    def _apply_speaker_status(self, st: dict, preserve_last: bool = False):
+        if not hasattr(self, "lbl_speaker_status"):
+            return
+        avail = bool(st.get("available", False))
+        enrolled = bool(st.get("enrolled", False))
+        count = int(st.get("sample_count", 0))
+        if not avail:
+            self.lbl_speaker_status.setText("○ Worker ONNX arrêté")
+            self.lbl_speaker_status.setStyleSheet("color: #f87171; font-weight: bold;")
+        elif enrolled:
+            self.lbl_speaker_status.setText(f"● Prêt · {count} échantillon(s)")
+            self.lbl_speaker_status.setStyleSheet("color: #10b981; font-weight: bold;")
+        else:
+            self.lbl_speaker_status.setText("● Prêt · Non enrôlé")
+            self.lbl_speaker_status.setStyleSheet("color: #fbbf24; font-weight: bold;")
+
+        if hasattr(self, "slider_speaker_thresh") and isinstance(st.get("threshold"), (int, float)):
+            val = max(40, min(85, int(round(st["threshold"] * 100))))
+            self.slider_speaker_thresh.blockSignals(True)
+            self.slider_speaker_thresh.setValue(val)
+            self.slider_speaker_thresh.blockSignals(False)
+            self.lbl_speaker_thresh_val.setText(f"{val/100:.2f}")
+
+        if isinstance(st.get("handsfree_no_wake"), bool):
+            self._sync_handsfree_nowake(st["handsfree_no_wake"])
+
+        if hasattr(self, "chk_speaker_observe") and isinstance(st.get("observe_only"), bool):
+            self.chk_speaker_observe.blockSignals(True)
+            self.chk_speaker_observe.setChecked(st["observe_only"])
+            self.chk_speaker_observe.blockSignals(False)
+
+        last = st.get("last_match")
+        if hasattr(self, "lbl_speaker_last") and not preserve_last:
+            if not enrolled:
+                self.lbl_speaker_last.setText("Enregistre 4-5 phrases sur le PC et 3-4 sur le smartphone pour calibrer.")
+                self.lbl_speaker_last.setStyleSheet("color: #fbbf24; font-size: 11px;")
+            elif isinstance(last, dict):
+                score = float(last.get("score", 0.0))
+                is_owner = bool(last.get("is_owner", False))
+                reason = last.get("reason", "")
+                hint = last.get("transcript_hint", "")
+                hint_txt = f" · « {hint} »" if hint else ""
+                state = "Voix reconnue ✅" if is_owner else f"Hors seuil ({reason})"
+                self.lbl_speaker_last.setText(f"Dernier score : {score:.3f} ({state}){hint_txt}")
+                self.lbl_speaker_last.setStyleSheet(f"color: {'#10b981' if is_owner else '#f87171'}; font-size: 11px;")
+
+    def fetch_speaker_profile(self, preserve_last: bool = False):
+        try:
+            r = requests.get(f"{API_BASE}/api/voice/speaker/profile", timeout=3)
+            if r.status_code == 200:
+                self._apply_speaker_status(r.json(), preserve_last=preserve_last)
+        except Exception as e:
+            print(f"[GUI] Erreur fetch speaker profile : {e}")
+
+    def save_speaker_settings(self, threshold=None, observe_only=None, handsfree_no_wake=None):
+        payload = {}
+        if threshold is not None:
+            payload["threshold"] = float(threshold)
+        if observe_only is not None:
+            payload["observe_only"] = bool(observe_only)
+        if handsfree_no_wake is not None:
+            payload["handsfree_no_wake"] = bool(handsfree_no_wake)
+        if not payload:
+            return
+        try:
+            r = requests.post(f"{API_BASE}/api/voice/speaker/profile", json=payload, timeout=4)
+            if r.status_code == 200:
+                self._apply_speaker_status(r.json())
+        except Exception as e:
+            print(f"[GUI] Erreur save speaker settings : {e}")
+
+    def clear_speaker_profile(self):
+        try:
+            r = requests.delete(f"{API_BASE}/api/voice/speaker/profile", timeout=4)
+            if r.status_code == 200:
+                self._apply_speaker_status(r.json())
+                QMessageBox.information(self, "Signature Vocale", "Profil vocal réinitialisé.")
+        except Exception as e:
+            QMessageBox.critical(self, "Erreur Réseau", str(e))
+
+    def start_speaker_enrollment(self):
+        if self.is_enrolling_speaker:
+            return
+        self.is_enrolling_speaker = True
+        self._speaker_resume_handsfree = bool(self.continuous_voice)
+        if self.is_recording and hasattr(self, "record_thread") and self.record_thread:
+            try:
+                self.record_thread.should_stop = True
+                self.record_thread.wait(500)
+            except Exception:
+                pass
+            self.is_recording = False
+
+        phrase = self._speaker_prompts[self._speaker_prompt_idx % len(self._speaker_prompts)]
+        self.btn_speaker_enroll.setEnabled(False)
+        self.btn_speaker_enroll.setText("🔴 Parlez maintenant (3,5s)…")
+
+        self.speaker_enroll_thread = SpeakerEnrollThread(phrase, duration_sec=3.5)
+        self._track_thread(self.speaker_enroll_thread)
+        self.speaker_enroll_thread.finished_signal.connect(self._on_speaker_enroll_finished, Qt.ConnectionType.QueuedConnection)
+        self.speaker_enroll_thread.start()
+
+    def _on_speaker_enroll_finished(self, ok: bool, msg: str, payload: dict):
+        self.is_enrolling_speaker = False
+        self.btn_speaker_enroll.setEnabled(True)
+        self.btn_speaker_enroll.setText("🎙️ Enregistrer un échantillon (3,5s)")
+        if ok:
+            self._speaker_prompt_idx += 1
+            next_p = self._speaker_prompts[self._speaker_prompt_idx % len(self._speaker_prompts)]
+            self.lbl_speaker_prompt.setText(f"Phrase suggérée : « {next_p} »")
+            self.fetch_speaker_profile(preserve_last=True)
+            cnt = payload.get("sample_count", 0)
+            cons = float(payload.get("consistency_score", 1.0))
+            self.lbl_speaker_last.setText(f"Échantillon #{cnt} enregistré (cohérence : {cons:.3f}).")
+            self.lbl_speaker_last.setStyleSheet("color: #10b981; font-size: 11px;")
+        else:
+            QMessageBox.warning(self, "Échec Enrôlement", f"Impossible d'enrôler l'échantillon : {msg}")
+        if getattr(self, "_speaker_resume_handsfree", False) and self.continuous_voice and not self.is_recording:
+            QTimer.singleShot(250, self.start_microphone_recording)
 
     # ── AUDIO EARCON & MUSIC HELPERS ──
     def is_music_request(self, text: str) -> bool:
@@ -2553,7 +2906,7 @@ class MainWindow(QMainWindow):
             control_active_mpv(["set_property", "pause", False])
             self.was_music_paused_by_wake = False
         if self.continuous_voice:
-            self.input_field.setPlaceholderText("Dites « Pixel » pour activer l'écoute.")
+            self.input_field.setPlaceholderText(self._passive_mic_placeholder())
             self.btn_mic.setText("🔴")
             self.btn_mic.setStyleSheet("background: rgba(239, 68, 68, 0.2); border: 2px solid #ef4444;")
 
@@ -2565,7 +2918,7 @@ class MainWindow(QMainWindow):
             self.start_microphone_recording()
 
     def start_microphone_recording(self):
-        if self.is_recording or self.is_speaking_session or self.is_speaking_sentence:
+        if self.is_recording or self.is_speaking_session or self.is_speaking_sentence or getattr(self, "is_enrolling_speaker", False):
             return
             
         self.is_recording = True
@@ -2576,7 +2929,7 @@ class MainWindow(QMainWindow):
         else:
             self.btn_mic.setText("🔴")
             self.btn_mic.setStyleSheet("background: rgba(239, 68, 68, 0.2); border: 2px solid #ef4444;")
-            self.input_field.setPlaceholderText("Dites « Pixel » pour activer l'écoute." if self.continuous_voice else "Pixel vous écoute... Cliquez sur 🔴 ou parlez.")
+            self.input_field.setPlaceholderText(self._passive_mic_placeholder() if self.continuous_voice else "Pixel vous écoute... Cliquez sur 🔴 ou parlez.")
         
         # Start QThread-based recording with real-time silence detection
         self._safe_stop_thread("record_thread", 1000)
@@ -2624,7 +2977,7 @@ class MainWindow(QMainWindow):
                 if self.continuous_voice:
                     self.btn_mic.setText("🔴")
                     self.btn_mic.setStyleSheet("background: rgba(239, 68, 68, 0.2); border: 2px solid #ef4444;")
-                    self.input_field.setPlaceholderText("Dites « Pixel » pour activer l'écoute.")
+                    self.input_field.setPlaceholderText(self._passive_mic_placeholder())
                     QTimer.singleShot(50, self.start_microphone_recording)
                 else:
                     self.btn_mic.setText("🎙️")
@@ -2643,13 +2996,25 @@ class MainWindow(QMainWindow):
             self.btn_mic.setStyleSheet("")
         
         self._safe_stop_thread("transcribe_thread", 1000)
-        self.transcribe_thread = TranscribeThread(wav_path, engine=self.stt_engine)
+        force_speaker = bool(self.continuous_voice and getattr(self, "handsfree_no_wake", False))
+        self.transcribe_thread = TranscribeThread(wav_path, engine=self.stt_engine, force_speaker_verify=force_speaker)
         self._track_thread(self.transcribe_thread)
         self.transcribe_thread.finished_signal.connect(self.handle_transcription_finished, Qt.ConnectionType.QueuedConnection)
         self.transcribe_thread.start()
 
-    def handle_transcription_finished(self, text):
+    def handle_transcription_finished(self, text, meta=None):
         self.input_field.setEnabled(True)
+        meta = meta or {}
+        if isinstance(meta.get("handsfree_no_wake"), bool):
+            self._sync_handsfree_nowake(meta["handsfree_no_wake"])
+        if meta.get("speaker_available") and hasattr(self, "lbl_speaker_last") and "speaker_score" in meta:
+            sc = float(meta.get("speaker_score", 0.0))
+            ow = bool(meta.get("is_owner", False))
+            rs = meta.get("speaker_reason", "")
+            st_lbl = "Voix reconnue ✅" if ow else f"Hors seuil ({rs})"
+            intent_lbl = f" · intent={meta.get('address_intent')}" if meta.get("address_intent") else ""
+            self.lbl_speaker_last.setText(f"Dernier score : {sc:.3f} ({st_lbl}{intent_lbl})")
+            self.lbl_speaker_last.setStyleSheet(f"color: {'#10b981' if ow else '#f87171'}; font-size: 11px;")
         if text:
             # 0. Arrêt d'urgence de la musique : toujours prioritaire même sans mot-clé
             clean_lower = text.lower().strip()
@@ -2703,12 +3068,46 @@ class MainWindow(QMainWindow):
                             QTimer.singleShot(100, self.start_microphone_recording)
                         return
 
-                # 2. En veille passive : Détecter le mot-clé d'éveil "Pixel" (avec variantes de transcription)
+                # 2. En veille passive : Phase 2 (Signature vocale sans mot-clé) ou Phase 1 (Mot-clé "Pixel")
                 wake_match = WAKE_WORDS_PATTERN.search(text)
+                if self.handsfree_no_wake and "should_accept" in meta:
+                    if not meta.get("should_accept", False):
+                        print(
+                            f"[GUI] Signature vocale / porte d'adresse refusée "
+                            f"(intent={meta.get('address_intent')}, score={meta.get('speaker_score', 0):.3f}, "
+                            f"reason={meta.get('speaker_reason')}) : '{text}'"
+                        )
+                        self.input_field.setText("")
+                        self.input_field.setPlaceholderText(self._passive_mic_placeholder())
+                        self.btn_mic.setText("🔴")
+                        self.btn_mic.setStyleSheet("background: rgba(239, 68, 68, 0.2); border: 2px solid #ef4444;")
+                        if not self.is_recording and not self.is_speaking_session and not self.is_speaking_sentence:
+                            QTimer.singleShot(100, self.start_microphone_recording)
+                        return
+
+                    if not wake_match:
+                        cleaned_text = re.sub(
+                            r'[\s,:\-\.\!\?]*(envoi|envoyer|envoie)[\s,:\-\.\!\?]*$',
+                            '',
+                            text,
+                            flags=re.IGNORECASE,
+                        ).strip()
+                        if cleaned_text:
+                            print(f"[GUI] Commande sans mot-clé acceptée ({meta.get('address_intent')}) : '{cleaned_text}'")
+                            self.play_ack_sound()
+                            self.is_wake_active = False
+                            if hasattr(self, "wake_active_timer"):
+                                self.wake_active_timer.stop()
+                            self.input_field.setText(cleaned_text)
+                            self.send_chat_message()
+                        elif not self.is_recording and not self.is_speaking_session and not self.is_speaking_sentence:
+                            QTimer.singleShot(100, self.start_microphone_recording)
+                        return
+
                 if not wake_match:
                     print(f"[GUI] Mains-libres : transcription ignorée (absence du mot-clé 'Pixel') : '{text}'")
                     self.input_field.setText("")
-                    self.input_field.setPlaceholderText("Dites « Pixel » pour activer l'écoute.")
+                    self.input_field.setPlaceholderText(self._passive_mic_placeholder())
                     self.btn_mic.setText("🔴")
                     self.btn_mic.setStyleSheet("background: rgba(239, 68, 68, 0.2); border: 2px solid #ef4444;")
                     if not self.is_recording and not self.is_speaking_session and not self.is_speaking_sentence:
@@ -2766,7 +3165,7 @@ class MainWindow(QMainWindow):
                     QTimer.singleShot(100, self.start_microphone_recording)
             else:
                 self.input_field.setText("")
-                self.input_field.setPlaceholderText("Dites « Pixel » pour activer l'écoute." if self.continuous_voice else "Écrivez un message ou parlez...")
+                self.input_field.setPlaceholderText(self._passive_mic_placeholder() if self.continuous_voice else "Écrivez un message ou parlez...")
                 self.is_wake_active = False
                 if hasattr(self, "wake_active_timer"):
                     self.wake_active_timer.stop()
@@ -2789,16 +3188,26 @@ class MainWindow(QMainWindow):
         if self.voice_enabled:
             duck_active_mpv(True, 18)
 
-    def enqueue_bridge_phrase(self, phrase):
-        if not self.voice_enabled or getattr(self, "is_stream_finished", False) or not phrase:
+    def enqueue_bridge_phrase(self, _alert_info=None):
+        """Joue une alerte sonore moderne et discrète indiquant que la réponse est en cours de construction."""
+        if not self.voice_enabled or getattr(self, "is_stream_finished", False):
             return
-        # Ne pas injecter de transition si la vraie réponse a déjà commencé à parler ou est en file
+        # Ne pas jouer d'alerte si la vraie réponse a déjà commencé à parler ou est en file
         if self.speech_queue or self.is_speaking_sentence or self.speech_buffer.strip():
             return
-        cleaned = self._clean_tts_sentence(phrase)
-        if len(cleaned) > 1 and any(char.isalnum() for char in cleaned):
-            self.speech_queue.append(cleaned)
-            self._play_next_tts_sentence()
+        try:
+            sound_path = getattr(self, "thinking_sound_path", None)
+            if not sound_path or not os.path.exists(sound_path):
+                sound_path = ensure_thinking_sound()
+                self.thinking_sound_path = sound_path
+            for player in ["pw-play", "paplay", "aplay"]:
+                if shutil.which(player):
+                    subprocess.Popen([player, sound_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    return
+            if hasattr(self, "thinking_sound"):
+                self.thinking_sound.play()
+        except Exception as e:
+            print(f"[GUI] Erreur lecture alerte moderne : {e}")
 
     def handle_barge_in(self):
         self.stop_speaking()

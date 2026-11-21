@@ -1,6 +1,6 @@
 {
   "name": "kdj",
-  "description": "Connecte Pixel à la chaîne YouTube de K DJ (https://www.youtube.com/@kdj8363), propose et lance les différentes créations du DJ (megamixes, remixes, retro mixes 80s/90s, Club House, Italo Disco, New Wave, etc.) avec navigation suivante/précédente et filtrage par mot-clé (ex: 'année 1982', 'REMIX', 'Club haus').",
+  "description": "Connecte Pixel à la chaîne YouTube de K DJ (https://www.youtube.com/@kdj8363), propose et lance au hasard les différentes créations du DJ correspondant au filtre ou à l'année demandée (ex: '1983', 'année 1982', 'REMIX', 'Club haus') en évitant de relancer le même titre sur des requêtes répétées.",
   "executable": "python3",
   "script": "run.py",
   "test_query": "lance moi kdj",

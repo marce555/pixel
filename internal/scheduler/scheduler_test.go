@@ -162,3 +162,101 @@ func TestSchedulerPlayMusicFIFOOrder(t *testing.T) {
 		}
 	}
 }
+
+type recordingDeviceBroadcaster struct {
+	mu      sync.Mutex
+	global  []string
+	byDev   map[string][]string
+}
+
+func (r *recordingDeviceBroadcaster) Broadcast(message string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.global = append(r.global, message)
+}
+
+func (r *recordingDeviceBroadcaster) BroadcastToDevice(device string, message string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.byDev == nil {
+		r.byDev = make(map[string][]string)
+	}
+	r.byDev[device] = append(r.byDev[device], message)
+}
+
+func TestSchedulerNoDuplicateBroadcastWhenHandlerBroadcasts(t *testing.T) {
+	s := NewScheduler()
+	b := &recordingDeviceBroadcaster{}
+	s.SetBroadcaster(b)
+
+	s.RegisterHandler("agent_ok", func(ctx context.Context, task *Task) error {
+		BroadcastForTask(b, task, "Rapport final OK")
+		return nil
+	})
+	s.RegisterHandler("agent_fail", func(ctx context.Context, task *Task) error {
+		BroadcastFailureForTask(b, task, "Échec explicite")
+		return errors.New("boom")
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.Start(ctx)
+
+	s.EnqueueWithDevice("agent_ok", "OK Task", "p", 0, "android")
+	s.EnqueueWithDevice("agent_fail", "Fail Task", "p", 0, "pc")
+	s.TriggerDispatch()
+
+	time.Sleep(200 * time.Millisecond)
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.global) != 0 {
+		t.Fatalf("expected 0 global broadcasts, got %v", b.global)
+	}
+	if len(b.byDev["android"]) != 1 || b.byDev["android"][0] != "Rapport final OK" {
+		t.Fatalf("expected exactly 1 android broadcast, got %v", b.byDev["android"])
+	}
+	if len(b.byDev["pc"]) != 1 || b.byDev["pc"][0] != "Échec explicite" {
+		t.Fatalf("expected exactly 1 pc broadcast, got %v", b.byDev["pc"])
+	}
+}
+
+func TestScheduler_DeviceAudioIsolation(t *testing.T) {
+	s := NewScheduler()
+	androidStarted := make(chan struct{})
+	pcDone := make(chan struct{})
+	releaseAndroid := make(chan struct{})
+
+	s.RegisterHandler("play_music", func(ctx context.Context, task *Task) error {
+		if task.TargetDevice == "android" {
+			close(androidStarted)
+			<-releaseAndroid
+			return nil
+		}
+		close(pcDone)
+		return nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.Start(ctx)
+
+	s.EnqueueWithDevice("play_music", "Phone Track", "p1", 0, "android")
+	s.TriggerDispatch()
+
+	select {
+	case <-androidStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("android music task did not start")
+	}
+
+	s.EnqueueWithDevice("play_music", "PC Track", "p2", 0, "pc")
+	s.TriggerDispatch()
+
+	select {
+	case <-pcDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("PC music task was blocked by running Android music task")
+	}
+	close(releaseAndroid)
+}

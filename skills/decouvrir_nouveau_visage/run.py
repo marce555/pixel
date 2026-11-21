@@ -222,9 +222,25 @@ def match_person(description, memory):
         "details": "Aucune présence humaine clairement confirmée devant la caméra."
     }
 
+def is_camera_enabled():
+    memory, _ = load_memory()
+    vision_settings = memory.get("vision_settings")
+    if isinstance(vision_settings, dict) and "camera_enabled" in vision_settings:
+        return bool(vision_settings["camera_enabled"])
+    return True
+
 def main():
     query = sys.argv[1] if len(sys.argv) > 1 else ""
-    
+
+    if not is_camera_enabled():
+        print("📷 CAMÉRA ÉTEINTE / DÉSACTIVÉE")
+        print("==============================")
+        print("• STATUT : [CAMÉRA ÉTEINTE] 📷🚫")
+        print("• CONSIGNES POUR PIXEL : Ta caméra est actuellement éteinte dans la configuration. "
+              "Ne tente pas d'interpréter quoi que ce soit visuellement ni de décrire du noir. "
+              "Indique simplement à l'utilisateur que ta caméra est désactivée.")
+        return
+
     try:
         # 1. Capture webcam
         b64_img = capture_photo()

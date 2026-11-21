@@ -21,6 +21,12 @@ type STMWriter interface {
 	AddMessage(msg llm.Message)
 }
 
+// DeviceSTMWriter allows routing short-term memory writes to the originating device ("pc" or "android").
+type DeviceSTMWriter interface {
+	STMWriter
+	AddMessageForDevice(device string, msg llm.Message)
+}
+
 // MusicResolver interface to decouple scheduler from agent/webagent package and avoid circular imports.
 type MusicResolver interface {
 	ResolveMusicURL(songQuery string) (string, string, bool, error)
@@ -33,6 +39,65 @@ type WebSearcher interface {
 
 type EventBroadcaster interface {
 	Broadcast(message string)
+}
+
+// DeviceEventBroadcaster allows routing proactive SSE messages exclusively to a target device ("pc" or "android").
+type DeviceEventBroadcaster interface {
+	EventBroadcaster
+	BroadcastToDevice(device string, message string)
+}
+
+func broadcastToDevice(b EventBroadcaster, targetDevice string, message string) {
+	if b == nil {
+		return
+	}
+	if strings.TrimSpace(targetDevice) != "" {
+		if db, ok := b.(DeviceEventBroadcaster); ok {
+			db.BroadcastToDevice(NormalizeDevice(targetDevice), message)
+			return
+		}
+	}
+	b.Broadcast(message)
+}
+
+// BroadcastForTask delivers a task result exclusively to the task's originating TargetDevice
+// and marks the task as having broadcasted its response so the scheduler won't emit a duplicate notification.
+func BroadcastForTask(b EventBroadcaster, task *Task, message string) {
+	if task != nil {
+		task.MarkBroadcasted()
+		broadcastToDevice(b, task.TargetDevice, message)
+		return
+	}
+	if b != nil {
+		b.Broadcast(message)
+	}
+}
+
+// BroadcastFailureForTask delivers a task failure notification exclusively to the task's originating TargetDevice
+// and marks failure as already broadcasted so the scheduler won't emit a duplicate failure alert.
+func BroadcastFailureForTask(b EventBroadcaster, task *Task, message string) {
+	if task != nil {
+		task.MarkFailureBroadcasted()
+		broadcastToDevice(b, task.TargetDevice, message)
+		return
+	}
+	if b != nil {
+		b.Broadcast(message)
+	}
+}
+
+// AddMessageForTask writes an assistant message into the STM isolated for the task's originating TargetDevice.
+func AddMessageForTask(stm STMWriter, task *Task, msg llm.Message) {
+	if stm == nil {
+		return
+	}
+	if task != nil && strings.TrimSpace(task.TargetDevice) != "" {
+		if dstm, ok := stm.(DeviceSTMWriter); ok {
+			dstm.AddMessageForDevice(NormalizeDevice(task.TargetDevice), msg)
+			return
+		}
+	}
+	stm.AddMessage(msg)
 }
 
 // NewPlayMusicHandler returns a task handler to play music synchronously using mpv.
@@ -78,37 +143,62 @@ func NewPlayMusicHandler(resolver MusicResolver, s *Scheduler) TaskHandler {
 			task.AppendLog(fmt.Sprintf("Piste directe non trouvée. Ouverture de la page de recherche : %s", targetURL))
 		}
 
+		isOpenAudioMix := strings.HasPrefix(task.Payload, "openaudio_mix:")
+
 		// Si la tâche cible le smartphone Android, diffuser l'URL directe via SSE et attendre la fin de lecture
 		if task.TargetDevice == "android" || task.TargetDevice == "mobile" {
 			task.AppendLog("Redirection du flux musical vers le smartphone Android...")
-			streamTarget := targetURL
-			if !isDirect && strings.Contains(targetURL, "youtube.com/results?search_query=") {
-				streamTarget = fmt.Sprintf("ytsearch1:%s", task.Payload)
-			}
-			ytdlPath := "/home/marceloc/Documents/Pixel/bin/yt-dlp"
-			if _, statErr := os.Stat(ytdlPath); statErr != nil {
-				ytdlPath = "yt-dlp"
-			}
-			extractCmd := exec.CommandContext(ctx, ytdlPath, "--print", "%(duration)s", "-g", "-f", "bestaudio[ext=m4a]/bestaudio/best", streamTarget)
-			outBytes, extractErr := extractCmd.Output()
-			rawOut := strings.TrimSpace(string(outBytes))
 			var finalStreamURL string
 			durationSec := 240 // Valeur par défaut : 4 minutes
 
-			lines := strings.Split(rawOut, "\n")
-			if len(lines) >= 2 {
-				durFloat, errDur := strconv.ParseFloat(strings.TrimSpace(lines[0]), 64)
-				if errDur == nil && durFloat > 0 {
-					durationSec = int(durFloat)
+			if isOpenAudioMix && isDirect && (strings.HasPrefix(targetURL, "http://") || strings.HasPrefix(targetURL, "https://")) {
+				localChunkPath := strings.TrimPrefix(task.Payload, "openaudio_mix:")
+				readyPath := localChunkPath + ".ready"
+				deadline := time.Now().Add(90 * time.Second)
+				for time.Now().Before(deadline) {
+					if _, errReady := os.Stat(readyPath); errReady == nil {
+						break
+					}
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case <-time.After(250 * time.Millisecond):
+					}
 				}
-				finalStreamURL = strings.TrimSpace(lines[1])
-			} else if len(lines) == 1 && rawOut != "" {
-				finalStreamURL = rawOut
-			}
-
-			if extractErr != nil || finalStreamURL == "" {
-				task.AppendLog(fmt.Sprintf("Avertissement : extraction de flux direct m4a échouée (%v). Utilisation de targetURL : %s", extractErr, targetURL))
 				finalStreamURL = targetURL
+				if durOut, errDur := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", localChunkPath).Output(); errDur == nil {
+					if durFloat, errParse := strconv.ParseFloat(strings.TrimSpace(string(durOut)), 64); errParse == nil && durFloat > 0 {
+						durationSec = int(durFloat)
+					}
+				}
+			} else {
+				streamTarget := targetURL
+				if !isDirect && strings.Contains(targetURL, "youtube.com/results?search_query=") {
+					streamTarget = fmt.Sprintf("ytsearch1:%s", task.Payload)
+				}
+				ytdlPath := "/home/marceloc/Documents/Pixel/bin/yt-dlp"
+				if _, statErr := os.Stat(ytdlPath); statErr != nil {
+					ytdlPath = "yt-dlp"
+				}
+				extractCmd := exec.CommandContext(ctx, ytdlPath, "--print", "%(duration)s", "-g", "-f", "bestaudio[ext=m4a]/bestaudio/best", streamTarget)
+				outBytes, extractErr := extractCmd.Output()
+				rawOut := strings.TrimSpace(string(outBytes))
+
+				lines := strings.Split(rawOut, "\n")
+				if len(lines) >= 2 {
+					durFloat, errDur := strconv.ParseFloat(strings.TrimSpace(lines[0]), 64)
+					if errDur == nil && durFloat > 0 {
+						durationSec = int(durFloat)
+					}
+					finalStreamURL = strings.TrimSpace(lines[1])
+				} else if len(lines) == 1 && rawOut != "" {
+					finalStreamURL = rawOut
+				}
+
+				if extractErr != nil || finalStreamURL == "" {
+					task.AppendLog(fmt.Sprintf("Avertissement : extraction de flux direct m4a échouée (%v). Utilisation de targetURL : %s", extractErr, targetURL))
+					finalStreamURL = targetURL
+				}
 			}
 
 			streamDone := s.RegisterStreamWait(task.ID)
@@ -131,7 +221,7 @@ func NewPlayMusicHandler(resolver MusicResolver, s *Scheduler) TaskHandler {
 					"announcement": task.GetAnnouncement(),
 					"duration":     durationSec,
 				})
-				broadcaster.Broadcast(fmt.Sprintf("AUDIO_STREAM:%s", string(evtPayload)))
+				BroadcastForTask(broadcaster, task, fmt.Sprintf("AUDIO_STREAM:%s", string(evtPayload)))
 			}
 
 			task.AppendLog(fmt.Sprintf("Flux audio transmis au smartphone (%ds). En attente de fin de lecture...", durationSec))
@@ -169,31 +259,43 @@ func NewPlayMusicHandler(resolver MusicResolver, s *Scheduler) TaskHandler {
 
 		ipcSocket := fmt.Sprintf("/tmp/mpvsocket_%s", task.ID)
 
-		ytdlRawOpts := "extractor-args=[youtube:player_client=default,-tv_samsung]"
-		if strings.Contains(targetURL, "list=") {
-			ytdlRawOpts += ",yes-playlist="
-			task.AppendLog("Détection d'une playlist. Activation du mode lecture continue.")
-		}
-
-		// Run mpv with native PipeWire audio output (CachyOS default)
-		// Audio filter silenceremove trims leading silence and cuts off trailing silence
-		// to allow instant punch-in at 100% volume and clean radio-style transitions.
-		args := []string{
-			"--no-video",
-			"--ao=pipewire",
-			"--ytdl-format=bestaudio/best",
-			"--af=lavfi=[silenceremove=start_periods=1:start_duration=0.02:start_threshold=-40dB:stop_periods=-1:stop_duration=0.8:stop_threshold=-40dB]",
-			fmt.Sprintf("--ytdl-raw-options=%s", ytdlRawOpts),
-			fmt.Sprintf("--input-ipc-server=%s", ipcSocket), // IPC socket for play/pause/stop control
-		}
-		mpvTarget := targetURL
-		if !isDirect && strings.Contains(targetURL, "youtube.com/results?search_query=") {
-			cleanPayload := task.Payload
-			qLower := strings.ToLower(cleanPayload)
-			if !strings.Contains(qLower, "lyrics") && !strings.Contains(qLower, "paroles") && !strings.Contains(qLower, "live") && !strings.Contains(qLower, "remix") && !strings.Contains(qLower, "extended") && !strings.Contains(qLower, "rework") && !strings.Contains(qLower, "mix") && !strings.Contains(qLower, "playlist") {
-				cleanPayload += " lyrics"
+		var args []string
+		var mpvTarget string
+		if isOpenAudioMix {
+			args = []string{
+				"--no-video",
+				"--ao=pipewire",
+				"--gapless-audio=yes",
+				fmt.Sprintf("--input-ipc-server=%s", ipcSocket),
 			}
-			mpvTarget = fmt.Sprintf("ytdl://ytsearch1:%s", cleanPayload)
+			mpvTarget = targetURL
+		} else {
+			ytdlRawOpts := "extractor-args=[youtube:player_client=default,-tv_samsung]"
+			if strings.Contains(targetURL, "list=") {
+				ytdlRawOpts += ",yes-playlist="
+				task.AppendLog("Détection d'une playlist. Activation du mode lecture continue.")
+			}
+
+			// Run mpv with native PipeWire audio output (CachyOS default)
+			// Audio filter silenceremove trims leading silence and cuts off trailing silence
+			// to allow instant punch-in at 100% volume and clean radio-style transitions.
+			args = []string{
+				"--no-video",
+				"--ao=pipewire",
+				"--ytdl-format=bestaudio/best",
+				"--af=lavfi=[silenceremove=start_periods=1:start_duration=0.02:start_threshold=-40dB:stop_periods=-1:stop_duration=0.8:stop_threshold=-40dB]",
+				fmt.Sprintf("--ytdl-raw-options=%s", ytdlRawOpts),
+				fmt.Sprintf("--input-ipc-server=%s", ipcSocket), // IPC socket for play/pause/stop control
+			}
+			mpvTarget = targetURL
+			if !isDirect && strings.Contains(targetURL, "youtube.com/results?search_query=") {
+				cleanPayload := task.Payload
+				qLower := strings.ToLower(cleanPayload)
+				if !strings.Contains(qLower, "lyrics") && !strings.Contains(qLower, "paroles") && !strings.Contains(qLower, "live") && !strings.Contains(qLower, "remix") && !strings.Contains(qLower, "extended") && !strings.Contains(qLower, "rework") && !strings.Contains(qLower, "mix") && !strings.Contains(qLower, "playlist") {
+					cleanPayload += " lyrics"
+				}
+				mpvTarget = fmt.Sprintf("ytdl://ytsearch1:%s", cleanPayload)
+			}
 		}
 		args = append(args, mpvTarget)
 
@@ -223,8 +325,15 @@ func NewPlayMusicHandler(resolver MusicResolver, s *Scheduler) TaskHandler {
 		}
 		fmt.Printf("[Scheduler/mpv] PID mpv : %d\n", cmd.Process.Pid)
 
+		if isOpenAudioMix {
+			sessionDir := strings.TrimPrefix(task.Payload, "openaudio_mix:")
+			if sessionDir != "" {
+				_ = os.WriteFile(filepath.Join(sessionDir, "ipc_socket.txt"), []byte(ipcSocket), 0644)
+			}
+		}
+
 		// Start background pre-resolving for the next task in queue
-		if s != nil {
+		if s != nil && !isOpenAudioMix {
 			go func() {
 				nextTask := s.GetNextPendingMusicTask(task.ID)
 
@@ -273,8 +382,10 @@ func NewPlayMusicHandler(resolver MusicResolver, s *Scheduler) TaskHandler {
 		speechDone := make(chan struct{})
 		var hasSpeechStarted bool
 
-		// Background transition monitor with Audio Ducking & Radio DJ voiceover
-		go func() {
+		// Background transition monitor with Audio Ducking & Radio DJ voiceover (disabled for gapless OpenAudio DJ mix,
+		// because OpenAudio mixes multiple segments in one continuous mpv instance and must not fade mpv to 0 between chunks).
+		if !isOpenAudioMix {
+			go func() {
 			ticker := time.NewTicker(250 * time.Millisecond)
 			defer ticker.Stop()
 			released := false
@@ -393,6 +504,7 @@ func NewPlayMusicHandler(resolver MusicResolver, s *Scheduler) TaskHandler {
 				}
 			}
 		}()
+		}
 
 		task.AppendLog("Lecture en cours. En attente de la fin du morceau...")
 		waitErr := cmd.Wait()

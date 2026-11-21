@@ -1,0 +1,5 @@
+{
+  "name": "install_openmusic_local",
+  "description": "Installe et teste OpenMusic.ai en local sur CachyOS en utilisant les sources officielles ou des alternatives compatibles comme MusicGPT/llama.cpp.",
+  "router_instructions": "Utilise cette action si l'utilisateur demande d'installer ou de tester OpenMusic.ai localement. Mets 'install_openmusic' dans query."
+}

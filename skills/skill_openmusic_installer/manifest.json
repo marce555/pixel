@@ -1,0 +1,5 @@
+{
+  "name": "skill_openmusic_installer",
+  "description": "Télécharge, installe et teste OpenMusic.ai sur CachyOS.",
+  "router_instructions": "Utilise cette action si l'utilisateur demande d'installer ou de configurer OpenMusic.ai. Mets la requête d'installation dans query."
+}

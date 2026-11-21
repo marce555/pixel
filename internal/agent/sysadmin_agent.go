@@ -215,8 +215,10 @@ func NewSysadminTaskHandler(agent *SysadminAgent, broadcaster EventBroadcaster, 
 
 %s`, server, problem, synthesis)
 
-		broadcaster.Broadcast(formattedResponse)
-		stm.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: formattedResponse})
+		scheduler.BroadcastForTask(broadcaster, task, formattedResponse)
+		if stm != nil {
+			scheduler.AddMessageForTask(stm, task, llm.Message{Role: llm.RoleAssistant, Content: formattedResponse})
+		}
 		return nil
 	}
 }

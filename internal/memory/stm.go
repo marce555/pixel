@@ -14,6 +14,68 @@ type STM struct {
 	messages     []llm.Message
 	limit        int // Max messages to keep in STM
 	lastActivity time.Time
+	deviceSTMs   map[string]*STM
+}
+
+func normalizeSTMDevice(device string) string {
+	clean := strings.ToLower(strings.TrimSpace(device))
+	if clean == "android" || clean == "mobile" || clean == "phone" || clean == "web-mobile" {
+		return "android"
+	}
+	return "pc"
+}
+
+// ForDevice returns the isolated STM instance associated with the given client device ("pc" or "android").
+func (s *STM) ForDevice(device string) *STM {
+	if s == nil {
+		return nil
+	}
+	if normalizeSTMDevice(device) != "android" {
+		return s
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.deviceSTMs == nil {
+		s.deviceSTMs = make(map[string]*STM)
+	}
+	sub, ok := s.deviceSTMs["android"]
+	if !ok || sub == nil {
+		limit := 12
+		if s.limit > limit {
+			limit = s.limit
+		}
+		sub = NewSTM(limit)
+		s.deviceSTMs["android"] = sub
+	}
+	return sub
+}
+
+// SetDeviceSTM associates an explicit STM instance with a client device (used in tests or custom wiring).
+func (s *STM) SetDeviceSTM(device string, sub *STM) {
+	if s == nil || sub == nil || normalizeSTMDevice(device) != "android" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.deviceSTMs == nil {
+		s.deviceSTMs = make(map[string]*STM)
+	}
+	s.deviceSTMs["android"] = sub
+}
+
+// AddMessageForDevice appends a message to the STM belonging to the given device.
+func (s *STM) AddMessageForDevice(device string, msg llm.Message) {
+	if target := s.ForDevice(device); target != nil {
+		target.AddMessage(msg)
+	}
+}
+
+// GetMessagesForDevice returns messages from the STM belonging to the given device.
+func (s *STM) GetMessagesForDevice(device string) []llm.Message {
+	if target := s.ForDevice(device); target != nil {
+		return target.GetMessages()
+	}
+	return nil
 }
 
 func NewSTM(limit int) *STM {

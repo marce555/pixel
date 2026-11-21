@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,21 +26,52 @@ import (
 	"github.com/marce555/pixel/internal/voice"
 )
 
+// NormalizeDevice normalizes a client device identifier to "android" or "pc".
+func NormalizeDevice(device string) string {
+	clean := strings.ToLower(strings.TrimSpace(device))
+	if clean == "android" || clean == "mobile" || clean == "phone" || clean == "web-mobile" {
+		return "android"
+	}
+	return "pc"
+}
+
+func detectClientDevice(r *http.Request, explicit string) string {
+	if clean := strings.TrimSpace(explicit); clean != "" {
+		return NormalizeDevice(clean)
+	}
+	if r != nil {
+		if headerDev := strings.TrimSpace(r.Header.Get("X-Pixel-Device")); headerDev != "" {
+			return NormalizeDevice(headerDev)
+		}
+		if queryDev := strings.TrimSpace(r.URL.Query().Get("device")); queryDev != "" {
+			return NormalizeDevice(queryDev)
+		}
+		if strings.Contains(strings.ToLower(r.UserAgent()), "android") {
+			return "android"
+		}
+	}
+	return "pc"
+}
+
 // EventHub manages SSE connections for proactive messages
 type EventHub struct {
-	clients map[chan string]bool
+	clients map[chan string]string // client channel -> normalized device ("pc" or "android")
 	mu      sync.Mutex
 }
 
 func NewEventHub() *EventHub {
 	return &EventHub{
-		clients: make(map[chan string]bool),
+		clients: make(map[chan string]string),
 	}
 }
 
 func (h *EventHub) AddClient(client chan string) {
+	h.AddClientWithDevice(client, "pc")
+}
+
+func (h *EventHub) AddClientWithDevice(client chan string, device string) {
 	h.mu.Lock()
-	h.clients[client] = true
+	h.clients[client] = NormalizeDevice(device)
 	h.mu.Unlock()
 }
 
@@ -60,10 +93,38 @@ func (h *EventHub) Broadcast(message string) {
 	}
 }
 
+// BroadcastToDevice delivers message exclusively to SSE clients matching targetDevice ("pc" or "android").
+// If targetDevice is empty, it falls back to broadcasting to all connected clients.
+func (h *EventHub) BroadcastToDevice(device string, message string) {
+	if strings.TrimSpace(device) == "" {
+		h.Broadcast(message)
+		return
+	}
+	target := NormalizeDevice(device)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for client, clientDev := range h.clients {
+		if clientDev != target {
+			continue
+		}
+		select {
+		case client <- message:
+		default:
+			// Client channel plein ou lent : ne bloque pas les autres clients ni le serveur
+		}
+	}
+}
+
 func (h *EventHub) HasClients() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return len(h.clients) > 0
+}
+
+func (h *EventHub) ClientCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.clients)
 }
 
 // Server handles the HTTP API and serves the web frontend.
@@ -81,7 +142,9 @@ type Server struct {
 	scheduler        *scheduler.Scheduler
 	voiceMgr         *voice.VoiceManager
 	voiceBridge      *voice.VoiceBridgeManager
+	speakerVerifier  *voice.SpeakerVerifier
 	adaptiveProvider *llm.AdaptiveProvider
+	npuProvider      *llm.AdaptiveProvider
 	publishProvider  *llm.AdaptiveProvider
 	reviewProvider   *llm.AdaptiveProvider
 	igpuBaseURL      string
@@ -95,10 +158,16 @@ func (s *Server) SetVoiceBridge(vb *voice.VoiceBridgeManager) {
 // stmForDevice keeps short-term conversation buffers separate between PC and smartphone
 // clients so commands on one device do not hijack router context on the other.
 func (s *Server) stmForDevice(device string) *memory.STM {
-	clean := strings.ToLower(strings.TrimSpace(device))
-	if clean == "android" || clean == "mobile" || clean == "phone" {
+	if NormalizeDevice(device) == "android" {
 		s.stmMu.Lock()
 		defer s.stmMu.Unlock()
+		if s.stm != nil {
+			if s.androidSTM != nil {
+				s.stm.SetDeviceSTM("android", s.androidSTM)
+			}
+			s.androidSTM = s.stm.ForDevice("android")
+			return s.androidSTM
+		}
 		if s.androidSTM == nil {
 			s.androidSTM = memory.NewSTM(12)
 		}
@@ -115,6 +184,14 @@ func (s *Server) getVoiceBridge() *voice.VoiceBridgeManager {
 		return s.superior.GetVoiceBridge()
 	}
 	return nil
+}
+
+func (s *Server) SetSpeakerVerifier(sv *voice.SpeakerVerifier) {
+	s.speakerVerifier = sv
+}
+
+func (s *Server) SetNPUProvider(npu *llm.AdaptiveProvider) {
+	s.npuProvider = npu
 }
 
 func (s *Server) SetTaskProviders(publishProvider, reviewProvider *llm.AdaptiveProvider, igpuBaseURL, igpuModel string) {
@@ -207,11 +284,15 @@ func (s *Server) Start(port string) error {
 	mux.HandleFunc("/api/voice/transcribe", s.handleVoiceTranscribe)
 	mux.HandleFunc("/api/voice/speak", s.handleVoiceSpeak)
 	mux.HandleFunc("/api/voice_bridge_settings", s.handleVoiceBridgeSettings)
+	mux.HandleFunc("/api/sounds/bridge", s.handleBridgeSound)
+	mux.HandleFunc("/api/voice/speaker/profile", s.handleVoiceSpeakerProfile)
+	mux.HandleFunc("/api/voice/speaker/enroll", s.handleVoiceSpeakerEnroll)
 
 	// Media Control Routes (Audio Ducking, Streaming)
 	mux.HandleFunc("/api/media/duck", s.handleMediaDuck)
 	mux.HandleFunc("/api/media/stream_ended", s.handleMediaStreamEnded)
 	mux.HandleFunc("/api/media/stop", s.handleMediaStop)
+	mux.HandleFunc("/api/media/mix", s.handleMediaMix)
 
 	if strings.TrimSpace(os.Getenv("PIXEL_API_TOKEN")) != "" {
 		fmt.Println("[Security] Protection par Token activée pour toutes les connexions externes (hors localhost).")
@@ -292,8 +373,8 @@ func extractRequestToken(r *http.Request) string {
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Autoriser le téléchargement direct de l'APK d'installation / mise à jour sans token
-		if r.URL.Path == "/api/apk" {
+		// Autoriser le téléchargement direct de l'APK et les flux mix signés par jeton de session
+		if r.URL.Path == "/api/apk" || r.URL.Path == "/api/media/mix" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -384,16 +465,17 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	isAndroid := strings.Contains(strings.ToLower(r.UserAgent()), "android") ||
-		r.Header.Get("X-Pixel-Device") == "android" ||
-		r.URL.Query().Get("device") == "android"
+	clientDevice := detectClientDevice(r, "")
+	isAndroid := clientDevice == "android"
 
 	clientChan := make(chan string, 100)
-	s.EventHub.AddClient(clientChan)
+	s.EventHub.AddClientWithDevice(clientChan, clientDevice)
+	fmt.Printf("[Server] [SSE] Client connecté (device=%s, android=%v, total=%d, remote=%s)\n", clientDevice, isAndroid, s.EventHub.ClientCount(), r.RemoteAddr)
 
 	defer func() {
 		s.EventHub.RemoveClient(clientChan)
 		close(clientChan)
+		fmt.Printf("[Server] [SSE] Client déconnecté (android=%v, restants=%d, remote=%s)\n", isAndroid, s.EventHub.ClientCount(), r.RemoteAddr)
 	}()
 
 	// Battement de cœur SSE toutes les 15s pour maintenir active la table NAT Freebox et le réseau mobile
@@ -445,19 +527,12 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		s.coreMem.SwitchActiveProfile(req.Sender)
 	}
 
-	clientDevice := strings.TrimSpace(req.Device)
-	if clientDevice == "" {
-		// Detect from User-Agent or custom header if omitted
-		if strings.Contains(strings.ToLower(r.UserAgent()), "android") || r.Header.Get("X-Pixel-Device") == "android" {
-			clientDevice = "android"
-		} else {
-			clientDevice = "pc"
-		}
-	}
+	clientDevice := detectClientDevice(r, req.Device)
 	if s.superior != nil {
 		s.superior.SetActiveClient(clientDevice)
 	}
 	reqCtx := agent.WithClientDevice(r.Context(), clientDevice)
+	reqCtx = agent.WithRequestBaseURL(reqCtx, requestBaseURL(r))
 
 	// Prioriser immédiatement le chat utilisateur en annulant les tâches de fond en cours (libère la GPU)
 	s.sleepManager.CancelBackgroundTasks()
@@ -514,9 +589,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 				bridgeChan = nil
 			} else if evt.Phrase != "" {
 				bridgeBytes, _ := json.Marshal(map[string]interface{}{
-					"bridge":   evt.Phrase,
-					"intent":   string(evt.Intent),
-					"is_micro": evt.IsMicro,
+					"bridge_alert": true,
+					"intent":       string(evt.Intent),
+					"is_micro":     evt.IsMicro,
+					"sound_url":    "/api/sounds/bridge",
 				})
 				fmt.Fprintf(w, "data: %s\n\n", string(bridgeBytes))
 				flusher.Flush()
@@ -750,11 +826,14 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	isAndroid := strings.Contains(strings.ToLower(r.UserAgent()), "android") ||
-		r.Header.Get("X-Pixel-Device") == "android" ||
-		r.URL.Query().Get("device") == "android"
+	clientDevice := detectClientDevice(r, "")
+	isAndroid := clientDevice == "android"
 
-	msgs := s.stm.GetMessages()
+	activeSTM := s.stmForDevice(clientDevice)
+	var msgs []llm.Message
+	if activeSTM != nil {
+		msgs = activeSTM.GetMessages()
+	}
 	filtered := make([]llm.Message, 0, len(msgs))
 	for _, m := range msgs {
 		if strings.Contains(m.Content, "[Échange autonome avec Gemini]") || strings.Contains(m.Content, "[Échange avec Gemini]") {
@@ -840,26 +919,15 @@ func (s *Server) handleTasksClear(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(`{"status": "ok"}`))
 }
 
-func (s *Server) handleVoiceTranscribe(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	fmt.Println("[Server] [Transcription] Requête de transcription reçue.")
-
+// saveUploadedAudioAsWav reads the uploaded multipart "file" and normalizes it into a 16kHz mono PCM WAV file.
+func (s *Server) saveUploadedAudioAsWav(r *http.Request) (wavPath string, cleanup func(), statusCode int, err error) {
 	if s.voiceMgr == nil {
-		fmt.Println("[Server] [Transcription] Erreur : s.voiceMgr est nul")
-		http.Error(w, "Le module vocal local n'est pas initialisé", http.StatusInternalServerError)
-		return
+		return "", nil, http.StatusInternalServerError, fmt.Errorf("Le module vocal local n'est pas initialisé")
 	}
 
-	// Récupérer le fichier binaire du microphone
 	file, header, err := r.FormFile("file")
 	if err != nil {
-		fmt.Printf("[Server] [Transcription] Erreur FormFile : %v\n", err)
-		http.Error(w, "Impossible de lire le fichier dans le formulaire : "+err.Error(), http.StatusBadRequest)
-		return
+		return "", nil, http.StatusBadRequest, fmt.Errorf("Impossible de lire le fichier dans le formulaire : %w", err)
 	}
 	defer file.Close()
 
@@ -870,50 +938,220 @@ func (s *Server) handleVoiceTranscribe(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Créer un nom temporaire pour l'enregistrement audio dans /tmp
-	tempWebm := filepath.Join(os.TempDir(), fmt.Sprintf("mic_in_%d%s", time.Now().UnixNano(), ext))
-	defer os.Remove(tempWebm)
-	out, err := os.Create(tempWebm)
+	tempIn := filepath.Join(os.TempDir(), fmt.Sprintf("mic_in_%d%s", time.Now().UnixNano(), ext))
+	defer os.Remove(tempIn)
+
+	out, err := os.Create(tempIn)
 	if err != nil {
-		fmt.Printf("[Server] [Transcription] Erreur création fichier temp audio : %v\n", err)
-		http.Error(w, "Impossible de lire le fichier audio temporaire : "+err.Error(), http.StatusInternalServerError)
-		return
+		return "", nil, http.StatusInternalServerError, fmt.Errorf("Impossible de lire le fichier audio temporaire : %w", err)
 	}
-	defer out.Close()
 
 	written, err := io.Copy(out, file)
 	if err != nil {
-		fmt.Printf("[Server] [Transcription] Erreur écriture fichier temp audio : %v\n", err)
-		http.Error(w, "Impossible de copier l'audio : "+err.Error(), http.StatusInternalServerError)
-		return
+		out.Close()
+		return "", nil, http.StatusInternalServerError, fmt.Errorf("Impossible de copier l'audio : %w", err)
 	}
-	out.Close() // Fermer avant l'appel à ffmpeg
-	fmt.Printf("[Server] [Transcription] Audio enregistré dans : %s (taille : %d octets).\n", tempWebm, written)
+	out.Close()
+	fmt.Printf("[Server] [Transcription] Audio enregistré dans : %s (taille : %d octets).\n", tempIn, written)
 
-	// Transcoder en WAV mono 16kHz via ffmpeg
 	tempWav := filepath.Join(os.TempDir(), fmt.Sprintf("mic_out_%d.wav", time.Now().UnixNano()))
-	defer os.Remove(tempWav)
+	if err := s.voiceMgr.ConvertWebMToWav(tempIn, tempWav); err != nil {
+		os.Remove(tempWav)
+		return "", nil, http.StatusInternalServerError, fmt.Errorf("Échec du décodage audio via ffmpeg : %w", err)
+	}
+	return tempWav, func() { _ = os.Remove(tempWav) }, http.StatusOK, nil
+}
 
-	err = s.voiceMgr.ConvertWebMToWav(tempWebm, tempWav)
-	if err != nil {
-		fmt.Printf("[Server] [Transcription] Erreur ffmpeg : %v\n", err)
-		http.Error(w, "Échec du décodage audio via ffmpeg : "+err.Error(), http.StatusInternalServerError)
+func (s *Server) handleVoiceTranscribe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	fmt.Println("[Server] [Transcription] Requête de transcription reçue.")
+	tempWav, cleanup, statusCode, err := s.saveUploadedAudioAsWav(r)
+	if err != nil {
+		fmt.Printf("[Server] [Transcription] Erreur audio : %v\n", err)
+		http.Error(w, err.Error(), statusCode)
+		return
+	}
+	defer cleanup()
 	fmt.Println("[Server] [Transcription] Décryptage et transcodage ffmpeg réussis.")
 
-	// Envoyer le WAV décodé au serveur local Whisper
-	text, err := s.voiceMgr.TranscribeAudio(r.Context(), tempWav)
-	if err != nil {
-		fmt.Printf("[Server] [Transcription] Erreur Whisper : %v\n", err)
-		http.Error(w, "Échec de la transcription Whisper locale : "+err.Error(), http.StatusInternalServerError)
+	// Run Whisper STT and ONNX speaker verification concurrently over the normalized 16kHz WAV.
+	var (
+		text      string
+		whisperEr error
+		match     voice.SpeakerMatchResult
+		wg        sync.WaitGroup
+	)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		text, whisperEr = s.voiceMgr.TranscribeAudio(r.Context(), tempWav)
+	}()
+
+	if s.speakerVerifier != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			match = s.speakerVerifier.VerifyWav(r.Context(), tempWav)
+		}()
+	}
+	wg.Wait()
+
+	if whisperEr != nil {
+		fmt.Printf("[Server] [Transcription] Erreur Whisper : %v\n", whisperEr)
+		http.Error(w, "Échec de la transcription Whisper locale : "+whisperEr.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	fmt.Printf("[Server] [Transcription] Résultat Whisper : '%s'\n", text)
 
+	handsFreeNoWake := false
+	var decision voice.AddressDecision
+	if s.speakerVerifier != nil {
+		s.speakerVerifier.RecordObservation(match, text)
+		handsFreeNoWake = s.speakerVerifier.IsHandsFreeNoWake()
+		var lastAct time.Time
+		clientDevice := detectClientDevice(r, "")
+		if devSTM := s.stmForDevice(clientDevice); devSTM != nil {
+			lastAct = devSTM.GetLastActivity()
+		}
+		var cls voice.AddressClassifier
+		if s.npuProvider != nil {
+			cls = &npuAddressClassifier{provider: s.npuProvider}
+		}
+		decision = voice.EvaluateSpokenTurn(r.Context(), text, match, handsFreeNoWake, lastAct, cls)
+		fmt.Printf("[Server] [Speaker] mode=%s no_wake=%v owner=%v score=%.3f (centroid=%.3f best=%.3f dur=%.0fms infer=%.1fms) accept=%v intent=%s reason=%s\n",
+			match.Mode, handsFreeNoWake, match.IsOwner, match.Score, match.CentroidScore, match.BestSampleScore, match.DurationMs, match.InferMs, decision.ShouldAccept, decision.Intent, match.Reason)
+	}
+
+	resp := map[string]any{
+		"text":              text,
+		"speaker_available": match.Available,
+		"speaker_enrolled":  match.Enrolled,
+		"speaker_score":     match.Score,
+		"is_owner":          match.IsOwner,
+		"speaker_mode":      match.Mode,
+		"speaker_reason":    match.Reason,
+		"speaker_duration":  match.DurationMs,
+		"handsfree_no_wake": handsFreeNoWake,
+		"should_accept":     decision.ShouldAccept,
+		"address_intent":    decision.Intent,
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"text": text})
+	json.NewEncoder(w).Encode(resp)
+}
+
+type npuAddressClassifier struct {
+	provider *llm.AdaptiveProvider
+}
+
+func (c *npuAddressClassifier) ClassifyAddressedToPixel(ctx context.Context, utterance string) (bool, error) {
+	if c == nil || c.provider == nil {
+		return false, fmt.Errorf("npu provider not configured")
+	}
+	msgs := []llm.Message{
+		{
+			Role:    llm.RoleSystem,
+			Content: "Tu es un filtre d'écoute vocale. Détermine si l'utilisateur s'adresse à son assistant vocal (Pixel) ou parle à une autre personne / au téléphone / tout seul. Réponds STRICTEMENT par un seul mot : ASSISTANT ou TIERS.",
+		},
+		{
+			Role:    llm.RoleUser,
+			Content: `Phrase entendue : "` + utterance + `"`,
+		},
+	}
+	raw, err := c.provider.GenerateWithMaxTokens(ctx, msgs, 12)
+	if err != nil {
+		return false, err
+	}
+	upper := strings.ToUpper(strings.TrimSpace(raw))
+	if strings.Contains(upper, "ASSISTANT") {
+		return true, nil
+	}
+	if strings.Contains(upper, "TIERS") {
+		return false, nil
+	}
+	return false, fmt.Errorf("unexpected classifier output: %q", raw)
+}
+
+func (s *Server) handleVoiceSpeakerProfile(w http.ResponseWriter, r *http.Request) {
+	if s.speakerVerifier == nil {
+		http.Error(w, "Vérificateur vocal non initialisé", http.StatusServiceUnavailable)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(s.speakerVerifier.GetStatus(r.Context()))
+	case http.MethodPost:
+		var req struct {
+			Enabled         *bool    `json:"enabled"`
+			ObserveOnly     *bool    `json:"observe_only"`
+			HandsFreeNoWake *bool    `json:"handsfree_no_wake"`
+			Threshold       *float64 `json:"threshold"`
+			OwnerName       *string  `json:"owner_name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := s.speakerVerifier.UpdateSettings(req.Enabled, req.ObserveOnly, req.HandsFreeNoWake, req.Threshold, req.OwnerName); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(s.speakerVerifier.GetStatus(r.Context()))
+	case http.MethodDelete:
+		id := strings.TrimSpace(r.URL.Query().Get("id"))
+		if err := s.speakerVerifier.DeleteSample(id); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(s.speakerVerifier.GetStatus(r.Context()))
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleVoiceSpeakerEnroll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.speakerVerifier == nil {
+		http.Error(w, "Vérificateur vocal non initialisé", http.StatusServiceUnavailable)
+		return
+	}
+
+	tempWav, cleanup, statusCode, err := s.saveUploadedAudioAsWav(r)
+	if err != nil {
+		http.Error(w, err.Error(), statusCode)
+		return
+	}
+	defer cleanup()
+
+	device := r.FormValue("device")
+	phrase := r.FormValue("phrase")
+	res, err := s.speakerVerifier.EnrollWav(r.Context(), tempWav, device, phrase)
+	if err != nil {
+		if errors.Is(err, voice.ErrAudioTooShort) {
+			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
+		if errors.Is(err, voice.ErrSpeakerWorkerUnavailable) {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(res)
 }
 
 func (s *Server) handleVoiceSpeak(w http.ResponseWriter, r *http.Request) {
@@ -953,6 +1191,30 @@ func (s *Server) handleVoiceSpeak(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "audio/wav")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(audioBytes)))
 	w.Write(audioBytes)
+}
+
+var (
+	bridgeEarconOnce sync.Once
+	bridgeEarconWAV  []byte
+)
+
+func getBridgeEarconWAV() []byte {
+	bridgeEarconOnce.Do(func() {
+		bridgeEarconWAV = voice.BuildThinkingAlertWAV()
+	})
+	return bridgeEarconWAV
+}
+
+func (s *Server) handleBridgeSound(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	wav := getBridgeEarconWAV()
+	w.Header().Set("Content-Type", "audio/wav")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(wav)))
+	w.Write(wav)
 }
 
 func (s *Server) handleMediaDuck(w http.ResponseWriter, r *http.Request) {
@@ -1008,6 +1270,61 @@ func (s *Server) handleMediaStop(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.Write([]byte(`{"status": "ok"}`))
+}
+
+var (
+	reMixSessionID = regexp.MustCompile(`^[a-fA-F0-9]{8,32}$`)
+	reMixChunkFile = regexp.MustCompile(`^part_\d{3}\.(mp3|flac)$`)
+)
+
+func requestBaseURL(r *http.Request) string {
+	if r == nil || strings.TrimSpace(r.Host) == "" {
+		return "http://127.0.0.1:8080"
+	}
+	scheme := "http"
+	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		scheme = "https"
+	}
+	return scheme + "://" + r.Host
+}
+
+func (s *Server) handleMediaMix(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	sessionID := strings.TrimSpace(r.URL.Query().Get("session"))
+	fileName := strings.TrimSpace(r.URL.Query().Get("file"))
+	sig := strings.TrimSpace(r.URL.Query().Get("sig"))
+
+	if !reMixSessionID.MatchString(sessionID) || !reMixChunkFile.MatchString(fileName) || sig == "" {
+		http.Error(w, "Paramètres de mix invalides", http.StatusBadRequest)
+		return
+	}
+
+	sessionDir := filepath.Join("/tmp/pixel_openaudio_mix", sessionID)
+	tokenBytes, err := os.ReadFile(filepath.Join(sessionDir, "mix_token.txt"))
+	if err != nil {
+		http.Error(w, "Session mix introuvable", http.StatusNotFound)
+		return
+	}
+	expectedSig := strings.TrimSpace(string(tokenBytes))
+	if expectedSig == "" || subtle.ConstantTimeCompare([]byte(sig), []byte(expectedSig)) != 1 {
+		http.Error(w, "Non autorisé", http.StatusUnauthorized)
+		return
+	}
+
+	targetPath := filepath.Join(sessionDir, fileName)
+	if _, err := os.Stat(targetPath); err != nil {
+		http.Error(w, "Segment mix introuvable", http.StatusNotFound)
+		return
+	}
+	if strings.HasSuffix(fileName, ".mp3") {
+		w.Header().Set("Content-Type", "audio/mpeg")
+	} else {
+		w.Header().Set("Content-Type", "audio/flac")
+	}
+	http.ServeFile(w, r, targetPath)
 }
 
 // handleLocalModels proxies the /v1/models call to the configured local server

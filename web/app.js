@@ -352,10 +352,10 @@ document.addEventListener('DOMContentLoaded', () => {
                             const data = JSON.parse(dataStr);
                             if (data.error) {
                                 bubbleDiv.textContent += "\nErreur système: " + data.error;
-                            } else if (data.bridge) {
-                                // Intention vocale de transition (non ajoutée à la bulle ni à la mémoire)
+                            } else if (data.bridge_alert || data.bridge) {
+                                // Alerte sonore moderne et discrète (réponse en cours de construction)
                                 if (window.voiceController) {
-                                    window.voiceController.enqueueBridge(data.bridge);
+                                    window.voiceController.enqueueBridge(data.sound_url || '/api/sounds/bridge');
                                 }
                             } else if (data.chunk) {
                                 accumulatedText += data.chunk;
@@ -1382,10 +1382,12 @@ class VoiceController {
         this._isStopping = false; // Guard anti-doublon pour stopListening
         this.isWakeActive = false;
         this.wakeActiveTimer = null;
+        this.handsfreeNoWake = false;
         this.speechDetected = false;
 
         this._setupVoiceSelect();
         this._setupUI();
+        this._setupSpeakerSignatureUI();
     }
 
     /* ── Voix TTS ─────────────────────────────────────────────────────── */
@@ -1681,11 +1683,11 @@ class VoiceController {
             this.userInput.value = '';
             this.userInput.placeholder = this.isWakeActive
                 ? '🎤 Pixel vous écoute... Posez votre question.'
-                : (this.handsfreeEnabled ? '🎤 Dites « Pixel » pour activer l\'écoute...' : '🎤 Parlez maintenant...');
+                : (this.handsfreeEnabled ? this._passivePlaceholder() : '🎤 Parlez maintenant...');
         }
 
-        // Si le mode navigateur cloud est explicitement configuré et disponible
-        if (this.sttEngine === 'browser' && this.recognition) {
+        // Si le mode navigateur cloud est configuré, sauf si Phase 2 (signature vocale sans mot-clé) nécessite l'audio local ONNX
+        if (this.sttEngine === 'browser' && this.recognition && !(this.handsfreeEnabled && this.handsfreeNoWake)) {
             try {
                 this.recognition.start();
                 this.isListening = true;
@@ -1948,6 +1950,7 @@ class VoiceController {
         try {
             const response = await fetch('/api/voice/transcribe', {
                 method: 'POST',
+                headers: { 'X-Pixel-Device': 'web' },
                 body: formData
             });
 
@@ -1956,6 +1959,13 @@ class VoiceController {
             }
 
             const data = await response.json();
+            if (typeof data.handsfree_no_wake === 'boolean') {
+                this._syncHandsfreeNoWake(data.handsfree_no_wake);
+            }
+            if (data.speaker_available) {
+                console.log(`[VoiceController] Signature vocale: owner=${data.is_owner} score=${Number(data.speaker_score || 0).toFixed(3)} mode=${data.speaker_mode} reason=${data.speaker_reason} intent=${data.address_intent} accept=${data.should_accept}`);
+                this._renderSpeakerObservation(data);
+            }
             if (this.userInput) {
                 if (data.text && data.text.trim()) {
                     const cleaned = data.text.trim();
@@ -2021,12 +2031,26 @@ class VoiceController {
                             return;
                         }
 
-                        // 2. Veille passive : vérifier la présence du mot-clé
-                        const cmd = this._extractHandsfreeCommand(cleaned);
-                        if (cmd === null) {
+                        // 2. Veille passive : Phase 2 (Signature vocale sans mot-clé) ou Phase 1 (Mot-clé)
+                        let cmd = this._extractHandsfreeCommand(cleaned);
+                        if (this.handsfreeNoWake && typeof data.should_accept === 'boolean') {
+                            if (!data.should_accept) {
+                                console.log(`[VoiceController] Signature vocale / filtre refusé (intent=${data.address_intent}, score=${Number(data.speaker_score || 0).toFixed(3)}):`, cleaned);
+                                this.userInput.value = "";
+                                this.userInput.placeholder = this._passivePlaceholder();
+                                if (!this.isSpeakingSession) {
+                                    setTimeout(() => this.startListening(true), 100);
+                                }
+                                return;
+                            }
+                            if (cmd === null) {
+                                cmd = cleaned.replace(/[\s,:\-\.\!\?]*(?:envoi|envoyer|envoie)[\s,:\-\.\!\?]*$/i, '').trim();
+                                console.log(`[VoiceController] Commande sans mot-clé acceptée (${data.address_intent}) :`, cmd);
+                            }
+                        } else if (cmd === null) {
                             console.log("[VoiceController] Mains-libres : transcription ignorée (absence du mot-clé 'Pixel') :", cleaned);
                             this.userInput.value = "";
-                            this.userInput.placeholder = "🎤 Dites « Pixel » pour activer l'écoute...";
+                            this.userInput.placeholder = this._passivePlaceholder();
                             if (!this.isSpeakingSession) {
                                 setTimeout(() => this.startListening(true), 100);
                             }
@@ -2173,16 +2197,61 @@ class VoiceController {
         this.activeChatAbortController = controller;
     }
 
-    enqueueBridge(phrase) {
-        if (!this.isTtsEnabled || this.isStreamFinished || !phrase) return;
-        // Ne pas injecter de transition si la vraie réponse a déjà commencé à parler ou est en file
+    enqueueBridge(soundUrl) {
+        if (!this.isTtsEnabled || this.isStreamFinished) return;
+        // Ne pas jouer d'alerte si la vraie réponse a déjà commencé à parler ou est en file
         if (this.speechQueue.length > 0 || this.isSpeakingSentence || this.speechBuffer.trim().length > 0) {
             return;
         }
-        const cleaned = this.cleanTtsSentence(phrase);
-        if (cleaned.length > 1) {
-            this.speechQueue.push(cleaned);
-            this._playNext();
+        this._playModernThinkingChime(soundUrl || '/api/sounds/bridge');
+    }
+
+    _playModernThinkingChime(soundUrl) {
+        try {
+            if (!this._bridgeAudioEl || this._bridgeAudioUrl !== soundUrl) {
+                this._bridgeAudioUrl = soundUrl;
+                this._bridgeAudioEl = new Audio(soundUrl);
+                this._bridgeAudioEl.volume = 0.45;
+            }
+            this._bridgeAudioEl.currentTime = 0;
+            const playPromise = this._bridgeAudioEl.play();
+            if (playPromise && typeof playPromise.catch === 'function') {
+                playPromise.catch(() => this._playWebAudioThinkingChime());
+            }
+        } catch (e) {
+            this._playWebAudioThinkingChime();
+        }
+    }
+
+    _playWebAudioThinkingChime() {
+        try {
+            const AudioCtx = window.AudioContext || window.webkitAudioContext;
+            if (!AudioCtx) return;
+            if (!this._earconCtx) this._earconCtx = new AudioCtx();
+            const ctx = this._earconCtx;
+            if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+            const now = ctx.currentTime;
+
+            const playTone = (freq, startOffset, dur, peakGain) => {
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(freq, now + startOffset);
+                gain.gain.setValueAtTime(0.0001, now + startOffset);
+                gain.gain.exponentialRampToValueAtTime(peakGain, now + startOffset + 0.015);
+                gain.gain.exponentialRampToValueAtTime(0.0001, now + startOffset + dur);
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+                osc.start(now + startOffset);
+                osc.stop(now + startOffset + dur + 0.02);
+            };
+
+            // Accord ambiant E5 -> B5 + F#6 discret et moderne
+            playTone(659.25, 0.0, 0.24, 0.14);
+            playTone(987.77, 0.09, 0.32, 0.14);
+            playTone(1479.98, 0.09, 0.22, 0.035);
+        } catch (e) {
+            // Ignorer si AudioContext bloqué par le navigateur
         }
     }
 
@@ -2290,6 +2359,195 @@ class VoiceController {
         this.isSpeakingSentence = false;
         this.isSpeakingSession  = false;
         fetch('/api/media/duck?active=false').catch(() => {});
+    }
+
+    _passivePlaceholder() {
+        return this.handsfreeNoWake
+            ? '🗣️ Parlez librement à Pixel (Signature vocale active)...'
+            : "🎤 Dites « Pixel » pour activer l'écoute...";
+    }
+
+    _syncHandsfreeNoWake(enabled) {
+        this.handsfreeNoWake = Boolean(enabled);
+        const noWakeChk = document.getElementById('speaker-handsfree-nowake');
+        if (noWakeChk) noWakeChk.checked = this.handsfreeNoWake;
+        if (this.userInput && this.handsfreeEnabled && !this.isWakeActive) {
+            this.userInput.placeholder = this._passivePlaceholder();
+        }
+    }
+
+    _renderSpeakerObservation(obs) {
+        const el = document.getElementById('speaker-last-score');
+        if (!el || !obs) return;
+        const score = Number(obs.speaker_score ?? obs.score ?? 0).toFixed(3);
+        const enrolled = obs.speaker_enrolled ?? obs.enrolled;
+        const isOwner = obs.is_owner;
+        const reason = obs.speaker_reason ?? obs.reason ?? '';
+        const textHint = obs.transcript_hint ? ` · « ${obs.transcript_hint} »` : '';
+        if (!enrolled) {
+            el.textContent = 'Profil non enrôlé — enregistre 5 à 8 phrases (PC + mobile) pour calibrer.';
+            el.style.color = '#fbbf24';
+            return;
+        }
+        el.textContent = `Dernier score : ${score} (${isOwner ? 'Voix reconnue ✅' : `Hors seuil — ${reason}`})${textHint}`;
+        el.style.color = isOwner ? '#6ee7b7' : '#fca5a5';
+    }
+
+    async _setupSpeakerSignatureUI() {
+        const badgeEl = document.getElementById('speaker-status-badge');
+        const promptEl = document.getElementById('speaker-sample-prompt');
+        const enrollBtn = document.getElementById('speaker-enroll-btn');
+        const clearBtn = document.getElementById('speaker-clear-btn');
+        const threshSlider = document.getElementById('speaker-threshold');
+        const threshVal = document.getElementById('speaker-threshold-val');
+        const noWakeChk = document.getElementById('speaker-handsfree-nowake');
+        const observeChk = document.getElementById('speaker-observe-only');
+        if (!badgeEl || !enrollBtn) return;
+
+        const samplePrompts = [
+            "Bonjour Pixel, vérifie les actualités et mes messages du matin.",
+            "Lance une session de musique ou cherche un mix de 1983.",
+            "Rappelle-moi ce que nous avions prévu pour ce week-end.",
+            "Quel temps fait-il aujourd'hui et quelle heure est-il ?",
+            "Fais une recherche rapide sur le web et résume-moi l'essentiel.",
+            "Peux-tu baisser un peu le volume et mettre la suite en attente ?"
+        ];
+        let promptIdx = 0;
+
+        const updatePrompt = () => {
+            if (!promptEl) return;
+            promptEl.textContent = `Phrase suggérée : « ${samplePrompts[promptIdx % samplePrompts.length]} »`;
+        };
+
+        const refreshStatus = async () => {
+            try {
+                const res = await fetch('/api/voice/speaker/profile');
+                if (!res.ok) {
+                    badgeEl.textContent = 'Indisponible';
+                    badgeEl.style.color = '#fca5a5';
+                    return;
+                }
+                const st = await res.json();
+                if (!st.available) {
+                    badgeEl.textContent = 'Worker ONNX arrêté';
+                    badgeEl.style.color = '#fca5a5';
+                } else {
+                    badgeEl.textContent = `Prêt · ${st.sample_count || 0} échantillon(s)`;
+                    badgeEl.style.color = st.enrolled ? '#6ee7b7' : '#fbbf24';
+                }
+                if (threshSlider && typeof st.threshold === 'number') {
+                    threshSlider.value = st.threshold.toFixed(2);
+                    if (threshVal) threshVal.textContent = st.threshold.toFixed(2);
+                }
+                if (typeof st.handsfree_no_wake === 'boolean') {
+                    this._syncHandsfreeNoWake(st.handsfree_no_wake);
+                }
+                if (observeChk && typeof st.observe_only === 'boolean') {
+                    observeChk.checked = st.observe_only;
+                }
+                if (st.last_match) {
+                    this._renderSpeakerObservation(st.last_match);
+                }
+            } catch (_) {
+                badgeEl.textContent = 'Hors ligne';
+            }
+        };
+
+        const saveSettings = async (patch) => {
+            try {
+                const res = await fetch('/api/voice/speaker/profile', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(patch)
+                });
+                if (res.ok) await refreshStatus();
+            } catch (_) {}
+        };
+
+        if (threshSlider) {
+            threshSlider.addEventListener('input', () => {
+                if (threshVal) threshVal.textContent = parseFloat(threshSlider.value).toFixed(2);
+            });
+            threshSlider.addEventListener('change', () => {
+                saveSettings({ threshold: parseFloat(threshSlider.value) });
+            });
+        }
+        if (noWakeChk) {
+            noWakeChk.addEventListener('change', () => {
+                this._syncHandsfreeNoWake(noWakeChk.checked);
+                saveSettings({
+                    handsfree_no_wake: noWakeChk.checked,
+                    observe_only: !noWakeChk.checked
+                });
+            });
+        }
+        if (observeChk) {
+            observeChk.addEventListener('change', () => {
+                saveSettings({ observe_only: observeChk.checked });
+            });
+        }
+        if (clearBtn) {
+            clearBtn.addEventListener('click', async () => {
+                try {
+                    const res = await fetch('/api/voice/speaker/profile', { method: 'DELETE' });
+                    if (res.ok) {
+                        await refreshStatus();
+                        if (window.showToast) window.showToast('Profil vocal réinitialisé', 'info');
+                    }
+                } catch (_) {}
+            });
+        }
+
+        enrollBtn.addEventListener('click', async () => {
+            if (enrollBtn.disabled) return;
+            enrollBtn.disabled = true;
+            const origLabel = enrollBtn.textContent;
+            let stream = null;
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                const chunks = [];
+                const recorder = new MediaRecorder(stream);
+                recorder.ondataavailable = (e) => {
+                    if (e.data && e.data.size > 0) chunks.push(e.data);
+                };
+                const stopped = new Promise((resolve) => { recorder.onstop = resolve; });
+                recorder.start();
+                enrollBtn.textContent = '🔴 Parlez maintenant (3,5s)…';
+                await new Promise((r) => setTimeout(r, 3500));
+                recorder.stop();
+                await stopped;
+
+                enrollBtn.textContent = '⏳ Extraction empreinte…';
+                const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
+                const fd = new FormData();
+                fd.append('file', blob, 'enroll.webm');
+                fd.append('device', /Android|iPhone|iPad/i.test(navigator.userAgent) ? 'web-mobile' : 'web-pc');
+                fd.append('phrase', samplePrompts[promptIdx % samplePrompts.length]);
+
+                const res = await fetch('/api/voice/speaker/enroll', { method: 'POST', body: fd });
+                if (!res.ok) {
+                    const msg = await res.text();
+                    if (window.showToast) window.showToast(`Échec enrôlement : ${msg}`, 'error');
+                } else {
+                    const result = await res.json();
+                    promptIdx++;
+                    updatePrompt();
+                    await refreshStatus();
+                    if (window.showToast) {
+                        window.showToast(`Échantillon #${result.sample_count} ajouté (cohérence : ${Number(result.consistency_score).toFixed(3)})`, 'success');
+                    }
+                }
+            } catch (err) {
+                if (window.showToast) window.showToast(`Micro indisponible : ${err.message || err}`, 'error');
+            } finally {
+                if (stream) stream.getTracks().forEach((t) => t.stop());
+                enrollBtn.disabled = false;
+                enrollBtn.textContent = origLabel;
+            }
+        });
+
+        updatePrompt();
+        await refreshStatus();
     }
 }
 

@@ -364,11 +364,9 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 			}
 			task.AppendLog(failMsg)
 			if broadcaster != nil {
-				broadcaster.Broadcast(failMsg)
+				BroadcastFailureForTask(broadcaster, task, failMsg)
 			}
-			if stm != nil {
-				stm.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: failMsg})
-			}
+			AddMessageForTask(stm, task, llm.Message{Role: llm.RoleAssistant, Content: failMsg})
 			if origErr != nil {
 				return fmt.Errorf("%s: %w", reason, origErr)
 			}
@@ -385,7 +383,7 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 				}
 				task.AppendLog(msg)
 				if broadcaster != nil {
-					broadcaster.Broadcast("⚠️ " + msg)
+					BroadcastFailureForTask(broadcaster, task, "⚠️ "+msg)
 				}
 				return fmt.Errorf("%s", msg)
 			}
@@ -430,11 +428,9 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 				}
 				task.AppendLog(msg)
 				if broadcaster != nil {
-					broadcaster.Broadcast(msg)
+					BroadcastFailureForTask(broadcaster, task, msg)
 				}
-				if stm != nil {
-					stm.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: msg})
-				}
+				AddMessageForTask(stm, task, llm.Message{Role: llm.RoleAssistant, Content: msg})
 				return fmt.Errorf("publication bloquée par le vérificateur factuel : %s", report.Summary)
 			}
 		} else if factChecker != nil && !FactCheckEnabled() {
@@ -1252,8 +1248,8 @@ Formatte ta réponse EXACTEMENT avec la structure suivante :
 			formattedResponse += FormatBibliographicAuditSummary(biblioReport)
 		}
 
-		broadcaster.Broadcast(formattedResponse)
-		stm.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: formattedResponse})
+		BroadcastForTask(broadcaster, task, formattedResponse)
+		AddMessageForTask(stm, task, llm.Message{Role: llm.RoleAssistant, Content: formattedResponse})
 
 		return nil
 	}

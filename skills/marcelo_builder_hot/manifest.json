@@ -1,0 +1,5 @@
+{
+  "name": "marcelo_builder_hot",
+  "description": "Lance une session de musique en mode DJ/Remix dynamique avec tempo rapide et transitions énergiques sur les fichiers de Marcelo.",
+  "router_instructions": "Utilise cette action si l'utilisateur demande de lancer une session de musique, un remix, ou un DJ set avec un style dynamique ou rapide. Mets la requête de l'utilisateur dans query."
+}

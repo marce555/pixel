@@ -150,9 +150,9 @@ Agis comme un chercheur et vulgarisateur scientifique de haut niveau. Pour toute
 ---
 🎶 *Tâche complétée avec succès en arrière-plan.*`, task.Payload, finalDoc)
 
-		// Broadcast through the EventHub SSE stream
-		broadcaster.Broadcast(formattedResponse)
-		stm.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: formattedResponse})
+		// Broadcast exclusively to the originating client device through EventHub SSE
+		BroadcastForTask(broadcaster, task, formattedResponse)
+		AddMessageForTask(stm, task, llm.Message{Role: llm.RoleAssistant, Content: formattedResponse})
 
 		task.AppendLog("Rapport final diffusé au chat utilisateur avec succès !")
 		return nil

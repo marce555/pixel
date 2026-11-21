@@ -269,7 +269,7 @@ func NewResearchTaskHandler(researcher *WebResearcherAgent, broadcaster EventBro
 
 		var convContext strings.Builder
 		if stm != nil {
-			msgs := stm.GetMessages()
+			msgs := stm.GetMessagesForDevice(task.TargetDevice)
 			start := 0
 			if len(msgs) > 4 {
 				start = len(msgs) - 4
@@ -332,9 +332,9 @@ CONSIGNES D'INTÉGRATION COGNITIVE :
 			}
 		}
 
-		broadcaster.Broadcast(finalMessage)
+		scheduler.BroadcastForTask(broadcaster, task, finalMessage)
 		if stm != nil {
-			stm.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: finalMessage})
+			scheduler.AddMessageForTask(stm, task, llm.Message{Role: llm.RoleAssistant, Content: finalMessage})
 		}
 		task.AppendLog("Synthèse intégrée diffusée dans la conversation avec succès !")
 

@@ -369,7 +369,9 @@ def analyze_track_openaudio(
     cached = cache.get(path)
     if cached and abs(cached.get("mtime", 0.0) - mtime) < 1e-3 and cached.get("size") == size:
         valid_fields = TrackInfo.__dataclass_fields__
-        return TrackInfo(**{k: v for k, v in cached.items() if k in valid_fields})
+        kwargs = {k: v for k, v in cached.items() if k in valid_fields}
+        kwargs.setdefault("path", path)
+        return TrackInfo(**kwargs)
 
     mixxx_entry = mixxx_index.get(path) or mixxx_index.get(os.path.realpath(path))
     duration = (mixxx_entry or {}).get("duration", 0.0)
@@ -620,6 +622,31 @@ def _strip_trailing_device_hints(text: str) -> str:
     return cleaned
 
 
+_TRACK_COUNT_PATTERN = re.compile(
+    r"(?:^|\s)(?:(?:pour|de|d'|avec|sur|limite\s+[àa])\s+)?(\d{1,3})\s+(?:titres?|morceaux?|pistes?|chansons?|sons?|tracks?)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def extract_requested_track_count(raw_query: str) -> Optional[int]:
+    """
+    Extracts an explicit track count if the user specified one (e.g. '5 titres',
+    '12 morceaux', '8 tracks'). Returns None when no count is requested, allowing
+    the mix to run continuously. Never matches folder numbers like '125 BPM' or '80s'.
+    """
+    m = _TRACK_COUNT_PATTERN.search(raw_query or "")
+    if not m:
+        return None
+    val = int(m.group(1))
+    return val if val >= 1 else None
+
+
+def _strip_track_count_clause(text: str) -> str:
+    cleaned = _TRACK_COUNT_PATTERN.sub(" ", text or "")
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    return cleaned.strip("\"'«».,!?")
+
+
 def extract_requested_folder_and_start_track(raw_query: str) -> Tuple[str, str]:
     """
     Extracts (folder_hint, start_track_hint) from natural queries such as:
@@ -627,7 +654,7 @@ def extract_requested_folder_and_start_track(raw_query: str) -> Tuple[str, str]:
     - "lance un mix avec discoteque-80s et commence par Don't Go"
     - "lance Concierto Discoteque 125 BPM best 80's"
     """
-    q = _strip_trailing_device_hints(raw_query or "")
+    q = _strip_track_count_clause(_strip_trailing_device_hints(raw_query or ""))
     if not q:
         return "", ""
 
@@ -649,7 +676,7 @@ def extract_requested_folder_and_start_track(raw_query: str) -> Tuple[str, str]:
             ).strip().strip("\"'«».,!?")
             if cand_st:
                 start_track = cand_st
-                q = _strip_trailing_device_hints(q[: m_st.start()])
+                q = _strip_track_count_clause(_strip_trailing_device_hints(q[: m_st.start()]))
                 break
 
     if not q:
@@ -667,10 +694,17 @@ def extract_requested_folder_and_start_track(raw_query: str) -> Tuple[str, str]:
             return "", start_track
         return folder, start_track
 
-    # Explicit pattern: "... mix avec <folder>"
-    m = re.search(r"\bmix\s+avec\s+(?:le\s+(?:r[eé]pertoire|dossier)\s+)?(.+)$", q, flags=re.IGNORECASE)
+    # Explicit pattern: "... mix avec/dans/du/de <folder>"
+    m = re.search(
+        r"\bmix\s+(?:avec|dans|du|de|sur)\s+(?:le\s+(?:r[eé]pertoire|dossier)\s+)?(.+)$",
+        q,
+        flags=re.IGNORECASE,
+    )
     if m:
-        return _strip_trailing_device_hints(m.group(1)), start_track
+        cand_folder = _strip_trailing_device_hints(m.group(1))
+        if normalize_token(cand_folder) in {"", "pc", "mon pc", "telephone", "mon telephone", "mobile"}:
+            return "", start_track
+        return cand_folder, start_track
 
     # Check if user wrote "dans le répertoire X" / "du dossier X"
     m2 = re.search(r"\b(?:dans|du|de)\s+(?:le\s+)?(?:r[eé]pertoire|dossier)\s+(.+)$", q, flags=re.IGNORECASE)
@@ -684,12 +718,13 @@ def extract_requested_folder_and_start_track(raw_query: str) -> Tuple[str, str]:
         "fais un mix", "fais moi un mix", "genere un mix", "cree un mix",
         "joue un mix", "mix", "mix dj", "openaudio", "mix openaudio",
         "lance un mix dj", "lance un mix openaudio", "un mix",
+        "lance un mix continu", "fais un mix continu", "mix continu",
     }
     if lower_norm in generic_triggers:
         return "", start_track
 
     # If query mentions generic mix words without naming a folder
-    if re.match(r"^(?:pixel\s+)?(?:lance|lances|mets|met|fais|fai|genere|cree|joue)(?:\s+moi)?\s+un\s+mix(?:\s+(?:dj|openaudio|aleatoire|au\s+hasard|sur\s+mon\s+pc|sur\s+mon\s+tel.*))?$", lower_norm):
+    if re.match(r"^(?:pixel\s+)?(?:lance|lances|mets|met|fais|fai|genere|cree|joue)(?:\s+moi)?\s+un\s+mix(?:\s+(?:dj|openaudio|continu|aleatoire|au\s+hasard|sur\s+mon\s+pc|sur\s+mon\s+tel.*))?$", lower_norm):
         return "", start_track
 
     return q, start_track
@@ -1055,6 +1090,138 @@ def select_pro_dj_set(
         remaining.remove(chosen)
 
     return mode, folder_label, ordered, anchor_bpm
+
+
+def pick_next_continuous_track(
+    curr_meta: dict,
+    folder_path: str,
+    played_paths: List[str],
+    anchor_bpm: float,
+    max_candidates: int = 12,
+) -> Optional[dict]:
+    """
+    Dynamically selects, analyzes (using cache when fresh), and scores the next compatible
+    track for endless continuous DJ mixing once the initial planned batch runs through.
+    Respects an anti-repeat cooldown window so songs don't repeat prematurely.
+    """
+    if folder_path:
+        pool = collect_audio_files(folder_path, recursive=True)
+    else:
+        pool = collect_random_library_files()
+
+    if len(pool) < 2:
+        return None
+
+    # Deduplicate preserving order
+    unique_pool = list(dict.fromkeys(pool))
+    if len(unique_pool) < 2:
+        return None
+
+    cooldown = min(len(unique_pool) - 1, max(12, int(len(unique_pool) * 0.75)))
+    blocked = set(played_paths[-cooldown:]) if cooldown > 0 else set()
+    avail = [p for p in unique_pool if p not in blocked]
+    if not avail:
+        # Should rarely trigger thanks to cooldown < len(unique_pool), but safe fallback
+        last_one = played_paths[-1] if played_paths else ""
+        avail = [p for p in unique_pool if p != last_one] or unique_pool
+
+    mixxx_index = load_mixxx_index()
+    cache = load_analysis_cache()
+    if folder_path:
+        folder_cache = load_folder_analysis_cache(folder_path)
+        for p, meta in folder_cache.items():
+            if p not in cache:
+                cache[p] = meta
+
+    random.shuffle(avail)
+    if not folder_path:
+        # In library-wide continuous mode, prefer candidates with known rhythmic proximity + a couple fresh picks
+        close_bpm = []
+        fresh = []
+        for p in avail:
+            meta = cache.get(p) or mixxx_index.get(p) or mixxx_index.get(os.path.realpath(p))
+            if meta:
+                fbpm = float(meta.get("bpm", 0.0))
+                if 96.0 <= fbpm <= 138.0 and (
+                    abs(fbpm - anchor_bpm) <= 10.0 or abs(fbpm * 2.0 - anchor_bpm) <= 10.0
+                ):
+                    close_bpm.append(p)
+                    continue
+            else:
+                fresh.append(p)
+        sample_paths = close_bpm[: max(1, max_candidates - 2)] + fresh[:2]
+        if len(sample_paths) < max_candidates:
+            seen_s = set(sample_paths)
+            for p in avail:
+                if p not in seen_s:
+                    sample_paths.append(p)
+                    seen_s.add(p)
+                if len(sample_paths) >= max_candidates:
+                    break
+    else:
+        known = [p for p in avail if p in cache or p in mixxx_index]
+        unknown = [p for p in avail if p not in cache and p not in mixxx_index]
+        n_known = max(0, max_candidates - min(4, len(unknown)))
+        sample_paths = known[:n_known] + unknown[: max(0, max_candidates - len(known[:n_known]))]
+        if len(sample_paths) < max_candidates:
+            rest = [p for p in avail if p not in set(sample_paths)]
+            sample_paths.extend(rest[: max_candidates - len(sample_paths)])
+
+    analyzed: List[TrackInfo] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool_ex:
+        for res in pool_ex.map(lambda p: analyze_track_openaudio(p, mixxx_index, cache), sample_paths):
+            if res is not None:
+                analyzed.append(res)
+
+    if not analyzed:
+        return None
+
+    save_analysis_cache(cache)
+    if folder_path:
+        merged_fc = load_folder_analysis_cache(folder_path)
+        for t in analyzed:
+            merged_fc[t.path] = asdict(t)
+        save_folder_analysis_cache(folder_path, merged_fc)
+
+    curr_track = TrackInfo(
+        path=str(curr_meta.get("path", "")),
+        title=str(curr_meta.get("title", "")),
+        artist=str(curr_meta.get("artist", "")),
+        duration=float(curr_meta.get("duration", 0.0)),
+        bpm=float(curr_meta.get("bpm", anchor_bpm)),
+        camelot=str(curr_meta.get("camelot", "8A")),
+        key_name=str(curr_meta.get("key", "")),
+        energy=float(curr_meta.get("energy", 0.5)),
+        rms_db=float(curr_meta.get("rms_db", -14.0)),
+        intro_trim=float(curr_meta.get("intro_trim", 0.0)),
+        outro_start=float(curr_meta.get("outro_start", 180.0)),
+        mtime=float(curr_meta.get("mtime", 0.0)),
+        size=int(curr_meta.get("size", 0)),
+    )
+
+    scored = []
+    for cand in analyzed:
+        sc, _ = transition_compatibility(curr_track, cand, anchor_bpm)
+        if curr_track.artist and cand.artist and curr_track.artist.lower() == cand.artist.lower():
+            sc -= 12.0
+        scored.append((sc, cand))
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    top_pool = [item[1] for item in scored[:3] if item[0] >= scored[0][0] - 10.0]
+    chosen = random.choice(top_pool) if top_pool else scored[0][1]
+    return {
+        "path": chosen.path,
+        "title": chosen.title,
+        "artist": chosen.artist,
+        "duration": chosen.duration,
+        "bpm": chosen.bpm,
+        "camelot": chosen.camelot,
+        "key": chosen.key_name,
+        "energy": chosen.energy,
+        "rms_db": chosen.rms_db,
+        "intro_trim": chosen.intro_trim,
+        "outro_start": chosen.outro_start,
+    }
 
 
 def unclamped_bpm_ratio(track_bpm: float, target_bpm: float) -> float:

@@ -31,6 +31,7 @@ from openaudio_engine import (
     estimate_out_tail_bpm,
     find_best_jingle_spot_in_body,
     overlay_jingle_with_ducking,
+    pick_next_continuous_track,
     render_echo_drop_it_transition,
     render_transition_with_effect,
     snap_beat_sample,
@@ -80,6 +81,8 @@ def main():
     audio_format = plan.get("audio_format", "flac")
     ext = "mp3" if audio_format == "mp3" else "flac"
     concierto_mode = bool(plan.get("concierto_discoteque", False))
+    continuous = bool(plan.get("continuous", False)) and (not batch_mode)
+    folder_path = str(plan.get("folder_path", "") or "")
     transition_pref = str(plan.get("transition_type", "auto") or "auto").lower()
     effect_pref = str(plan.get("effect", "auto") or "auto").lower()
     mix_in_override = plan.get("mix_in_sec")
@@ -88,7 +91,7 @@ def main():
     last_singel = None
     prev_energy = float(tracks[0].get("energy", 0.5)) if tracks else 0.5
 
-    if len(tracks) <= 1:
+    if len(tracks) <= 1 and not continuous:
         return
 
     sock_path = ""
@@ -102,22 +105,66 @@ def main():
     last_mode = None
     current_bpm = float(tracks[0].get("bpm", anchor_bpm))
     current_anchor = current_bpm
-    max_idx = min(len(tracks), 6) if batch_mode else len(tracks)
-    for idx in range(1, max_idx):
+    played_paths = [str(tracks[0].get("path", ""))] if tracks and tracks[0].get("path") else []
+    cleanup_idx = 0
+    idx = 1
+    mpv_alive = True
+
+    while True:
+        if batch_mode and idx >= min(len(tracks), 6):
+            break
+        if not continuous and idx >= len(tracks):
+            break
+
         if not batch_mode:
             if not os.path.exists(sock_path):
+                mpv_alive = False
                 break
 
-            # Backpressure: stay at most 2 tracks ahead of playback
+            # Backpressure: stay at most 2 tracks ahead of playback, and clean up old played chunks
             while os.path.exists(sock_path):
                 try:
                     res = mpv_ipc_call(sock_path, {"command": ["get_property", "playlist-pos"]})
                     pos = res.get("data", 0)
-                    if isinstance(pos, int) and (idx - pos) <= 2:
-                        break
+                    if isinstance(pos, int):
+                        while cleanup_idx <= pos - 2:
+                            old_chunk = os.path.join(session_dir, f"part_{cleanup_idx:03d}.{ext}")
+                            for p_rm in (old_chunk, old_chunk + ".ready"):
+                                if os.path.exists(p_rm):
+                                    try:
+                                        os.remove(p_rm)
+                                    except OSError:
+                                        pass
+                            cleanup_idx += 1
+                        if (idx - pos) <= 2:
+                            break
                 except Exception:
-                    return
+                    mpv_alive = False
+                    break
                 time.sleep(2.0)
+            if not mpv_alive:
+                break
+
+        if idx >= len(tracks):
+            if not continuous:
+                break
+            prev_meta = tracks[-1] if tracks else {}
+            next_tr = pick_next_continuous_track(
+                curr_meta=prev_meta,
+                folder_path=folder_path,
+                played_paths=played_paths,
+                anchor_bpm=current_anchor,
+                max_candidates=12,
+            )
+            if not next_tr:
+                print("[openaudio-worker] No further eligible track found; ending continuous mix.", flush=True)
+                break
+            next_tr["index"] = len(tracks) + 1
+            tracks.append(next_tr)
+            print(
+                f"[openaudio-worker] Continuous queue +{next_tr['index']}: {next_tr.get('artist','')} - {next_tr.get('title','')} ({next_tr.get('bpm',0):.1f} BPM, {next_tr.get('camelot','')})",
+                flush=True,
+            )
 
         tail_path = os.path.join(session_dir, f"tail_{idx - 1:03d}.npy")
         if not os.path.exists(tail_path):
@@ -130,6 +177,8 @@ def main():
             break
 
         tr = tracks[idx]
+        if tr.get("path"):
+            played_paths.append(str(tr["path"]))
         try:
             st = os.stat(tr["path"])
             refined = ensure_track_mix_windows(TrackInfo(
@@ -173,9 +222,13 @@ def main():
                 current_rms_db=float(tr.get("rms_db", -14.0)),
             )
         except Exception:
+            np.save(os.path.join(session_dir, f"tail_{idx:03d}.npy"), out_tail)
+            idx += 1
             continue
 
         if len(audio_i) < TARGET_SR * 20:
+            np.save(os.path.join(session_dir, f"tail_{idx:03d}.npy"), out_tail)
+            idx += 1
             continue
 
         raw_intro = float(mix_in_override) if mix_in_override is not None else float(tr.get("intro_trim", 0.0))
@@ -297,7 +350,10 @@ def main():
             body_start = in_sample
             current_bpm = round(playing_bpm, 2)
 
-        if idx < max_idx - 1:
+        max_idx = min(len(tracks), 6) if batch_mode else len(tracks)
+        has_more = continuous or (idx < max_idx - 1)
+        next_tail = np.zeros((0, 2), dtype=np.float32)
+        if has_more:
             if mix_out_override is not None:
                 approx_out_sec = float(mix_out_override) / max(ratio, 0.5)
             else:
@@ -356,26 +412,40 @@ def main():
             with open(chunk_path + ".ready", "w", encoding="utf-8") as rf:
                 rf.write("ok")
         except Exception:
+            if has_more and not os.path.exists(os.path.join(session_dir, f"tail_{idx:03d}.npy")):
+                np.save(os.path.join(session_dir, f"tail_{idx:03d}.npy"), out_tail)
+            idx += 1
             continue
 
         if not batch_mode:
             if not os.path.exists(sock_path):
+                mpv_alive = False
                 break
             try:
                 mpv_ipc_call(sock_path, {"command": ["loadfile", chunk_path, "append"]})
             except Exception:
+                mpv_alive = False
                 break
+
+        idx += 1
 
     if batch_mode:
         return
 
-    # Wait while mpv is still active, then clean up temporary mix files
-    while os.path.exists(sock_path):
+    # Wait while mpv is still active, then preserve worker.log and clean up temporary mix files
+    while mpv_alive and os.path.exists(sock_path):
         try:
             mpv_ipc_call(sock_path, {"command": ["get_property", "pid"]})
             time.sleep(5.0)
         except Exception:
             break
+
+    try:
+        wlog_path = os.path.join(session_dir, "worker.log")
+        if os.path.exists(wlog_path):
+            shutil.copy2(wlog_path, "/tmp/pixel_openaudio_last_worker.log")
+    except Exception:
+        pass
 
     try:
         shutil.rmtree(session_dir, ignore_errors=True)

@@ -7,8 +7,8 @@ description: Moteur DJ OpenAudio (librosa, Mixxx DB, FFmpeg Rubberband, SciPy/Nu
 
 ## Architecture & Non-Blocking Design
 - **`skills/openaudio_dj_mix/manifest.json`** : Déclaration chargée par `internal/skills/manager.go`.
-- **`skills/openaudio_dj_mix/run.py`** : Point d'entrée rapide. Décode uniquement la piste #1 (`part_000`) en solo depuis le début réel (`find_leading_silence_sample`), écrit `plan.json` et lance le worker détaché `openaudio_mix_worker.py` en arrière-plan pour ne **jamais bloquer** le thread principal Go.
-- **`skills/openaudio_dj_mix/openaudio_mix_worker.py`** : Génère progressivement `part_001 .. part_N` en avance sur la lecture (`mpv` IPC gapless sur PC ou `--batch` + `/api/media/mix` sur Android).
+- **`skills/openaudio_dj_mix/run.py`** : Point d'entrée rapide. Décode uniquement la piste #1 (`part_000`) en solo depuis le début réel (`find_leading_silence_sample`), écrit `plan.json` et lance le worker détaché `openaudio_mix_worker.py` en arrière-plan pour ne **jamais bloquer** le thread principal Go. Mode **continu sans fin par défaut** sur PC sauf si un nombre explicite de titres est demandé (`5 titres`, `--max-tracks N`).
+- **`skills/openaudio_dj_mix/openaudio_mix_worker.py`** : Génère progressivement `part_001 ..` en avance sur la lecture (`mpv` IPC gapless sur PC avec ré-enchaînement continu via `pick_next_continuous_track` et nettoyage glissant des chunks déjà joués, ou `--batch` sur Android).
 - **`skills/openaudio_dj_mix/openaudio_engine.py`** : Cerveau d'analyse (BPM, Camelot Wheel, HPSS intro/outro, cache global + cache JSON local par répertoire dans `~/.cache/pixel_openaudio_dj/folders/`) et moteur DSP (`Rubberband`, `soxr`, `EBU R128 LUFS`, transitions & effets 80s).
 - **Routage Go** : `internal/agent/superior.go` (`detectOpenAudioMixIntent` / `handleOpenAudioMixDirect`) et `internal/scheduler/handlers.go`.
 

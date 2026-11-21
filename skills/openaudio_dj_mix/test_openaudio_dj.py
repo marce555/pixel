@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 import numpy as np
+import soundfile as sf
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -27,6 +28,7 @@ from openaudio_engine import (
     extract_local_beat_samples,
     extract_requested_folder_and_start_track,
     extract_requested_folder_query,
+    extract_requested_track_count,
     find_best_echo_cue_in_tail,
     find_best_jingle_spot_in_body,
     find_concierto_apertura_path,
@@ -38,6 +40,7 @@ from openaudio_engine import (
     measure_integrated_lufs,
     normalize_audio_lufs,
     overlay_jingle_with_ducking,
+    pick_next_continuous_track,
     render_beatlocked_crossfade,
     render_drop_in_transition,
     render_echo_drop_it_transition,
@@ -594,6 +597,75 @@ class TestOpenAudioDJEngine(unittest.TestCase):
         self.assertGreaterEqual(len(mid_beats), 12)
         ibi_ms = (np.diff(mid_beats) / float(TARGET_SR)) * 1000.0
         self.assertLess(float(np.max(np.abs(ibi_ms - 500.0))), 16.0)
+
+    def test_continuous_mix_track_count_parsing_and_next_picker(self):
+        # 1. Explicit track counts vs default continuous mode (None), never misreading '125 BPM' or '80s'
+        self.assertIsNone(extract_requested_track_count("lance Concierto Discoteque 125 BPM best 80's"))
+        self.assertIsNone(extract_requested_track_count("lance un mix avec discoteque-80s"))
+        self.assertEqual(extract_requested_track_count("lance un mix avec 5 titres de discoteque-80s"), 5)
+        self.assertEqual(extract_requested_track_count("lance Concierto Discoteque 12 morceaux REMIX-80 en commençant par Celebration"), 12)
+        self.assertEqual(extract_requested_track_count("fais un mix de 7 pistes"), 7)
+
+        self.assertEqual(extract_requested_folder_and_start_track("lance Concierto Discoteque 125 BPM best 80's"), ("125 BPM best 80's", ""))
+        self.assertEqual(extract_requested_folder_and_start_track("lance un mix avec 5 titres de discoteque-80s"), ("discoteque-80s", ""))
+        self.assertEqual(
+            extract_requested_folder_and_start_track("lance Concierto Discoteque 12 morceaux REMIX-80 en commençant par Celebration"),
+            ("REMIX-80", "Celebration"),
+        )
+        self.assertEqual(extract_requested_folder_and_start_track("fais un mix de 7 pistes"), ("", ""))
+
+        # 2. pick_next_continuous_track selects unplayed compatible tracks without immediate repeats
+        with tempfile.TemporaryDirectory() as td:
+            paths = []
+            folder_cache = {}
+            for i in range(4):
+                p = os.path.join(td, f"track_{i}.wav")
+                # >100KB dummy wav on disk + fresh folder cache metadata so analysis is instant
+                sig = np.zeros((30000, 2), dtype=np.float32)
+                sf.write(p, sig, TARGET_SR)
+                st = os.stat(p)
+                paths.append(p)
+                folder_cache[p] = {
+                    "path": p,
+                    "title": f"Track {i}",
+                    "artist": f"Artist {i}",
+                    "duration": 220.0,
+                    "bpm": 120.0 + i * 0.5,
+                    "camelot": "8A",
+                    "key_name": "Am",
+                    "energy": 0.65,
+                    "rms_db": -14.0,
+                    "intro_trim": 4.0,
+                    "outro_start": 195.0,
+                    "vocal_ratio": 0.25,
+                    "mtime": float(st.st_mtime),
+                    "size": int(st.st_size),
+                    "hpss_done": True,
+                    "hpss_ver": 6,
+                }
+            save_folder_analysis_cache(td, folder_cache)
+
+            curr = {
+                "path": paths[0],
+                "title": "Track 0",
+                "artist": "Artist 0",
+                "duration": 220.0,
+                "bpm": 120.0,
+                "camelot": "8A",
+                "key": "Am",
+                "energy": 0.65,
+                "rms_db": -14.0,
+                "intro_trim": 4.0,
+                "outro_start": 195.0,
+            }
+            nxt = pick_next_continuous_track(curr, td, played_paths=[paths[0], paths[1], paths[2]], anchor_bpm=120.0)
+            self.assertIsNotNone(nxt)
+            self.assertEqual(nxt["path"], paths[3])
+
+            # When all tracks have been played, still rotates to a track other than the immediate previous one
+            nxt_cycle = pick_next_continuous_track(nxt, td, played_paths=paths, anchor_bpm=120.0)
+            self.assertIsNotNone(nxt_cycle)
+            self.assertNotEqual(nxt_cycle["path"], paths[3])
 
 
 if __name__ == "__main__":

@@ -42,6 +42,7 @@ from openaudio_engine import (  # noqa: E402
     decode_full_track_stretched,
     ensure_track_mix_windows,
     extract_requested_folder_and_start_track,
+    extract_requested_track_count,
     find_concierto_apertura_path,
     find_leading_silence_sample,
     is_concierto_discoteque_query,
@@ -71,7 +72,7 @@ def cleanup_old_sessions(max_age_sec: float = 3600.0 * 4) -> None:
             pass
 
 
-def format_announcement(mode: str, folder_label: str, anchor_bpm: float, tracks: list) -> str:
+def format_announcement(mode: str, folder_label: str, anchor_bpm: float, tracks: list, continuous: bool = False) -> str:
     if not tracks:
         return "Mix OpenAudio prêt !"
     t1 = tracks[0]
@@ -79,9 +80,19 @@ def format_announcement(mode: str, folder_label: str, anchor_bpm: float, tracks:
     artist1 = f" de {t1.artist}" if t1.artist else ""
     bpm_int = int(round(anchor_bpm))
     if mode == "folder":
+        if continuous:
+            return (
+                f"Mix OpenAudio continu activé sur {folder_label}, calé autour de {bpm_int} BPM. "
+                f"On démarre avec {title1}{artist1} !"
+            )
         return (
-            f"Mix OpenAudio activé sur {folder_label}, calé autour de {bpm_int} BPM. "
+            f"Mix OpenAudio activé sur {folder_label}, calé autour de {bpm_int} BPM ({len(tracks)} titres). "
             f"On démarre avec {title1}{artist1} !"
+        )
+    if continuous:
+        return (
+            f"Mix OpenAudio continu aléatoire lancé au rythme de {bpm_int} BPM ! "
+            f"On démarre en commençant par {title1}{artist1}."
         )
     return (
         f"Mix OpenAudio aléatoire lancé au rythme de {bpm_int} BPM ! "
@@ -99,10 +110,12 @@ def build_and_start_mix(
     mix_out_sec: float = None,
     explicit_folder: str = "",
     explicit_start_track: str = "",
+    max_tracks: int = None,
 ) -> dict:
     cleanup_old_sessions()
 
     concierto_mode = is_concierto_discoteque_query(raw_query)
+    requested_count = max_tracks if (max_tracks is not None and max_tracks >= 1) else extract_requested_track_count(raw_query)
     folder_hint, start_track_hint = extract_requested_folder_and_start_track(raw_query)
     if explicit_folder:
         folder_hint = explicit_folder
@@ -119,11 +132,13 @@ def build_and_start_mix(
                 f"Dossiers disponibles : {preview}"
             )
 
+    initial_count = requested_count if requested_count is not None else 10
     mode, folder_label, ordered_tracks, anchor_bpm = select_pro_dj_set(
         folder_path,
-        max_tracks=10,
+        max_tracks=initial_count,
         start_track_hint=start_track_hint,
     )
+    continuous = (requested_count is None) and (not android_mode) and (len(ordered_tracks) > 1)
 
     apertura_audio = None
     if concierto_mode:
@@ -219,6 +234,9 @@ def build_and_start_mix(
         "session_dir": session_dir,
         "mode": out_mode,
         "concierto_discoteque": concierto_mode,
+        "continuous": continuous,
+        "requested_track_count": requested_count,
+        "folder_path": folder_path or "",
         "folder_label": folder_label,
         "anchor_bpm": anchor_bpm,
         "audio_format": audio_format,
@@ -233,7 +251,7 @@ def build_and_start_mix(
 
     # Launch detached background worker to render beatmatched transitions ahead of playback
     worker_script = os.path.join(SCRIPT_DIR, "openaudio_mix_worker.py")
-    if len(ordered_tracks) > 1:
+    if len(ordered_tracks) > 1 or continuous:
         worker_args = [VENV_PYTHON if os.path.exists(VENV_PYTHON) else sys.executable, worker_script, session_dir]
         if android_mode:
             worker_args.append("--batch")
@@ -250,11 +268,14 @@ def build_and_start_mix(
         )
         wlog.close()
 
-    announcement = "" if concierto_mode else format_announcement(mode, folder_label, anchor_bpm, ordered_tracks)
+    announcement = "" if concierto_mode else format_announcement(
+        mode, folder_label, anchor_bpm, ordered_tracks, continuous=continuous
+    )
 
     return {
         "status": "ok",
         "mode": out_mode,
+        "continuous": continuous,
         "folder_label": folder_label,
         "session_id": session_id,
         "session_dir": session_dir,
@@ -331,6 +352,7 @@ def _parse_cli_tokens(args: list) -> dict:
         "mix_out_sec": None,
         "explicit_folder": "",
         "explicit_start_track": "",
+        "max_tracks": None,
         "render_test": None,
         "out_path": "/tmp/openaudio_transition_test.flac",
         "query": "",
@@ -348,6 +370,9 @@ def _parse_cli_tokens(args: list) -> dict:
                 cfg["mix_out_sec"] = data.get("mix_out_sec")
                 cfg["explicit_folder"] = str(data.get("folder", "") or "")
                 cfg["explicit_start_track"] = str(data.get("start_track", "") or "")
+                mt = data.get("max_tracks", data.get("tracks"))
+                if mt is not None:
+                    cfg["max_tracks"] = int(mt)
                 cfg["query"] = str(data.get("query", "") or "")
                 return cfg
         except Exception:
@@ -361,6 +386,9 @@ def _parse_cli_tokens(args: list) -> dict:
             cfg["json_mode"] = True
         elif tok == "--android":
             cfg["android_mode"] = True
+        elif tok in ("--max-tracks", "--tracks") and i + 1 < len(tokens):
+            cfg["max_tracks"] = int(tokens[i + 1])
+            i += 1
         elif tok == "--transition-type" and i + 1 < len(tokens):
             cfg["transition_type"] = tokens[i + 1]
             i += 1
@@ -416,6 +444,7 @@ def main():
             mix_out_sec=cfg["mix_out_sec"],
             explicit_folder=cfg["explicit_folder"],
             explicit_start_track=cfg["explicit_start_track"],
+            max_tracks=cfg["max_tracks"],
         )
         if json_mode:
             print(json.dumps(result, ensure_ascii=False))

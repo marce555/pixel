@@ -293,6 +293,7 @@ func (s *Server) Start(port string) error {
 	mux.HandleFunc("/api/media/stream_ended", s.handleMediaStreamEnded)
 	mux.HandleFunc("/api/media/stop", s.handleMediaStop)
 	mux.HandleFunc("/api/media/mix", s.handleMediaMix)
+	mux.HandleFunc("/api/media/live_radio", s.handleLiveRadioMix)
 
 	if strings.TrimSpace(os.Getenv("PIXEL_API_TOKEN")) != "" {
 		fmt.Println("[Security] Protection par Token activée pour toutes les connexions externes (hors localhost).")
@@ -374,7 +375,7 @@ func extractRequestToken(r *http.Request) string {
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Autoriser le téléchargement direct de l'APK et les flux mix signés par jeton de session
-		if r.URL.Path == "/api/apk" || r.URL.Path == "/api/media/mix" {
+		if r.URL.Path == "/api/apk" || r.URL.Path == "/api/media/mix" || r.URL.Path == "/api/media/live_radio" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -1288,29 +1289,40 @@ func requestBaseURL(r *http.Request) string {
 	return scheme + "://" + r.Host
 }
 
-func (s *Server) handleMediaMix(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+func validateMixSessionDir(w http.ResponseWriter, r *http.Request) (string, bool) {
 	sessionID := strings.TrimSpace(r.URL.Query().Get("session"))
-	fileName := strings.TrimSpace(r.URL.Query().Get("file"))
 	sig := strings.TrimSpace(r.URL.Query().Get("sig"))
-
-	if !reMixSessionID.MatchString(sessionID) || !reMixChunkFile.MatchString(fileName) || sig == "" {
+	if !reMixSessionID.MatchString(sessionID) || sig == "" {
 		http.Error(w, "Paramètres de mix invalides", http.StatusBadRequest)
-		return
+		return "", false
 	}
 
 	sessionDir := filepath.Join("/tmp/pixel_openaudio_mix", sessionID)
 	tokenBytes, err := os.ReadFile(filepath.Join(sessionDir, "mix_token.txt"))
 	if err != nil {
 		http.Error(w, "Session mix introuvable", http.StatusNotFound)
-		return
+		return "", false
 	}
 	expectedSig := strings.TrimSpace(string(tokenBytes))
 	if expectedSig == "" || subtle.ConstantTimeCompare([]byte(sig), []byte(expectedSig)) != 1 {
 		http.Error(w, "Non autorisé", http.StatusUnauthorized)
+		return "", false
+	}
+	return sessionDir, true
+}
+
+func (s *Server) handleMediaMix(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	fileName := strings.TrimSpace(r.URL.Query().Get("file"))
+	if !reMixChunkFile.MatchString(fileName) {
+		http.Error(w, "Paramètres de mix invalides", http.StatusBadRequest)
+		return
+	}
+	sessionDir, ok := validateMixSessionDir(w, r)
+	if !ok {
 		return
 	}
 
@@ -1325,6 +1337,154 @@ func (s *Server) handleMediaMix(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "audio/flac")
 	}
 	http.ServeFile(w, r, targetPath)
+}
+
+func findMixChunkReady(sessionDir string, idx int) (string, bool) {
+	for _, ext := range []string{"flac", "mp3", "wav"} {
+		cand := filepath.Join(sessionDir, fmt.Sprintf("part_%03d.%s", idx, ext))
+		if _, errReady := os.Stat(cand + ".ready"); errReady == nil {
+			if _, errFile := os.Stat(cand); errFile == nil {
+				return cand, true
+			}
+		}
+	}
+	return "", false
+}
+
+// handleLiveRadioMix streams all OpenAudio DJ mix segments through a single persistent
+// MP3 encoder pipe so mobile clients receive an unbroken gapless audio/mpeg radio stream.
+func (s *Server) handleLiveRadioMix(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	sessionDir, ok := validateMixSessionDir(w, r)
+	if !ok {
+		return
+	}
+
+	w.Header().Set("Content-Type", "audio/mpeg")
+	w.Header().Set("Accept-Ranges", "none")
+	w.Header().Set("Cache-Control", "no-cache, no-store")
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
+	cmdEncode := exec.CommandContext(ctx,
+		"ffmpeg", "-v", "error",
+		"-f", "s16le", "-ar", "44100", "-ac", "2", "-i", "pipe:0",
+		"-c:a", "libmp3lame", "-b:a", "256k", "-flush_packets", "1",
+		"-f", "mp3", "pipe:1",
+	)
+	encodeStdin, errIn := cmdEncode.StdinPipe()
+	if errIn != nil {
+		http.Error(w, "Erreur encodeur audio", http.StatusInternalServerError)
+		return
+	}
+	encodeStdout, errOut := cmdEncode.StdoutPipe()
+	if errOut != nil {
+		http.Error(w, "Erreur sortie audio", http.StatusInternalServerError)
+		return
+	}
+	if errStart := cmdEncode.Start(); errStart != nil {
+		http.Error(w, "Impossible de démarrer ffmpeg", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	flusher, canFlush := w.(http.Flusher)
+
+	pumpDone := make(chan struct{})
+	go func() {
+		defer close(pumpDone)
+		buf := make([]byte, 16384)
+		for {
+			n, errRead := encodeStdout.Read(buf)
+			if n > 0 {
+				if _, errWrite := w.Write(buf[:n]); errWrite != nil {
+					cancel()
+					return
+				}
+				if canFlush {
+					flusher.Flush()
+				}
+			}
+			if errRead != nil {
+				return
+			}
+		}
+	}()
+
+	stopFile := filepath.Join(sessionDir, "stop.txt")
+	doneFile := filepath.Join(sessionDir, "done.txt")
+	consumedTmp := filepath.Join(sessionDir, "consumed_pos.txt.tmp")
+	consumedFile := filepath.Join(sessionDir, "consumed_pos.txt")
+
+	for idx := 0; ; idx++ {
+		if ctx.Err() != nil {
+			break
+		}
+		if _, errStop := os.Stat(stopFile); errStop == nil {
+			break
+		}
+
+		chunkPath := ""
+		waitDeadline := time.Now().Add(90 * time.Second)
+		for time.Now().Before(waitDeadline) {
+			if ctx.Err() != nil {
+				break
+			}
+			if _, errStop := os.Stat(stopFile); errStop == nil {
+				break
+			}
+			if foundPath, ready := findMixChunkReady(sessionDir, idx); ready {
+				chunkPath = foundPath
+				break
+			}
+			if _, errDone := os.Stat(doneFile); errDone == nil {
+				if foundPath, ready := findMixChunkReady(sessionDir, idx); ready {
+					chunkPath = foundPath
+				}
+				break
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(150 * time.Millisecond):
+			}
+		}
+		if chunkPath == "" {
+			break
+		}
+
+		if errWritePos := os.WriteFile(consumedTmp, []byte(fmt.Sprintf("%d", idx)), 0644); errWritePos == nil {
+			_ = os.Rename(consumedTmp, consumedFile)
+		}
+
+		cmdDec := exec.CommandContext(ctx,
+			"ffmpeg", "-v", "error", "-i", chunkPath,
+			"-f", "s16le", "-ar", "44100", "-ac", "2", "pipe:1",
+		)
+		decStdout, errDecPipe := cmdDec.StdoutPipe()
+		if errDecPipe != nil {
+			break
+		}
+		if errDecStart := cmdDec.Start(); errDecStart != nil {
+			break
+		}
+		_, errCopy := io.Copy(encodeStdin, decStdout)
+		_ = cmdDec.Wait()
+		if errCopy != nil || ctx.Err() != nil {
+			break
+		}
+	}
+
+	_ = encodeStdin.Close()
+	<-pumpDone
+	_ = cmdEncode.Wait()
 }
 
 // handleLocalModels proxies the /v1/models call to the configured local server

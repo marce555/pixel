@@ -8,7 +8,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -482,5 +484,66 @@ func TestHandleMediaMix_TokenValidation(t *testing.T) {
 	}
 	if ct := recOK.Header().Get("Content-Type"); ct != "audio/mpeg" {
 		t.Fatalf("Content-Type = %q, want audio/mpeg", ct)
+	}
+}
+
+func TestHandleLiveRadioMix_ContinuousStreamAndAuth(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+
+	sessionID := "feedface5678"
+	sessionDir := filepath.Join("/tmp/pixel_openaudio_mix", sessionID)
+	if err := os.MkdirAll(sessionDir, 0755); err != nil {
+		t.Fatalf("mkdir sessionDir: %v", err)
+	}
+	defer os.RemoveAll(sessionDir)
+
+	if err := os.WriteFile(filepath.Join(sessionDir, "mix_token.txt"), []byte("live-radio-secret"), 0644); err != nil {
+		t.Fatalf("write mix_token: %v", err)
+	}
+
+	for idx, freq := range []string{"440", "880"} {
+		wavPath := filepath.Join(sessionDir, "part_00"+string(rune('0'+idx))+".wav")
+		cmd := exec.Command("ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "sine=frequency="+freq+":duration=0.35:sample_rate=44100", "-ac", "2", wavPath)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("generate test wav %d: %v (%s)", idx, err, string(out))
+		}
+		if err := os.WriteFile(wavPath+".ready", []byte("ok"), 0644); err != nil {
+			t.Fatalf("write ready %d: %v", idx, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(sessionDir, "done.txt"), []byte("done"), 0644); err != nil {
+		t.Fatalf("write done.txt: %v", err)
+	}
+
+	srv := &Server{}
+
+	// Unauthorized signature rejected
+	recBad := httptest.NewRecorder()
+	srv.handleLiveRadioMix(recBad, httptest.NewRequest(http.MethodGet, "/api/media/live_radio?session="+sessionID+"&sig=bad", nil))
+	if recBad.Code != http.StatusUnauthorized {
+		t.Fatalf("bad sig status = %d, want 401", recBad.Code)
+	}
+
+	// Valid request streams unbroken continuous MP3 combining both parts
+	recOK := httptest.NewRecorder()
+	srv.handleLiveRadioMix(recOK, httptest.NewRequest(http.MethodGet, "/api/media/live_radio?session="+sessionID+"&sig=live-radio-secret", nil))
+	if recOK.Code != http.StatusOK {
+		t.Fatalf("live_radio status = %d, want 200", recOK.Code)
+	}
+	if ct := recOK.Header().Get("Content-Type"); ct != "audio/mpeg" {
+		t.Fatalf("Content-Type = %q, want audio/mpeg", ct)
+	}
+	if ar := recOK.Header().Get("Accept-Ranges"); ar != "none" {
+		t.Fatalf("Accept-Ranges = %q, want none", ar)
+	}
+	if recOK.Body.Len() < 4000 {
+		t.Fatalf("expected non-empty continuous MP3 stream, got %d bytes", recOK.Body.Len())
+	}
+
+	consumedBytes, errCons := os.ReadFile(filepath.Join(sessionDir, "consumed_pos.txt"))
+	if errCons != nil || strings.TrimSpace(string(consumedBytes)) != "1" {
+		t.Fatalf("consumed_pos.txt = %q (err=%v), want 1", string(consumedBytes), errCons)
 	}
 }

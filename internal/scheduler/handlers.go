@@ -151,24 +151,49 @@ func NewPlayMusicHandler(resolver MusicResolver, s *Scheduler) TaskHandler {
 			var finalStreamURL string
 			durationSec := 240 // Valeur par défaut : 4 minutes
 
+			isLiveMix := isOpenAudioMix && strings.Contains(targetURL, "/api/media/live_radio")
 			if isOpenAudioMix && isDirect && (strings.HasPrefix(targetURL, "http://") || strings.HasPrefix(targetURL, "https://")) {
-				localChunkPath := strings.TrimPrefix(task.Payload, "openaudio_mix:")
-				readyPath := localChunkPath + ".ready"
-				deadline := time.Now().Add(90 * time.Second)
-				for time.Now().Before(deadline) {
-					if _, errReady := os.Stat(readyPath); errReady == nil {
-						break
+				localPayloadPath := strings.TrimPrefix(task.Payload, "openaudio_mix:")
+				if isLiveMix {
+					sessionDir := localPayloadPath
+					defer func() {
+						if sessionDir != "" {
+							_ = os.WriteFile(filepath.Join(sessionDir, "stop.txt"), []byte("stop"), 0644)
+						}
+					}()
+					readyDeadline := time.Now().Add(90 * time.Second)
+					for time.Now().Before(readyDeadline) {
+						_, errFlac := os.Stat(filepath.Join(sessionDir, "part_000.flac.ready"))
+						_, errMp3 := os.Stat(filepath.Join(sessionDir, "part_000.mp3.ready"))
+						if errFlac == nil || errMp3 == nil {
+							break
+						}
+						select {
+						case <-ctx.Done():
+							return ctx.Err()
+						case <-time.After(200 * time.Millisecond):
+						}
 					}
-					select {
-					case <-ctx.Done():
-						return ctx.Err()
-					case <-time.After(250 * time.Millisecond):
+					finalStreamURL = targetURL
+					durationSec = 0
+				} else {
+					readyPath := localPayloadPath + ".ready"
+					deadline := time.Now().Add(90 * time.Second)
+					for time.Now().Before(deadline) {
+						if _, errReady := os.Stat(readyPath); errReady == nil {
+							break
+						}
+						select {
+						case <-ctx.Done():
+							return ctx.Err()
+						case <-time.After(250 * time.Millisecond):
+						}
 					}
-				}
-				finalStreamURL = targetURL
-				if durOut, errDur := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", localChunkPath).Output(); errDur == nil {
-					if durFloat, errParse := strconv.ParseFloat(strings.TrimSpace(string(durOut)), 64); errParse == nil && durFloat > 0 {
-						durationSec = int(durFloat)
+					finalStreamURL = targetURL
+					if durOut, errDur := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", localPayloadPath).Output(); errDur == nil {
+						if durFloat, errParse := strconv.ParseFloat(strings.TrimSpace(string(durOut)), 64); errParse == nil && durFloat > 0 {
+							durationSec = int(durFloat)
+						}
 					}
 				}
 			} else {
@@ -227,7 +252,9 @@ func NewPlayMusicHandler(resolver MusicResolver, s *Scheduler) TaskHandler {
 			task.AppendLog(fmt.Sprintf("Flux audio transmis au smartphone (%ds). En attente de fin de lecture...", durationSec))
 
 			maxWait := time.Duration(durationSec+15) * time.Second
-			if maxWait < 30*time.Second {
+			if isLiveMix {
+				maxWait = 12 * time.Hour
+			} else if maxWait < 30*time.Second {
 				maxWait = 4 * time.Minute
 			}
 

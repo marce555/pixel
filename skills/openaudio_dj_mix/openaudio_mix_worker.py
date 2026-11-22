@@ -69,6 +69,7 @@ def main():
         return
     session_dir = sys.argv[1]
     batch_mode = "--batch" in sys.argv[2:]
+    live_stream = "--live-stream" in sys.argv[2:]
     plan_path = os.path.join(session_dir, "plan.json")
     if not os.path.exists(plan_path):
         return
@@ -91,11 +92,21 @@ def main():
     last_singel = None
     prev_energy = float(tracks[0].get("energy", 0.5)) if tracks else 0.5
 
+    stop_file = os.path.join(session_dir, "stop.txt")
+    consumed_file = os.path.join(session_dir, "consumed_pos.txt")
+    done_file = os.path.join(session_dir, "done.txt")
+
     if len(tracks) <= 1 and not continuous:
+        if live_stream:
+            try:
+                with open(done_file, "w", encoding="utf-8") as df:
+                    df.write("done")
+            except Exception:
+                pass
         return
 
     sock_path = ""
-    if not batch_mode:
+    if (not batch_mode) and (not live_stream):
         sock_path = wait_for_ipc_socket(session_dir, timeout_sec=60.0)
         if not sock_path:
             return
@@ -109,6 +120,7 @@ def main():
     cleanup_idx = 0
     idx = 1
     mpv_alive = True
+    live_start_ts = time.time()
 
     while True:
         if batch_mode and idx >= min(len(tracks), 6):
@@ -116,7 +128,38 @@ def main():
         if not continuous and idx >= len(tracks):
             break
 
-        if not batch_mode:
+        if live_stream:
+            # Wait cleanly until Go's /api/media/live_radio consumer reaches within 2 chunks
+            while True:
+                if os.path.exists(stop_file) or not os.path.isdir(session_dir):
+                    mpv_alive = False
+                    break
+                pos = 0
+                if os.path.exists(consumed_file):
+                    try:
+                        with open(consumed_file, "r", encoding="utf-8") as cf:
+                            pos = int(cf.read().strip() or "0")
+                    except Exception:
+                        pos = 0
+                elif (idx - 0) > 2 and (time.time() - live_start_ts) > 180.0:
+                    # Client never connected within 3 minutes
+                    mpv_alive = False
+                    break
+                while cleanup_idx <= pos - 2:
+                    old_chunk = os.path.join(session_dir, f"part_{cleanup_idx:03d}.{ext}")
+                    for p_rm in (old_chunk, old_chunk + ".ready"):
+                        if os.path.exists(p_rm):
+                            try:
+                                os.remove(p_rm)
+                            except OSError:
+                                pass
+                    cleanup_idx += 1
+                if (idx - pos) <= 2:
+                    break
+                time.sleep(1.0)
+            if not mpv_alive:
+                break
+        elif not batch_mode:
             if not os.path.exists(sock_path):
                 mpv_alive = False
                 break
@@ -417,7 +460,7 @@ def main():
             idx += 1
             continue
 
-        if not batch_mode:
+        if not batch_mode and not live_stream:
             if not os.path.exists(sock_path):
                 mpv_alive = False
                 break
@@ -432,13 +475,24 @@ def main():
     if batch_mode:
         return
 
-    # Wait while mpv is still active, then preserve worker.log and clean up temporary mix files
-    while mpv_alive and os.path.exists(sock_path):
+    if live_stream:
         try:
-            mpv_ipc_call(sock_path, {"command": ["get_property", "pid"]})
-            time.sleep(5.0)
+            with open(done_file, "w", encoding="utf-8") as df:
+                df.write("done")
         except Exception:
-            break
+            pass
+        # Wait while Go live_radio finishes streaming remaining buffered chunks or task stops
+        deadline = time.time() + 1800.0
+        while mpv_alive and os.path.isdir(session_dir) and not os.path.exists(stop_file) and time.time() < deadline:
+            time.sleep(2.0)
+    else:
+        # Wait while mpv is still active, then preserve worker.log and clean up temporary mix files
+        while mpv_alive and os.path.exists(sock_path):
+            try:
+                mpv_ipc_call(sock_path, {"command": ["get_property", "pid"]})
+                time.sleep(5.0)
+            except Exception:
+                break
 
     try:
         wlog_path = os.path.join(session_dir, "worker.log")

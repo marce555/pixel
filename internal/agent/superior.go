@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -4699,32 +4698,18 @@ func (a *SuperiorAgent) handleOpenAudioMixDirect(ctx context.Context, input stri
 			baseURL = "http://127.0.0.1:8080"
 		}
 		streamBaseURL := mediaMixStreamBaseURL(baseURL)
-		maxParts := mixData.TrackCount
-		if maxParts > 6 {
-			maxParts = 6
-		}
-		for i := 0; i < maxParts; i++ {
-			fileName := fmt.Sprintf("part_%03d.mp3", i)
-			localChunk := filepath.Join(mixData.SessionDir, fileName)
-			streamURL := fmt.Sprintf("%s/api/media/mix?session=%s&file=%s&sig=%s",
-				streamBaseURL,
-				url.QueryEscape(mixData.SessionID),
-				url.QueryEscape(fileName),
-				url.QueryEscape(mixData.MixToken),
-			)
-			partLabel := label
-			if i < len(mixData.Tracks) {
-				tr := mixData.Tracks[i]
-				partLabel = fmt.Sprintf("🎧 Mix OpenAudio #%d : %s (%.0f BPM · %s)", tr.Index, tr.Title, tr.BPM, tr.Camelot)
-			}
-			t := a.scheduler.EnqueueWithDevice("play_music", partLabel, "openaudio_mix:"+localChunk, 0, targetDevice)
-			if t != nil {
-				t.ResolvedURL = streamURL
-				t.ResolvedTitle = partLabel
-				t.IsDirect = true
-				if i == 0 && mixData.Announcement != "" {
-					t.SetAnnouncement(mixData.Announcement)
-				}
+		streamURL := fmt.Sprintf("%s/api/media/live_radio?session=%s&sig=%s",
+			streamBaseURL,
+			url.QueryEscape(mixData.SessionID),
+			url.QueryEscape(mixData.MixToken),
+		)
+		t := a.scheduler.EnqueueWithDevice("play_music", label, "openaudio_mix:"+mixData.SessionDir, 0, targetDevice)
+		if t != nil {
+			t.ResolvedURL = streamURL
+			t.ResolvedTitle = label
+			t.IsDirect = true
+			if mixData.Announcement != "" {
+				t.SetAnnouncement(mixData.Announcement)
 			}
 		}
 	} else {

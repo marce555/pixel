@@ -138,7 +138,7 @@ def build_and_start_mix(
         max_tracks=initial_count,
         start_track_hint=start_track_hint,
     )
-    continuous = (requested_count is None) and (not android_mode) and (len(ordered_tracks) > 1)
+    continuous = (requested_count is None) and (len(ordered_tracks) > 1)
 
     apertura_audio = None
     if concierto_mode:
@@ -153,8 +153,10 @@ def build_and_start_mix(
     session_dir = os.path.join(MIX_BASE_TMP, session_id)
     os.makedirs(session_dir, exist_ok=True)
 
-    audio_format = "mp3" if android_mode else "flac"
-    ext = "mp3" if android_mode else "flac"
+    # Lossless FLAC chunks eliminate per-part MP3 encoder padding & double-transcoding;
+    # Android streams via /api/media/live_radio (single unbroken MP3 stream on Go side).
+    audio_format = "flac"
+    ext = "flac"
 
     # Generate an unguessable per-session token if Android streams via /api/media/mix
     mix_token = secrets.token_urlsafe(24)
@@ -254,7 +256,7 @@ def build_and_start_mix(
     if len(ordered_tracks) > 1 or continuous:
         worker_args = [VENV_PYTHON if os.path.exists(VENV_PYTHON) else sys.executable, worker_script, session_dir]
         if android_mode:
-            worker_args.append("--batch")
+            worker_args.append("--live-stream")
         worker_log_path = os.path.join(session_dir, "worker.log")
         wlog = open(worker_log_path, "a", encoding="utf-8")
         subprocess.Popen(
